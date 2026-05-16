@@ -258,8 +258,15 @@ android-apk:
       if [ ! -d "$ANDROID_SDK_ROOT/platforms/android-${ANDROID_PLATFORM}" ] \
          || [ ! -d "$ANDROID_SDK_ROOT/build-tools/${ANDROID_BUILD_TOOLS}" ]; then
         echo "Installing SDK platform-${ANDROID_PLATFORM} + build-tools ${ANDROID_BUILD_TOOLS} (cache miss)…"
-        yes | sdkmanager --licenses >/dev/null
-        sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}" >/dev/null
+        # Pre-accept Google's SDK licenses by writing the well-known
+        # license-hash files directly. This avoids `yes | sdkmanager
+        # --licenses` which dies on SIGPIPE under set -o pipefail and was
+        # failing silently. Hashes are public — same values every Android
+        # Docker image uses.
+        mkdir -p "$ANDROID_SDK_ROOT/licenses"
+        printf '\n8933bad161af4178b1185d1a37fbf41ea5269c55\nd56f5187479451eabf01fb78af6dfcb131a6481e\n24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$ANDROID_SDK_ROOT/licenses/android-sdk-license"
+        printf '\n84831b9409646a918e30573bab4c9c91346d8abd\n' > "$ANDROID_SDK_ROOT/licenses/android-sdk-preview-license"
+        sdkmanager "platform-tools" "platforms;android-${ANDROID_PLATFORM}" "build-tools;${ANDROID_BUILD_TOOLS}"
       else
         echo "Reusing cached SDK platform-${ANDROID_PLATFORM} + build-tools ${ANDROID_BUILD_TOOLS}."
       fi
