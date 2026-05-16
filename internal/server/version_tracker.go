@@ -77,13 +77,14 @@ func fetchLatestReleaseVersion(parent context.Context) (string, error) {
 		log.Printf("[version] gitlab: %v", glErr)
 	}
 
-	best := ghVer
+	best, source := ghVer, "github"
 	if best == "" || (glVer != "" && updatepkg.IsNewer(glVer, best)) {
-		best = glVer
+		best, source = glVer, "gitlab"
 	}
 	if best == "" {
 		return "", fmt.Errorf("no mirror returned a release version")
 	}
+	log.Printf("[version] latest=%s source=%s (github=%q gitlab=%q)", best, source, ghVer, glVer)
 	return best, nil
 }
 
