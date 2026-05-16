@@ -1102,12 +1102,14 @@ func (s *Server) checkLatestVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("no config")
 	}
 
-	// Use resolver bank; fall back to per-profile resolvers.
+	// Match the regular fetcher: selected active list, then bank, then cfg.
 	resolvers := cfg.Resolvers
 	var debug bool
 	if pl, plErr := s.loadProfiles(); plErr == nil {
 		debug = pl.Debug
-		if len(pl.ResolverBank) > 0 {
+		if list := findList(pl, pl.SelectedList); list != nil && len(list.Resolvers) > 0 {
+			resolvers = list.Resolvers
+		} else if len(pl.ResolverBank) > 0 {
 			resolvers = pl.ResolverBank
 		}
 	}
