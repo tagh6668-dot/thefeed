@@ -131,18 +131,21 @@ type ProfileList struct {
 	Scatter   int     `json:"scatter,omitempty"`   // resolvers per block
 	Timeout   float64 `json:"timeout,omitempty"`   // DNS query timeout (s)
 
-	// ResolverCacheShare makes content queries deterministic so multiple
-	// users of the same server can share public DNS resolver caches.
-	// Default off until field-tested.
-	ResolverCacheShare bool `json:"resolverCacheShare,omitempty"`
+	// ResolverCacheShare gates the shared-resolver-cache feature. Pointer
+	// (not plain bool) so we can tell "user never set it" (nil → default
+	// on) apart from "user explicitly disabled" (false). New installs and
+	// upgrades from before this field existed get the feature on; an
+	// explicit opt-out persists across restarts.
+	ResolverCacheShare *bool `json:"resolverCacheShare,omitempty"`
 }
 
 // ShareEnabled returns whether the shared-resolver-cache feature is on.
+// Default is on; only an explicit *false disables it.
 func (pl *ProfileList) ShareEnabled() bool {
-	if pl == nil {
-		return false
+	if pl == nil || pl.ResolverCacheShare == nil {
+		return true
 	}
-	return pl.ResolverCacheShare
+	return *pl.ResolverCacheShare
 }
 
 // Defaults for the connection settings exposed on the settings page.
@@ -2983,7 +2986,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			pl.Timeout = *req.Timeout
 		}
 		if req.ResolverCacheShare != nil {
-			pl.ResolverCacheShare = *req.ResolverCacheShare
+			v := *req.ResolverCacheShare
+			pl.ResolverCacheShare = &v
 		}
 		if err := s.saveProfiles(pl); err != nil {
 			http.Error(w, fmt.Sprintf("save: %v", err), 500)

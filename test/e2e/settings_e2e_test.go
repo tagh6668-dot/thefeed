@@ -229,26 +229,26 @@ func TestE2E_Settings_ConnectionRoundTrip(t *testing.T) {
 	}
 }
 
-// /api/settings round-trips resolverCacheShare. Default is false; explicit
-// opt-in persists as true.
+// /api/settings round-trips resolverCacheShare. Default is true (feature
+// on); explicit opt-out must persist as false.
 func TestE2E_Settings_ResolverCacheShareToggle(t *testing.T) {
 	base, _ := startWebServer(t)
 
 	resp := getJSON(t, base+"/api/settings")
 	defer resp.Body.Close()
 	m := decodeJSON(t, resp)
-	if got, _ := m["resolverCacheShare"].(bool); got {
-		t.Errorf("default resolverCacheShare = %v, want false", m["resolverCacheShare"])
+	if got, ok := m["resolverCacheShare"].(bool); !ok || !got {
+		t.Errorf("default resolverCacheShare = %v, want true", m["resolverCacheShare"])
 	}
 
-	r2 := postJSON(t, base+"/api/settings", `{"resolverCacheShare":true}`)
+	r2 := postJSON(t, base+"/api/settings", `{"resolverCacheShare":false}`)
 	r2.Body.Close()
 
 	resp2 := getJSON(t, base+"/api/settings")
 	defer resp2.Body.Close()
 	m2 := decodeJSON(t, resp2)
-	if got, _ := m2["resolverCacheShare"].(bool); !got {
-		t.Errorf("after opt-in: resolverCacheShare = %v, want true", m2["resolverCacheShare"])
+	if got, _ := m2["resolverCacheShare"].(bool); got {
+		t.Errorf("after opt-out: resolverCacheShare = %v, want false", m2["resolverCacheShare"])
 	}
 }
 
