@@ -120,8 +120,9 @@ build:
     - ext=""
     - if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
     # Embed PE version info so heuristic AV stops flagging the .exe.
-    # go run avoids the install-path / PATH guessing that breaks on
-    # CI images with non-default GOPATH/GOBIN.
+    # go run is wrapped in a subshell that unsets GOOS/GOARCH so the
+    # tool itself is built for the host (Linux), not cross-compiled
+    # to Windows along with the target binary.
     - |
       if [ "$GOOS" = "windows" ]; then
         GVI="github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0"
@@ -131,10 +132,13 @@ build:
         V_MIN=$(echo "$NUM_ONLY" | awk -F. '{print $2+0}')
         V_PATCH=$(echo "$NUM_ONLY" | awk -F. '{print $3+0}')
         for d in cmd/server cmd/client; do
-          (cd "$d" && go run "$GVI" \
-            -ver-major="$V_MAJ" -ver-minor="$V_MIN" -ver-patch="$V_PATCH" \
-            -product-version="$VER_NUM" -file-version="$VER_NUM" \
-            -o resource_windows_amd64.syso versioninfo.json)
+          (
+            unset GOOS GOARCH
+            cd "$d" && go run "$GVI" \
+              -ver-major="$V_MAJ" -ver-minor="$V_MIN" -ver-patch="$V_PATCH" \
+              -product-version="$VER_NUM" -file-version="$VER_NUM" \
+              -o resource_windows_amd64.syso versioninfo.json
+          )
         done
       fi
     - SERVER_LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
