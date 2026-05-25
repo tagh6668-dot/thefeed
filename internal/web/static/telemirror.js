@@ -629,21 +629,28 @@
     }
   }
 
-  // Strip HTML and decode common entities for the copy button.
+  // Strip HTML and decode all entities for the copy button.
+  // Routes through a detached <div> so the browser handles every
+  // entity form: named (&quot;), decimal (&#34;), hex (&#x22;). The
+  // previous hand-rolled regex decoder only knew the named forms,
+  // so JSON-heavy posts (full of " chars that Go's html.Render emits
+  // as &#34;) copied as "&#34;_comment&#34;:" gibberish.
+  //
+  // The <br> / </p> / </div> / </li> pre-pass keeps block-level
+  // breaks as newlines — without it, paragraphs run together because
+  // textContent doesn't insert whitespace at element boundaries.
+  //
+  // Safe even though we set innerHTML on a fragment: the element is
+  // detached, scripts aren't executed by spec, and the input is the
+  // same HTML we already inject into the live DOM via tm-post-text.
   function tmPostPlainText(p) {
     if (!p.text) return '';
     var s = String(p.text)
       .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li)>/gi, '\n')
-      .replace(/<[^>]+>/g, '');
-    return s
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .trim();
+      .replace(/<\/(p|div|li)>/gi, '\n');
+    var tmp = document.createElement('div');
+    tmp.innerHTML = s;
+    return (tmp.textContent || tmp.innerText || '').trim();
   }
 
   // Render one media tile based on its type.
