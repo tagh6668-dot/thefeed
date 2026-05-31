@@ -20,6 +20,21 @@ DNS-based feed reader for Telegram channels and public X accounts. Designed for 
 
 Public configs to test with: [@thefeedconfig](https://t.me/thefeedconfig).
 
+## Screenshots
+
+<table align="center">
+<tr>
+<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="Main feed"><br><sub>Main feed</sub></td>
+<td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>Reading a post</sub></td>
+<td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screenshots/scanner.jpg" width="170" alt="Resolver scanner"><br><sub>Resolver scanner</sub></td>
+<td align="center"><img src="docs/screenshots/resolver-bank.jpg" width="170" alt="Resolver bank"><br><sub>Resolver bank</sub></td>
+<td align="center"><img src="docs/screenshots/settings.jpg" width="170" alt="Settings"><br><sub>Settings</sub></td>
+</tr>
+</table>
+
 ## How It Works
 
 ```

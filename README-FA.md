@@ -30,6 +30,23 @@ sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts
 
 ---
 
+## تصاویر
+
+<table align="center">
+<tr>
+<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="فید اصلی"><br><sub>فید اصلی</sub></td>
+<td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="خواندن پست"><br><sub>خواندن پست</sub></td>
+<td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="تله‌میرور"><br><sub>تله‌میرور</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screenshots/scanner.jpg" width="170" alt="اسکنر ریزالور"><br><sub>اسکنر ریزالور</sub></td>
+<td align="center"><img src="docs/screenshots/resolver-bank.jpg" width="170" alt="بانک ریزالور"><br><sub>بانک ریزالور</sub></td>
+<td align="center"><img src="docs/screenshots/settings.jpg" width="170" alt="تنظیمات"><br><sub>تنظیمات</sub></td>
+</tr>
+</table>
+
+---
+
 ## thefeed چیست؟
 
 thefeed یک سیستم تونل DNS است که به شما اجازه می‌دهد پیام‌های کانال‌های تلگرام را حتی وقتی تلگرام و اینترنت فیلتر شده، بخوانید. تنها چیزی که نیاز دارید **DNS** است — که تقریباً هیچ‌وقت مسدود نمی‌شود.
