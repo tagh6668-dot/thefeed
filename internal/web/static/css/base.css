@@ -23,6 +23,28 @@
       display: block;
     }
 
+    /* Standalone icon buttons render at ONE consistent size (Apple toolbar
+       icons share a fixed optical size, not one scaled per control). Icons
+       that sit inline with a text label keep the 1.15em default above so they
+       track the label. Tiny by-design glyphs (⋮ row menu, ⓘ help) are left
+       out — a 22px icon can't fit their 16–18px buttons. */
+    .icon-btn[data-icon] .icon svg,
+    .back-btn .icon svg,
+    .send-btn .icon svg,
+    .scroll-down-btn .icon svg,
+    .tm-back .icon svg,
+    .tm-menu .icon svg,
+    .tm-refresh .icon svg,
+    .tm-scroll-down .icon svg,
+    .ch-pin .icon svg,
+    .ch-autoupdate .icon svg,
+    .rb-row-btn .icon svg,
+    .media-action-icon .icon svg,
+    .media-file-btn .icon svg {
+      width: var(--icon-size);
+      height: var(--icon-size);
+    }
+
     :root {
       --bg: #17212b;
       --bg2: #0e1621;
@@ -91,6 +113,8 @@
       --shadow-lg: 0 8px 30px rgba(0, 0, 0, .5);
       /* Hit target (HIG minimum 44pt) */
       --hit: 44px;
+      /* Standalone toolbar/nav icon size (consistent optical size) */
+      --icon-size: 22px;
       /* Focus ring */
       --focus-ring: 0 0 0 2px var(--bg2), 0 0 0 4px var(--accent);
     }
