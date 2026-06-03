@@ -183,3 +183,26 @@
     select {
       font-family: inherit
     }
+
+    /* ----- Global keyboard focus (HIG: always-visible focus) ----- */
+    :where(button, a, input, select, textarea, [role="button"], [tabindex]):focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    /* ----- Minimum 44px hit area for small icon buttons, without
+       changing their visual size: a centered transparent overlay. ----- */
+    .rb-row-btn, .rtab-menu-btn, .help-toggle, .ch-pin {
+      position: relative;
+    }
+
+    .rb-row-btn::before, .rtab-menu-btn::before,
+    .help-toggle::before, .ch-pin::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: var(--hit);
+      height: var(--hit);
+      transform: translate(-50%, -50%);
+    }
