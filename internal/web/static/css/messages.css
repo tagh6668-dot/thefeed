@@ -17,11 +17,11 @@
       transform: translateX(-50%);
       z-index: 50;
       padding: 4px 12px;
-      border-radius: 12px;
+      border-radius: var(--radius-xl);
       background: color-mix(in oklab, var(--bg-elevated, var(--bg)) 75%, transparent);
       color: var(--text);
       border: 1px solid var(--border);
-      font-size: 11px;
+      font-size: var(--text-2xs);
       font-weight: 500;
       backdrop-filter: blur(8px);
       box-shadow: 0 1px 3px rgba(0, 0, 0, .08);
@@ -38,34 +38,34 @@
     .msg-date-sep {
       text-align: center;
       padding: 8px 0;
-      font-size: 12px;
+      font-size: var(--text-xs);
       color: var(--text-dim)
     }
 
     .msg-date-sep span {
       background: rgba(0, 0, 0, .3);
       padding: 3px 10px;
-      border-radius: 10px
+      border-radius: var(--radius-lg)
     }
 
     .msg-gap-sep {
       text-align: center;
       padding: 6px 0;
-      font-size: 11px;
+      font-size: var(--text-2xs);
       color: var(--error)
     }
 
     .msg-gap-sep span {
       background: rgba(229, 57, 53, .12);
       padding: 3px 10px;
-      border-radius: 10px;
+      border-radius: var(--radius-lg);
       border: 1px dashed rgba(229, 57, 53, .3)
     }
 
     .msg {
       max-width: min(82%, 580px);
       padding: 7px 10px 4px;
-      border-radius: 12px;
+      border-radius: var(--radius-xl);
       line-height: 1.7;
       word-break: break-word;
       white-space: pre-wrap;
@@ -101,7 +101,7 @@
       letter-spacing: 0.5px;
       padding: 1px 7px;
       margin-bottom: 4px;
-      border-radius: 6px;
+      border-radius: var(--radius-sm);
       background: rgba(255, 255, 255, 0.18);
       color: #fff
     }
@@ -133,10 +133,10 @@
     .media-tag {
       display: block;
       padding: 2px 6px;
-      border-radius: 4px;
+      border-radius: var(--radius-xs);
       background: rgba(51, 144, 236, .15);
       color: var(--accent);
-      font-size: 11px;
+      font-size: var(--text-2xs);
       margin-bottom: 6px
     }
 
@@ -148,7 +148,7 @@
     /* ===== DOWNLOADABLE MEDIA CARDS ===== */
     .media-card {
       margin-bottom: 6px;
-      border-radius: 10px;
+      border-radius: var(--radius-lg);
       overflow: hidden
     }
 
@@ -201,12 +201,12 @@
       border-radius: 50%;
       background: rgba(0, 0, 0, .55);
       color: #fff;
-      font-size: 14px;
+      font-size: var(--text-base);
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: background .15s
+      transition: background var(--motion-fast) var(--ease)
     }
 
     .media-action-icon:hover {
@@ -225,7 +225,7 @@
       max-width: 280px;
       padding: 12px 14px;
       background: rgba(0, 0, 0, .6);
-      border-radius: 12px;
+      border-radius: var(--radius-xl);
       color: #fff;
       position: relative
     }
@@ -240,7 +240,7 @@
       border-radius: 50%;
       background: rgba(255, 255, 255, .15);
       color: #fff;
-      font-size: 16px;
+      font-size: var(--text-lg);
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -282,7 +282,7 @@
     .media-card.downloading .media-progress-bar-thin {
       height: 8px;
       margin-top: 6px;
-      border-radius: 4px;
+      border-radius: var(--radius-xs);
     }
 
     @keyframes media-prog-stripes {
@@ -358,7 +358,7 @@
       border-radius: 50%;
       background: rgba(255, 255, 255, .15);
       color: #fff;
-      font-size: 22px;
+      font-size: var(--text-3xl);
       cursor: pointer;
       display: flex;
       align-items: center;
@@ -377,11 +377,11 @@
       height: 32px;
       padding: 0 10px;
       border: none;
-      border-radius: 16px;
+      border-radius: var(--radius-2xl);
       background: rgba(255, 255, 255, .15);
       color: #fff;
       font-family: inherit;
-      font-size: 13px;
+      font-size: var(--text-sm);
       font-weight: 600;
       cursor: pointer;
       touch-action: manipulation;

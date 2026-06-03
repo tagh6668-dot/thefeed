@@ -234,10 +234,10 @@
   flex: 1;
   padding: 8px 14px;
   border: none;
-  border-radius: 18px;
+  border-radius: var(--radius-pill);
   background: var(--bg);
   color: var(--text);
-  font-size: 14px;
+  font-size: var(--text-base);
   outline: none;
   resize: none;
   max-height: 120px;
@@ -245,8 +245,8 @@
 }
 
 .send-btn {
-  width: 40px;
-  height: 40px;
+  width: var(--hit);
+  height: var(--hit);
   border: none;
   border-radius: 50%;
   background: var(--send-color);
