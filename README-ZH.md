@@ -2,7 +2,7 @@
 
 基于 DNS 的 Telegram 频道与公开 X 账号阅读器。专为只有 DNS 查询能通的网络环境而设计。
 
-[English](README.md) | [فارسی](README-FA.md) | 简体中文
+[English](README.md) | [فارسی](README-FA.md) | 简体中文 | [Русский](README-RU.md)
 
 ## 下载
 
@@ -103,7 +103,7 @@ optional caption
 
 目前已有两种中继：
 
-- **DNS 中继**(慢，默认开启)。字节拆分到 DNS 块中投递，可在被审查的网络中存活。默认上限 100 KB。
+- **DNS 中继**(慢，默认关闭)。字节拆分到 DNS 块中投递，可在被审查的网络中存活。默认上限 100 KB。
 - **GitHub 中继**(快，默认关闭)。字节上传到仓库，客户端走普通 HTTPS 拉取。需要带 `contents:write` 权限的 PAT。文件落到 `<repo>/<sanitised-domain>/<size>_<crc32>`，方便多个部署共用一个仓库。默认上限 15 MB。
 
 服务端参数 / 环境变量：
@@ -493,7 +493,7 @@ make clean       # 清理构建产物
 
 把 Go 客户端通过 gomobile 打包成 xcframework，由 `ios/` 下的 SwiftUI 应用消费。服务进程跑在 `127.0.0.1:<random-port>`；仅前台(iOS 不允许长时间后台服务)。
 
-macOS 上的依赖：Xcode 15+、Go 1.22+、gomobile。
+macOS 上的依赖：Xcode 15+、Go 1.26+、gomobile。
 
 ```
 go install golang.org/x/mobile/cmd/gomobile@latest

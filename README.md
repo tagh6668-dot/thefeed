@@ -2,7 +2,7 @@
 
 DNS-based feed reader for Telegram channels and public X accounts. Designed for environments where only DNS queries work.
 
-[English](README.md) | [فارسی](README-FA.md) | [简体中文](README-ZH.md)
+[English](README.md) | [فارسی](README-FA.md) | [简体中文](README-ZH.md) | [Русский](README-RU.md)
 
 ## Download
 
@@ -103,7 +103,7 @@ Each relay is independent — the same file can be served via DNS *and* GitHub *
 
 Two relays ship today:
 
-- **DNS relay** (slow, default on). Bytes are split into DNS blocks. Survives in censored networks. Default cap: 100 KB.
+- **DNS relay** (slow, off by default). Bytes are split into DNS blocks. Survives in censored networks. Default cap: 100 KB.
 - **GitHub relay** (fast, default off). Bytes are uploaded to a repo and pulled by clients over plain HTTPS. Needs a personal access token with `contents:write`. Files land at `<repo>/<sanitised-domain>/<size>_<crc32>` so multiple deployments can share one repo. Default cap: 15 MB.
 
 Block 0 of every DNS-cached file begins with a 16-byte protocol header — 4 bytes CRC32 of the (decompressed) content, 1 byte version, 1 byte compression, 10 bytes reserved. The remaining bytes are decompressed per the compression byte. Downloads are cached on the client (IndexedDB, 7 days) and on the local thefeed-client server (`<dataDir>/media-cache/`, 7 days). Concurrent downloads are limited and extra clicks are queued.
@@ -581,7 +581,7 @@ make clean       # Remove build artifacts
 
 Wraps the Go client as a gomobile-bound xcframework consumed by a SwiftUI app under `ios/`. Server runs in-process on `127.0.0.1:<random-port>`; foreground only (iOS does not allow long-lived background servers).
 
-Prereqs on macOS: Xcode 15+, Go 1.22+, gomobile.
+Prereqs on macOS: Xcode 15+, Go 1.26+, gomobile.
 
 ```
 go install golang.org/x/mobile/cmd/gomobile@latest
