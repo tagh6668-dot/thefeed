@@ -45,9 +45,10 @@
       height: var(--icon-size);
     }
 
-    /* RTL: the back buttons are repositioned by the layout flip, but the
-       SVG inside still points left — mirror it so "back" points right. */
-    [dir="rtl"] .back-btn .icon svg,
+    /* RTL: the telemirror back button is repositioned by the layout flip,
+       but the SVG inside still points left — mirror it so "back" points
+       right. The main chat .back-btn keeps its position in RTL, so its
+       arrow must NOT be flipped. */
     [dir="rtl"] .tm-back .icon svg {
       transform: scaleX(-1);
     }
