@@ -162,6 +162,9 @@ func (s *Server) checkLatestVersion(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create fetcher: %w", err)
 	}
+	if cfg.ServerKey != "" {
+		_ = fetcher.SetServerPublicKey(cfg.ServerKey)
+	}
 	qm, rl, sc, to := connectionSettings(pl)
 	if qm == "double" {
 		fetcher.SetQueryMode(protocol.QueryMultiLabel)

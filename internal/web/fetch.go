@@ -511,6 +511,13 @@ func (s *Server) refreshChannel(channelNum int) {
 			}
 			continue // retry with fresh metadata
 		}
+		if errors.Is(err, client.ErrExtraBlockInvalid) {
+			// The server signature didn't match — messages were rejected as a
+			// possible tamper. Surface a toast (client localises the key).
+			s.addLog(fmt.Sprintf("Channel %s: signature INVALID — messages rejected (check the server key)", ch.Name))
+			s.broadcast("event: toast\ndata: \"signature_invalid_toast\"\n\n")
+			return
+		}
 		if fetchCancel != nil && fetchCtx.Err() == context.DeadlineExceeded {
 			// nextFetch fired mid-download — wait for the server, then re-fetch.
 			fetchCancel()

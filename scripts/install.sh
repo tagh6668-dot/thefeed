@@ -789,6 +789,7 @@ show_usage() {
     echo -e "│  Update:    ${blue}curl -Ls URL | sudo bash${plain}                    │"
     echo -e "│  Uninstall: ${blue}curl -Ls URL | sudo bash -s -- --uninstall${plain}  │"
     echo -e "│  Re-login:  ${blue}curl -Ls URL | sudo bash -s -- --login${plain}      │"
+    echo -e "│  Config:    ${blue}curl -Ls URL | sudo bash -s -- --config${plain}     │"
     echo -e "│                                                         │"
     echo -e "│  ${red}⚠ NEVER share your passphrase publicly!${plain}                │"
     echo -e "│  ${red}Anyone with it can read ALL your messages.${plain}             │"
@@ -897,6 +898,33 @@ login_only() {
     systemctl restart thefeed-server || true
 }
 
+show_config() {
+    if [[ ! -f "$DATA_DIR/thefeed.env" ]]; then
+        echo -e "${red}Config not found. Run install first: bash install.sh${plain}"
+        exit 1
+    fi
+    if [[ ! -f "${INSTALL_DIR}/thefeed-server" ]]; then
+        echo -e "${red}Binary not found. Run install first: bash install.sh${plain}"
+        exit 1
+    fi
+    set -a
+    source "$DATA_DIR/thefeed.env"
+    set +a
+
+    echo -e "\n${green}═══════════════════════════════════════${plain}"
+    echo -e "${green}  Current server config (import URI)${plain}"
+    echo -e "${green}═══════════════════════════════════════${plain}"
+    # --print-config loads/generates the signing key under --data-dir and
+    # prints thefeed://domain/key?sk=<pubkey>&r=<bootstrap resolvers>.
+    "$INSTALL_DIR/thefeed-server" --print-config \
+        --data-dir "$DATA_DIR" \
+        --domain "$THEFEED_DOMAIN" \
+        --key "$THEFEED_KEY"
+    echo ""
+    echo -e "${yellow}Share this URI so others can import your feed.${plain}"
+    echo -e "${red}⚠ It contains your passphrase — anyone with it can read this feed.${plain}"
+}
+
 uninstall_thefeed() {
     echo -e "${yellow}Uninstalling thefeed...${plain}"
 
@@ -938,6 +966,7 @@ show_help() {
     echo -e "  ${green}--source <name>${plain}        Pick release mirror: github | gitlab | auto (default: auto)"
     echo -e "  ${green}--github${plain} / ${green}--gitlab${plain}     Shortcut for --source github / --source gitlab"
     echo -e "  ${green}--login${plain}                Re-authenticate with Telegram"
+    echo -e "  ${green}--config${plain}               Print the current server config import URI (domain, key, sk=, resolvers)"
     echo -e "  ${green}--uninstall${plain}            Remove thefeed"
     echo -e "  ${green}--help${plain}                 Show this help"
     echo ""
@@ -956,6 +985,7 @@ show_help() {
     echo -e "  Install beta:    ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --pre${plain}"
     echo -e "  Roll back:       ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --version v0.9.2${plain}"
     echo -e "  Uninstall:       ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --uninstall${plain}"
+    echo -e "  Show config:     ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash -s -- --config${plain}"
     echo ""
     echo -e "Quick commands (GitLab mirror — use while the GitHub account is unavailable):"
     echo -e "  Install/Update:  ${blue}curl -Ls https://gitlab.com/${GITLAB_REPO}/-/raw/main/scripts/install.sh | sudo bash -s -- --gitlab${plain}"
@@ -977,6 +1007,8 @@ while [[ $# -gt 0 ]]; do
             ACTION="help"; shift ;;
         --login)
             ACTION="login"; shift ;;
+        --config|--show-config)
+            ACTION="config"; shift ;;
         --uninstall)
             ACTION="uninstall"; shift ;;
         --list)
@@ -1027,6 +1059,8 @@ case "$ACTION" in
         show_help; exit 0 ;;
     login)
         login_only; exit 0 ;;
+    config)
+        show_config; exit 0 ;;
     uninstall)
         uninstall_thefeed; exit 0 ;;
     list)

@@ -17,6 +17,7 @@ type Config struct {
 	ListenAddr          string
 	Domain              string
 	Passphrase          string
+	DataDir             string // server state dir; holds the signing key
 	ChannelsFile        string
 	PrivateChannelsFile string // optional: invite links for private channels
 	XAccountsFile       string
@@ -117,6 +118,15 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("derive keys: %w", err)
 	}
+
+	// Load (or generate) the server signing key and enable ExtraBlock
+	// signing so clients that pin the public key can verify feed content.
+	signKey, err := LoadOrCreateServerKey(s.cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("server signing key: %w", err)
+	}
+	s.feed.SetSigningKey(signKey)
+	log.Printf("[server] signing public key (sk=): %s", ServerPublicKeyString(signKey))
 
 	SetMediaDebugLogs(s.cfg.Debug)
 

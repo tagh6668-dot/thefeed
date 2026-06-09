@@ -1,12 +1,81 @@
 package server
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"testing"
 
 	"github.com/gotd/td/tg"
 
 	"github.com/sartoopjj/thefeed/internal/protocol"
 )
+
+// channelBlockCount reads a channel's served block count out of metadata.
+func channelBlockCount(t *testing.T, feed *Feed, channelIdx int) int {
+	t.Helper()
+	md, err := feed.GetBlock(protocol.MetadataChannel, 0)
+	if err != nil {
+		t.Fatalf("metadata block: %v", err)
+	}
+	meta, err := protocol.ParseMetadata(md)
+	if err != nil {
+		t.Fatalf("parse metadata: %v", err)
+	}
+	return int(meta.Channels[channelIdx].Blocks)
+}
+
+func TestFeedExtraBlockSigned(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	feed := NewFeed([]string{"Sig"})
+	feed.UpdateChannel(1, []protocol.Message{{ID: 1, Timestamp: 1, Text: "hello"}})
+	feed.SetSigningKey(priv)
+
+	bc := channelBlockCount(t, feed, 0)
+	if bc < 1 {
+		t.Fatalf("block count = %d", bc)
+	}
+	// Reassemble exactly what the client would concatenate.
+	var content []byte
+	for i := 0; i < bc; i++ {
+		b, err := feed.GetBlock(1, i)
+		if err != nil {
+			t.Fatalf("block %d: %v", i, err)
+		}
+		content = append(content, b...)
+	}
+	// The signed ExtraBlock is served at index == block count.
+	raw, err := feed.GetBlock(1, bc)
+	if err != nil {
+		t.Fatalf("extra block: %v", err)
+	}
+	eb, err := protocol.ParseExtraBlock(raw)
+	if err != nil {
+		t.Fatalf("parse extra block: %v", err)
+	}
+	if err := protocol.VerifyExtraBlock(pub, 1, eb); err != nil {
+		t.Fatalf("verify signature: %v", err)
+	}
+	if err := eb.VerifyChannelContent(content); err != nil {
+		t.Fatalf("content digest mismatch: %v", err)
+	}
+	// Bound to the channel id: presenting it as another channel must fail.
+	if err := protocol.VerifyExtraBlock(pub, 2, eb); err == nil {
+		t.Error("expected verification to fail for the wrong channel id")
+	}
+}
+
+func TestFeedNoExtraBlockWithoutKey(t *testing.T) {
+	feed := NewFeed([]string{"NoSig"})
+	feed.UpdateChannel(1, []protocol.Message{{ID: 1, Timestamp: 1, Text: "x"}})
+	// No SetSigningKey → index == block count is just out of range.
+	bc := channelBlockCount(t, feed, 0)
+	if _, err := feed.GetBlock(1, bc); err == nil {
+		t.Error("expected no extra block when signing is disabled")
+	}
+}
 
 func TestFeedUpdateAndGetBlock(t *testing.T) {
 	feed := NewFeed([]string{"TestChannel"})

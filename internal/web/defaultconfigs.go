@@ -10,16 +10,19 @@ import (
 // resolver preset below.
 
 type defaultProfile struct {
-	Nickname string `json:"nickname"`
-	Domain   string `json:"domain"`
-	Key      string `json:"key"`
+	Nickname  string `json:"nickname"`
+	Domain    string `json:"domain"`
+	Key       string `json:"key"`
+	ServerKey string `json:"serverKey"` // pinned server signing pubkey (base64url); empty = unverified
 }
 
 // Domain and key are stored base64-encoded so the plain values are
-// not indexed by code search.
+// not indexed by code search. ServerKey is the server's signing public key
+// (base64url, from `thefeed-server -print-pubkey`); fill it in once the
+// chat/feed server has generated its key so clients verify feed content.
 var defaultProfiles = []defaultProfile{
-	{Nickname: "اخبار و تحلیل", Domain: b64("bndzLmVtampleS5kZQ=="), Key: b64("c2FydG8=")},
-	{Nickname: "فیلترشکن", Domain: b64("Y2ZnLmVtampleS5kZQ=="), Key: b64("c2FydG8=")},
+	{Nickname: "اخبار و تحلیل", Domain: b64("bndzLmVtampleS5kZQ=="), Key: b64("c2FydG8="), ServerKey: ""},
+	{Nickname: "فیلترشکن", Domain: b64("Y2ZnLmVtampleS5kZQ=="), Key: b64("c2FydG8="), ServerKey: ""},
 }
 
 // b64 decodes a base64 literal; returns "" on malformed input.

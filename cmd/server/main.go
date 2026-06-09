@@ -51,6 +51,8 @@ func main() {
 	ghMaxSizeKB := flag.Int("github-relay-max-size", 15*1024, "Per-file cap for the GitHub relay in KB (0 = no cap)")
 	ghCacheTTLMin := flag.Int("github-relay-ttl", 600, "TTL for GitHub-relay objects in minutes")
 	showVersion := flag.Bool("version", false, "Show version and exit")
+	printConfig := flag.Bool("print-config", false, "Print the client config URI (server public key + bootstrap resolvers) and exit")
+	printPubKey := flag.Bool("print-pubkey", false, "Print the server signing public key (sk=) and exit")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "thefeed-server %s\n\nServes Telegram/X feed content over encrypted DNS for censorship-resistant access.\n\nUsage:\n  thefeed-server [flags]\n\nFlags:\n", version.Version)
 		flag.PrintDefaults()
@@ -140,6 +142,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Admin helpers: print the pinned public key or the full client config
+	// URI (loading/generating the signing key if needed), then exit. No
+	// Telegram credentials required.
+	if *printConfig || *printPubKey {
+		signKey, err := server.LoadOrCreateServerKey(*dataDir)
+		if err != nil {
+			log.Fatalf("server signing key: %v", err)
+		}
+		if *printPubKey {
+			fmt.Println(server.ServerPublicKeyString(signKey))
+		} else {
+			fmt.Println(server.ConfigURI(*domain, *key, signKey))
+		}
+		os.Exit(0)
+	}
+
 	// Telegram credentials are required unless --no-telegram
 	needTelegram := !*noTelegram
 	if needTelegram {
@@ -223,6 +241,7 @@ func main() {
 		ListenAddr:          *listen,
 		Domain:              *domain,
 		Passphrase:          *key,
+		DataDir:             *dataDir,
 		ChannelsFile:        *channelsFile,
 		PrivateChannelsFile: *privateChannelsFile,
 		XAccountsFile:       *xAccountsFile,

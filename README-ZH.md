@@ -183,7 +183,7 @@ curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/instal
 
 短选项：`-v <tag>` 等同于 `--version <tag>`，旧的位置参数 `sudo bash install.sh v1.0.0` 也仍然有效。
 
-**重新登录** / **卸载**：把上面命令尾部的参数换成 `--login` / `--uninstall` 即可。
+**重新登录** / **卸载** / **查看配置**：把上面命令尾部的参数换成 `--login` / `--uninstall` / `--config` 即可。`--config` 会打印导入 URI（域名、密钥、服务器公钥 `sk=` 和引导解析器）。
 
 
 > **提示：** 服务端需要接收来自外部 53 端口的包。直接监听 `:53` 需要 root 权限，建议让程序监听一个非特权端口(`:5300`)，再把 53 端口转发过去。

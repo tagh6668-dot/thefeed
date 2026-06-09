@@ -28,6 +28,10 @@ type Config struct {
 	Domain    string   `json:"domain"`
 	Key       string   `json:"key"`
 	Resolvers []string `json:"resolvers"`
+	// ServerKey is the pinned server signing public key (base64url, the sk=
+	// field of a thefeed:// URI). When set, the client verifies feed content
+	// against the server's signed ExtraBlocks. Empty = unverified (old config).
+	ServerKey string   `json:"serverKey,omitempty"`
 	QueryMode string   `json:"queryMode"`
 	RateLimit float64  `json:"rateLimit"`
 	// Timeout is the per-query DNS timeout in seconds (0 = default 15 s).
@@ -570,6 +574,11 @@ func (s *Server) initFetcher() error {
 	fetcher, err := client.NewFetcher(cfg.Domain, cfg.Key, resolvers)
 	if err != nil {
 		return fmt.Errorf("create fetcher: %w", err)
+	}
+	if cfg.ServerKey != "" {
+		if err := fetcher.SetServerPublicKey(cfg.ServerKey); err != nil {
+			s.addLog("[verify] invalid server key in config: " + err.Error())
+		}
 	}
 
 	// Restore resolver stats: prefer in-memory stats from the previous fetcher,

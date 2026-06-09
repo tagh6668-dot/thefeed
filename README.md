@@ -197,6 +197,7 @@ Short forms: `-v <tag>` is the same as `--version <tag>`. The legacy positional 
 `sudo bash install.sh v1.0.0` still works.
 
 Re-login: `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --login`
+Show config (the import URI — domain, key, `sk=` server key, bootstrap resolvers): `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --config`
 Uninstall: `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --uninstall`
 
 

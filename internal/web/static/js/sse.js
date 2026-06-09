@@ -6,6 +6,11 @@ function connectSSE() {
   resolverScanHint = '';
   eventSource = new EventSource('/api/events');
   eventSource.addEventListener('log', function (e) { addLogLine(JSON.parse(e.data)) });
+  // Server-pushed toast: data is an i18n key, localised on the client.
+  eventSource.addEventListener('toast', function (e) {
+    var key; try { key = JSON.parse(e.data) } catch (x) { key = e.data }
+    if (key && typeof showToast === 'function') showToast(t(key));
+  });
   eventSource.addEventListener('update', async function (e) {
     refreshResolversBadge();
     var data; try { data = JSON.parse(e.data) } catch (x) { data = e.data }

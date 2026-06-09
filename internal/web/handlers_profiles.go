@@ -166,10 +166,30 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			if err := s.initFetcher(); err != nil {
 				log.Printf("[web] re-init fetcher after profile change: %v", err)
-			} else if req.SkipCheck {
-				s.skipCheckerUseSaved()
 			} else {
-				s.startCheckerThenRefresh()
+				// Populate active resolvers from the user's selected list right
+				// away so any profile change (edit / delete / first-create)
+				// never leaves the fetcher with "no active resolvers" until the
+				// resolver panel is opened or a scan finishes. Resolvers are
+				// shared and server-agnostic, so reusing them is correct.
+				applied := s.applySelectedList()
+				switch {
+				case req.SkipCheck && applied:
+					s.mu.RLock()
+					checker := s.checker
+					ctx := s.fetcherCtx
+					s.mu.RUnlock()
+					if checker != nil && ctx != nil {
+						checker.StartPeriodic(ctx)
+					}
+					go s.refreshMetadataOnly()
+				case req.SkipCheck:
+					s.skipCheckerUseSaved()
+				default:
+					// Full health-check; active is already populated above so
+					// the feed keeps working during the scan.
+					s.startCheckerThenRefresh()
+				}
 			}
 		}
 

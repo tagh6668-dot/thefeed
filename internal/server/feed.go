@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
 	"hash/crc32"
@@ -56,6 +57,13 @@ type Feed struct {
 	// Serialises MergeProfilePics so concurrent readers can't lose
 	// each other's writes through the read-modify-write sequence.
 	profilePicsMergeMu sync.Mutex
+
+	// signKey is the server ed25519 key used to sign ExtraBlocks. nil
+	// disables signing (old behaviour). extraBlocks holds, per channel,
+	// the signed ExtraBlock served at block index == the channel's real
+	// block count; old clients never request that index.
+	signKey     ed25519.PrivateKey
+	extraBlocks map[int][]byte
 }
 
 // NewFeed creates a new Feed with the given channel names.
@@ -68,6 +76,7 @@ func NewFeed(channels []string) *Feed {
 		contentHashes: make(map[int]uint32),
 		chatTypes:     make(map[int]protocol.ChatType),
 		canSend:       make(map[int]bool),
+		extraBlocks:   make(map[int][]byte),
 	}
 	f.rotateMarker()
 	f.rebuildMetaBlocks()
@@ -99,8 +108,60 @@ func (f *Feed) UpdateChannel(channelNum int, msgs []protocol.Message) {
 	f.lastIDs[channelNum] = lastID
 	f.contentHashes[channelNum] = contentHash
 	f.updated = time.Now()
+	f.buildExtraBlockLocked(channelNum, blocks)
 	f.rotateMarker()
 	f.rebuildMetaBlocks()
+}
+
+// SetSigningKey enables ExtraBlock signing with the server key and builds
+// the signed blocks for every channel already populated. Call once at
+// startup, after NewFeed. nil leaves signing disabled.
+func (f *Feed) SetSigningKey(priv ed25519.PrivateKey) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.signKey = priv
+	if priv == nil {
+		return
+	}
+	f.buildExtraBlockLocked(protocol.MetadataChannel, f.metaBlocks)
+	f.buildExtraBlockLocked(int(protocol.VersionChannel), f.versionBlocks)
+	f.buildExtraBlockLocked(int(protocol.TitlesChannel), f.titlesBlocks)
+	f.buildExtraBlockLocked(int(protocol.RelayInfoChannel), f.relayInfoBlocks)
+	f.buildExtraBlockLocked(int(protocol.ProfilePicsChannel), f.profilePicsBlocks)
+	for chNum, blocks := range f.blocks {
+		f.buildExtraBlockLocked(chNum, blocks)
+	}
+}
+
+// buildExtraBlockLocked (re)builds the signed ExtraBlock for a channel from
+// the concatenation of its served blocks (the exact bytes the client
+// reassembles, so digests match without any canonicalisation concern).
+// No-op when signing is disabled or the channel has no blocks yet. Caller
+// holds f.mu.
+func (f *Feed) buildExtraBlockLocked(channel int, blocks [][]byte) {
+	if f.signKey == nil || len(blocks) == 0 {
+		return
+	}
+	var concat []byte
+	for _, b := range blocks {
+		concat = append(concat, b...)
+	}
+	eb, err := protocol.EncodeExtraBlock(f.signKey, uint16(channel), protocol.ContentDigest(concat), time.Now().Unix())
+	if err != nil {
+		log.Printf("[extrablock] channel %d: %v", channel, err)
+		return
+	}
+	f.extraBlocks[channel] = eb
+}
+
+// extraBlockAt returns the signed ExtraBlock for a channel if the requested
+// block index is exactly the channel's real block count. Caller holds f.mu.
+func (f *Feed) extraBlockAt(channel, block, realCount int) ([]byte, bool) {
+	if block != realCount {
+		return nil, false
+	}
+	eb, ok := f.extraBlocks[channel]
+	return eb, ok
 }
 
 // GetBlock returns the block data for a given channel and block number.
@@ -139,6 +200,9 @@ func (f *Feed) GetBlock(channel, block int) ([]byte, error) {
 		return nil, fmt.Errorf("channel %d not found", channel)
 	}
 	if block < 0 || block >= len(ch) {
+		if eb, ok := f.extraBlockAt(channel, block, len(ch)); ok {
+			return eb, nil
+		}
 		return nil, fmt.Errorf("block %d out of range (channel %d has %d blocks)", block, channel, len(ch))
 	}
 	return ch[block], nil
@@ -217,6 +281,7 @@ func (f *Feed) rebuildRelayInfoBlocks() {
 	prefix := []byte{byte(len(blocks) >> 8), byte(len(blocks))}
 	blocks[0] = append(prefix, blocks[0]...)
 	f.relayInfoBlocks = blocks
+	f.buildExtraBlockLocked(int(protocol.RelayInfoChannel), f.relayInfoBlocks)
 }
 
 func (f *Feed) getVersionBlock(block int) ([]byte, error) {
@@ -226,6 +291,9 @@ func (f *Feed) getVersionBlock(block int) ([]byte, error) {
 		blocks = f.versionBlocks
 	}
 	if block < 0 || block >= len(blocks) {
+		if eb, ok := f.extraBlockAt(int(protocol.VersionChannel), block, len(blocks)); ok {
+			return eb, nil
+		}
 		return nil, fmt.Errorf("version block %d out of range (%d blocks)", block, len(blocks))
 	}
 	return blocks[block], nil
@@ -238,6 +306,9 @@ func (f *Feed) getMetadataBlock(block int) ([]byte, error) {
 		blocks = f.metaBlocks
 	}
 	if block < 0 || block >= len(blocks) {
+		if eb, ok := f.extraBlockAt(protocol.MetadataChannel, block, len(blocks)); ok {
+			return eb, nil
+		}
 		return nil, fmt.Errorf("metadata block %d out of range (%d blocks)", block, len(blocks))
 	}
 	return blocks[block], nil
@@ -283,9 +354,11 @@ func (f *Feed) rebuildMetaBlocks() {
 		meta.Marker = f.marker
 		meta.Timestamp = uint32(time.Now().Unix())
 		f.metaBlocks = protocol.SplitIntoBlocks(protocol.SerializeMetadata(&meta))
+		f.buildExtraBlockLocked(protocol.MetadataChannel, f.metaBlocks)
 		return
 	}
 	f.metaBlocks = blocks
+	f.buildExtraBlockLocked(protocol.MetadataChannel, f.metaBlocks)
 }
 
 func (f *Feed) getTitlesBlock(block int) ([]byte, error) {
@@ -295,6 +368,9 @@ func (f *Feed) getTitlesBlock(block int) ([]byte, error) {
 		blocks = f.titlesBlocks
 	}
 	if block < 0 || block >= len(blocks) {
+		if eb, ok := f.extraBlockAt(int(protocol.TitlesChannel), block, len(blocks)); ok {
+			return eb, nil
+		}
 		return nil, fmt.Errorf("titles block %d out of range (%d blocks)", block, len(blocks))
 	}
 	return blocks[block], nil
@@ -307,6 +383,9 @@ func (f *Feed) getRelayInfoBlock(block int) ([]byte, error) {
 		blocks = f.relayInfoBlocks
 	}
 	if block < 0 || block >= len(blocks) {
+		if eb, ok := f.extraBlockAt(int(protocol.RelayInfoChannel), block, len(blocks)); ok {
+			return eb, nil
+		}
 		return nil, fmt.Errorf("relay-info block %d out of range (%d blocks)", block, len(blocks))
 	}
 	return blocks[block], nil
@@ -321,6 +400,9 @@ func (f *Feed) getProfilePicsBlock(block int) ([]byte, error) {
 		blocks = f.profilePicsBlocks
 	}
 	if block < 0 || block >= len(blocks) {
+		if eb, ok := f.extraBlockAt(int(protocol.ProfilePicsChannel), block, len(blocks)); ok {
+			return eb, nil
+		}
 		return nil, fmt.Errorf("profile-pics block %d out of range (%d blocks)", block, len(blocks))
 	}
 	return blocks[block], nil
@@ -338,6 +420,7 @@ func (f *Feed) rebuildProfilePicsBlocksLocked() {
 	prefix := []byte{byte(len(blocks) >> 8), byte(len(blocks))}
 	blocks[0] = append(prefix, blocks[0]...)
 	f.profilePicsBlocks = blocks
+	f.buildExtraBlockLocked(int(protocol.ProfilePicsChannel), f.profilePicsBlocks)
 }
 
 // SetProfilePics replaces the profile-pic bundle with the given
@@ -547,6 +630,7 @@ func (f *Feed) rebuildTitlesBlocks() {
 		blocks[0] = append(prefix, blocks[0]...)
 	}
 	f.titlesBlocks = blocks
+	f.buildExtraBlockLocked(int(protocol.TitlesChannel), f.titlesBlocks)
 }
 
 func (f *Feed) rebuildVersionBlocks() {
@@ -555,6 +639,7 @@ func (f *Feed) rebuildVersionBlocks() {
 		block = make([]byte, protocol.MinBlockPayload)
 	}
 	f.versionBlocks = [][]byte{block}
+	f.buildExtraBlockLocked(int(protocol.VersionChannel), f.versionBlocks)
 }
 
 // SetLatestVersion stores latest known release version for the dedicated version channel.

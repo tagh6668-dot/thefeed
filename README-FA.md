@@ -192,13 +192,16 @@ sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts
 
 ```bash
 # بروزرسانی
-sudo bash install.sh
+curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash
 
 # لاگین مجدد تلگرام
-sudo bash install.sh --login
+curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --login
+
+# نمایش کانفیگ فعلی (پیوند ایمپورت: دامنه، رمز، کلید عمومی سرور sk=، و ریزالورها)
+curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --config
 
 # حذف
-sudo bash install.sh --uninstall
+curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --uninstall
 ```
 
 

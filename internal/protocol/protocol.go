@@ -20,12 +20,6 @@ const (
 	// DefaultBlockPayload is kept for compatibility; equals MaxBlockPayload.
 	DefaultBlockPayload = MaxBlockPayload
 
-	// MediaBlockPayload is the fixed payload size used for media (image/file)
-	// blocks. Media blocks are raw binary, and using a fixed size simplifies
-	// both server-side block boundaries and client-side range/resume math.
-	// Tuned for safe DNS UDP response after AES-GCM + base64 + padding.
-	MediaBlockPayload = MaxBlockPayload
-
 	// DefaultMaxPadding is the default random padding added to responses to vary DNS response size.
 	DefaultMaxPadding = 32
 

@@ -611,6 +611,10 @@
       </div>
       <div class="form-group"><label data-i18n="passphrase">Passphrase</label><input type="password" id="peKey"
           placeholder="..."></div>
+      <div class="form-group"><label data-i18n="server_key">Server public key (sk)</label><input id="peServerKey"
+          placeholder="server public key (sk= from config)" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+          oninput="updateServerKeyHint()" style="direction:ltr;text-align:left">
+        <div id="peServerKeyHint" style="font-size:11px;margin-top:4px;color:var(--text-dim)"></div></div>
       <!-- Channel Management (editing only) -->
       <div id="peChannelSection" style="display:none">
         <hr class="section-divider">

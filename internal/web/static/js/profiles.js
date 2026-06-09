@@ -43,14 +43,40 @@ function buildProfileUri(id, selectedResolvers) {
   var compact = resolvers.map(function (r) {
     return r.replace(/:53$/, '');
   }).join(',');
+  // Order matters: resolvers (r=) go LAST so a truncated URI (long resolver
+  // list, lost tail) only drops trailing resolvers — domain, key, n=, sk=
+  // all survive.
   var uri = 'thefeed://' + encodeURIComponent(p.config.domain)
-    + '/' + encodeURIComponent(p.config.key)
-    + '?r=' + encodeURIComponent(compact).replace(/%3A/g, ':');
+    + '/' + encodeURIComponent(p.config.key) + '?';
+  var params = [];
   var nick = (p.nickname || '').trim().slice(0, 32);
   if (nick && nick !== p.config.domain) {
-    uri += '&n=' + encodeURIComponent(nick);
+    params.push('n=' + encodeURIComponent(nick));
   }
+  // Pinned server signing key (base64url — already URI-safe) so the
+  // recipient can verify feed content.
+  if (p.config.serverKey) {
+    params.push('sk=' + p.config.serverKey);
+  }
+  params.push('r=' + encodeURIComponent(compact).replace(/%3A/g, ':'));
+  uri += params.join('&');
   return uri;
+}
+
+// serverKeyByteLen decodes a base64url (or base64) server key and returns its
+// byte length, or -1 if it isn't valid base64. A valid ed25519 key is 32 bytes.
+function serverKeyByteLen(s) {
+  if (!s) return 0;
+  var b = String(s).replace(/-/g, '+').replace(/_/g, '/');
+  while (b.length % 4) b += '=';
+  try { return atob(b).length; } catch (e) { return -1; }
+}
+
+// serverKeyState classifies a pinned key: 'none' (empty), 'ok' (32 bytes),
+// or 'invalid' (present but not a 32-byte key).
+function serverKeyState(s) {
+  if (!s) return 'none';
+  return serverKeyByteLen(s) === 32 ? 'ok' : 'invalid';
 }
 
 function renderProfilesModal() {
@@ -68,7 +94,13 @@ function renderProfilesModal() {
     h += '<div class="profile-row-avatar">' + esc(initial) + '</div>';
     h += '<div class="profile-row-info"><div class="profile-row-name">' + esc(p.nickname || p.config.domain);
     if (isActive) h += '<span class="active-badge">' + t('active') + '</span>';
-    h += '</div><div class="profile-row-domain">' + esc(p.config.domain) + '</div></div>';
+    h += '</div><div class="profile-row-domain">' + esc(p.config.domain);
+    var ks = serverKeyState(p.config.serverKey);
+    if (ks !== 'ok') {
+      var msgKey = ks === 'invalid' ? 'invalid_server_key' : 'no_server_key_warning';
+      h += ' <span onclick="event.stopPropagation();showToast(t(\'' + msgKey + '\'))" title="' + escAttr(t(msgKey)) + '" style="color:var(--error);font-size:12px;cursor:pointer">&#9888;</span>';
+    }
+    h += '</div></div>';
     h += '<div class="profile-row-btns">';
     h += '<button class="btn btn-flat btn-sm" onclick="event.stopPropagation();openShareModal(\'' + p.id + '\')" title="' + t('share') + '" style="font-size:11px">' + t('share') + '</button>';
     h += '<button class="btn btn-flat btn-sm" onclick="event.stopPropagation();openProfileEditor(\'' + p.id + '\')" title="' + t('edit') + '" style="font-size:11px">' + t('edit') + '</button>';
@@ -250,6 +282,7 @@ async function doImportUri() {
     var domain = decodeURIComponent(parts[0] || ''); var key = decodeURIComponent(parts[1] || '');
     var resolvers = [];
     var sharedNick = '';
+    var serverKey = '';
     params.split('&').forEach(function (kv) {
       var eq = kv.indexOf('=');
       if (eq < 0) return;
@@ -259,6 +292,7 @@ async function doImportUri() {
       else if (k === 'n' && v) {
         try { sharedNick = decodeURIComponent(v); } catch (e) { sharedNick = ''; }
       }
+      else if (k === 'sk' && v) serverKey = v.trim();
     });
     if (!domain || !key) { errEl.textContent = t('uri_missing'); errEl.style.display = 'block'; return }
     // No 8.8.8.8 / 1.1.1.1 fallback — an empty resolver list in
@@ -270,10 +304,12 @@ async function doImportUri() {
     // there's nothing to merge and no prompt to show.
     await confirmAddResolversToBank(resolvers);
     // Create profile without resolvers (they're in the bank now).
-    var profile = { id: '', nickname: sharedNick || domain, config: { domain: domain, key: key, queryMode: 'single', rateLimit: 6 } };
+    var profile = { id: '', nickname: sharedNick || domain, config: { domain: domain, key: key, serverKey: serverKey, queryMode: 'single', rateLimit: 6 } };
     var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', profile: profile }) });
     if (!r.ok) throw new Error('save failed');
-    okEl.textContent = t('import_success').replace('{d}', domain); okEl.style.display = 'block';
+    okEl.textContent = t('import_success').replace('{d}', domain);
+    if (!serverKey) { okEl.textContent += ' ' + t('no_server_key_warning'); }
+    okEl.style.display = 'block';
     document.getElementById('importUriInput').value = '';
     await loadProfiles(); renderProfilesModal();
     refreshResolversBadge();
@@ -325,38 +361,48 @@ async function toggleDefaultConfigs() {
 function renderDefaultConfigs() {
   var el = document.getElementById('defaultConfigsList');
   if (!el || !defaultConfigs) return;
-  var existing = {};
-  ((profiles && profiles.profiles) || []).forEach(function (p) {
-    existing[p.config.domain + ' ' + p.config.key] = true;
-  });
+  // Match an imported profile by DOMAIN (the stable identity) so a default
+  // whose key/serverKey changed in a new app version offers an Update.
+  var byDomain = {};
+  ((profiles && profiles.profiles) || []).forEach(function (p) { byDomain[p.config.domain] = p; });
   var h = '';
   (defaultConfigs.profiles || []).forEach(function (d, i) {
-    var done = existing[d.domain + ' ' + d.key];
+    var existing = byDomain[d.domain];
     h += '<div class="default-config-row">';
     h += DEFAULT_CONFIG_EMBLEM;
     h += '<div class="default-config-info"><div class="default-config-name">' + esc(d.nickname) + '</div>';
     h += '<div class="default-config-domain">' + esc(d.domain) + '</div></div>';
-    if (done) {
-      h += '<button class="btn btn-flat btn-sm" disabled>' + t('already_imported') + '</button>';
-    } else {
+    if (!existing) {
       h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ')">' + t('import') + '</button>';
+    } else if (existing.config.key !== d.key || (existing.config.serverKey || '') !== (d.serverKey || '')) {
+      h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ',\'' + existing.id + '\')">' + t('update') + '</button>';
+    } else {
+      h += '<button class="btn btn-flat btn-sm" disabled>' + t('already_imported') + '</button>';
     }
     h += '</div>';
   });
   el.innerHTML = h;
 }
 
-async function importDefaultConfig(i) {
+// importDefaultConfig imports default config i, or updates the existing
+// profile updateId in place (key/serverKey changed in a new version).
+async function importDefaultConfig(i, updateId) {
   if (!defaultConfigs || !defaultConfigs.profiles || !defaultConfigs.profiles[i]) return;
   var d = defaultConfigs.profiles[i];
   var errEl = document.getElementById('importError'); var okEl = document.getElementById('importSuccess');
   errEl.style.display = 'none'; okEl.style.display = 'none';
   try {
     await confirmAddResolversToBank(defaultConfigs.resolvers || []);
-    var profile = { id: '', nickname: d.nickname || d.domain, config: { domain: d.domain, key: d.key, queryMode: 'single', rateLimit: 6 } };
-    var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'create', profile: profile }) });
+    // On update, keep the user's chosen nickname; otherwise use the default's.
+    var nick = d.nickname || d.domain;
+    if (updateId && profiles && profiles.profiles) {
+      var ex = profiles.profiles.find(function (x) { return x.id === updateId });
+      if (ex && ex.nickname) nick = ex.nickname;
+    }
+    var profile = { id: updateId || '', nickname: nick, config: { domain: d.domain, key: d.key, serverKey: d.serverKey || '', queryMode: 'single', rateLimit: 6 } };
+    var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: updateId ? 'update' : 'create', profile: profile }) });
     if (!r.ok) throw new Error(await r.text() || 'save failed');
-    okEl.textContent = t('import_success').replace('{d}', d.nickname || d.domain); okEl.style.display = 'block';
+    okEl.textContent = (updateId ? t('update_success') : t('import_success')).replace('{d}', nick); okEl.style.display = 'block';
     await loadProfiles(); renderProfilesModal(); renderDefaultConfigs();
     refreshResolversBadge();
   } catch (e) { errEl.textContent = t('import_error') + ': ' + e.message; errEl.style.display = 'block' }
@@ -376,7 +422,9 @@ function openProfileEditor(id) {
       document.getElementById('peNick').value = p.nickname || '';
       document.getElementById('peDomain').value = p.config.domain || '';
       document.getElementById('peKey').value = p.config.key || '';
+      document.getElementById('peServerKey').value = p.config.serverKey || '';
     }
+    updateServerKeyHint();
     document.getElementById('peChannelSection').style.display = '';
     var isActive = id === activeProfileId;
     if (isActive) {
@@ -394,10 +442,23 @@ function openProfileEditor(id) {
     document.getElementById('peNick').value = '';
     document.getElementById('peDomain').value = '';
     document.getElementById('peKey').value = '';
+    document.getElementById('peServerKey').value = '';
+    updateServerKeyHint();
     document.getElementById('peChannelSection').style.display = 'none';
   }
 }
 function closeProfileEditor() { document.getElementById('profileEditorModal').classList.remove('active'); editingProfileId = null }
+
+// updateServerKeyHint shows the validity of the server key being edited.
+function updateServerKeyHint() {
+  var el = document.getElementById('peServerKey');
+  var hint = document.getElementById('peServerKeyHint');
+  if (!el || !hint) return;
+  var st = serverKeyState((el.value || '').trim());
+  if (st === 'ok') { hint.textContent = t('server_key_ok'); hint.style.color = 'var(--success)'; }
+  else if (st === 'invalid') { hint.textContent = t('invalid_server_key'); hint.style.color = 'var(--error)'; }
+  else { hint.textContent = t('no_server_key_warning'); hint.style.color = 'var(--text-dim)'; }
+}
 
 async function loadEditorChannels() {
   var el = document.getElementById('peChannelList');
@@ -462,9 +523,12 @@ async function saveProfile() {
   var nick = sanitizeNickname(document.getElementById('peNick').value);
   var domain = document.getElementById('peDomain').value.trim();
   var key = document.getElementById('peKey').value;
+  var serverKey = (document.getElementById('peServerKey').value || '').trim();
   if (!domain || !key) { errEl.textContent = t('domain') + ' / ' + t('passphrase'); errEl.style.display = 'block'; return }
-  var profile = { id: editingProfileId || '', nickname: nick || domain, config: { domain: domain, key: key } };
-  // Preserve autoScan from existing profile
+  var profile = { id: editingProfileId || '', nickname: nick || domain, config: { domain: domain, key: key, serverKey: serverKey } };
+  // Preserve fields the editor doesn't manage (e.g. autoScan) so saving
+  // from the editor doesn't wipe them. The server key now comes from its
+  // own editable field above.
   if (editingProfileId && profiles && profiles.profiles) {
     var existing = profiles.profiles.find(function (x) { return x.id === editingProfileId });
     if (existing && existing.config.autoScan === false) profile.config.autoScan = false;
@@ -515,9 +579,13 @@ async function deleteEditingProfile() {
   if (!editingProfileId) return;
   if (!confirm(t('delete') + '?')) return;
   try {
-    await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', profile: { id: editingProfileId } }) });
+    // skipCheck: deleting a profile must not trigger a full resolver rescan —
+    // resolvers are shared and server-agnostic, so the active list is reused
+    // immediately (no scan that would transiently empty the active pool).
+    await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', profile: { id: editingProfileId }, skipCheck: true }) });
     await loadProfiles(); closeProfileEditor();
     if (document.getElementById('profilesModal').classList.contains('active')) renderProfilesModal();
+    refreshResolversBadge();
   } catch (e) { }
 }
 

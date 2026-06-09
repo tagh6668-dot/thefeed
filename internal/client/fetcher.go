@@ -2,8 +2,11 @@ package client
 
 import (
 	"context"
+	"crypto/ed25519"
 	cryptoRand "crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/rand"
 	"sort"
@@ -102,6 +105,163 @@ type Fetcher struct {
 	// exchangeFn is the function used to send a DNS message to a resolver.
 	// It defaults to a real dns.Client exchange and can be replaced in tests.
 	exchangeFn func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error)
+
+	// serverPubKey is the pinned server signing key (from the config's sk=).
+	// When non-nil, channel/metadata content is verified against the signed
+	// ExtraBlock served at block index == the channel's block count. nil
+	// disables verification (no key pinned / old config).
+	serverPubKey ed25519.PublicKey
+	// lastExtraTS holds the newest ExtraBlock timestamp seen per channel id,
+	// for in-session rollback protection (reject a signed-but-older block).
+	lastExtraTS sync.Map // uint16 -> int64
+}
+
+// ErrUnverified means no valid ExtraBlock could be fetched (e.g. an old
+// server that doesn't emit one). Content integrity could not be checked;
+// callers decide policy (feed: accept with a warning; messenger: reject).
+var ErrUnverified = errors.New("content unverified: no signature block")
+
+// ErrExtraBlockInvalid means an ExtraBlock WAS returned but failed
+// verification (bad signature, wrong channel, rolled-back timestamp, or
+// content-digest mismatch) — i.e. an active tamper attempt. Always hard-fail.
+var ErrExtraBlockInvalid = errors.New("content signature invalid")
+
+// SetServerPublicKey pins the server signing key (base64url, no padding, as
+// printed by genserverkey / the sk= URI field). Empty disables verification.
+func (f *Fetcher) SetServerPublicKey(b64 string) error {
+	b64 = strings.TrimSpace(b64)
+	if b64 == "" {
+		f.serverPubKey = nil
+		return nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(b64)
+	if err != nil {
+		// Tolerate standard base64 too, in case a key was pasted that way.
+		if raw2, err2 := base64.StdEncoding.DecodeString(b64); err2 == nil {
+			raw = raw2
+		} else {
+			return fmt.Errorf("decode server public key: %w", err)
+		}
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return fmt.Errorf("server public key is %d bytes, want %d", len(raw), ed25519.PublicKeySize)
+	}
+	f.serverPubKey = ed25519.PublicKey(raw)
+	return nil
+}
+
+// HasServerKey reports whether a server signing key is pinned.
+func (f *Fetcher) HasServerKey() bool { return f.serverPubKey != nil }
+
+// verifyExtraBytes verifies an already-fetched ExtraBlock (raw — fetched in
+// the same parallel batch as the content, so no extra round-trip) against the
+// pinned key, the channel id, the rollback guard, and the content digest.
+// Returns nil when no key is pinned, ErrUnverified when raw is absent or
+// unparseable (old server — tolerated), or ErrExtraBlockInvalid on an active
+// tamper (always hard-fail at the caller).
+func (f *Fetcher) verifyExtraBytes(channelID uint16, content, raw []byte) error {
+	if f.serverPubKey == nil {
+		return nil
+	}
+	if len(raw) == 0 {
+		return ErrUnverified
+	}
+	eb, err := protocol.ParseExtraBlock(raw)
+	if err != nil {
+		return ErrUnverified
+	}
+	if err := protocol.VerifyExtraBlock(f.serverPubKey, channelID, eb); err != nil {
+		f.log("[verify] channel %d: %v", channelID, err)
+		return ErrExtraBlockInvalid
+	}
+	// Rollback guard: never accept a signed block older than the newest we've
+	// already seen for this channel in this session.
+	if prev, ok := f.lastExtraTS.Load(channelID); ok {
+		if eb.Timestamp < prev.(int64) {
+			f.log("[verify] channel %d: rollback (ts %d < %d)", channelID, eb.Timestamp, prev.(int64))
+			return ErrExtraBlockInvalid
+		}
+	}
+	if err := eb.VerifyChannelContent(content); err != nil {
+		f.log("[verify] channel %d: %v", channelID, err)
+		return ErrExtraBlockInvalid
+	}
+	f.lastExtraTS.Store(channelID, eb.Timestamp)
+	return nil
+}
+
+// fetchRawAndVerify fetches blocks [0..count-1] of channelID plus, when a key
+// is pinned, the signature ExtraBlock at index == count — all in one parallel
+// batch so verification adds no extra round-trip — then verifies the signature
+// over the raw block concatenation it returns. Pass block0 if already fetched
+// (count-prefixed channels need it to learn count), or nil to fetch it here.
+// A content-block failure is fatal; a missing ExtraBlock (old server) is
+// tolerated; a present-but-invalid one returns ErrExtraBlockInvalid.
+func (f *Fetcher) fetchRawAndVerify(ctx context.Context, channelID uint16, count int, block0 []byte) ([]byte, error) {
+	if count <= 0 {
+		return nil, fmt.Errorf("invalid block count %d", count)
+	}
+	blocks := make([][]byte, count)
+	if block0 != nil {
+		blocks[0] = block0
+	}
+	needExtra := f.serverPubKey != nil
+	var extraRaw []byte
+
+	bctx, cancel := context.WithCancel(ctx)
+	var (
+		wg     sync.WaitGroup
+		errMu  sync.Mutex
+		blkErr error
+	)
+	start := 1
+	if block0 == nil {
+		start = 0
+	}
+	for i := start; i < count; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			b, err := f.FetchBlock(bctx, channelID, uint16(idx))
+			if err != nil {
+				errMu.Lock()
+				if blkErr == nil {
+					blkErr = fmt.Errorf("block %d: %w", idx, err)
+					cancel()
+				}
+				errMu.Unlock()
+				return
+			}
+			blocks[idx] = b
+		}(i)
+	}
+	if needExtra {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Tolerated failure: a missing ExtraBlock (old server) leaves
+			// extraRaw nil → unverified, not fatal.
+			if b, err := f.FetchBlock(bctx, channelID, uint16(count)); err == nil {
+				extraRaw = b
+			}
+		}()
+	}
+	wg.Wait()
+	cancel()
+	if blkErr != nil {
+		return nil, blkErr
+	}
+
+	var raw []byte
+	for _, b := range blocks {
+		raw = append(raw, b...)
+	}
+	if needExtra {
+		if verr := f.verifyExtraBytes(channelID, raw, extraRaw); verr == ErrExtraBlockInvalid {
+			return nil, verr
+		}
+	}
+	return raw, nil
 }
 
 // NewFetcher creates a new DNS block fetcher.
@@ -631,7 +791,7 @@ func (f *Fetcher) rateWait(ctx context.Context) error {
 
 // FetchBlock fetches a single encrypted block from the given channel.
 // It enqueues through the rate limiter and respects ctx cancellation.
-// On transient failure it retries up to 2 additional times with a short back-off.
+// On transient failure it retries up to maxAttempts times with a short back-off.
 func (f *Fetcher) FetchBlock(ctx context.Context, channel, block uint16) ([]byte, error) {
 	const maxAttempts = 20
 	var lastErr error
@@ -766,7 +926,13 @@ func (f *Fetcher) fetchMetadataExtended(parent context.Context, block0 []byte, c
 
 		blocks := make([][]byte, currentCount)
 		blocks[0] = current
-		if currentCount > 1 {
+		// Fetch the remaining metadata blocks AND (when a key is pinned) the
+		// signature ExtraBlock at index == currentCount in one parallel batch,
+		// so verification adds no extra round-trip. Content-block failure is
+		// fatal; a missing ExtraBlock (old server) is tolerated.
+		var extraRaw []byte
+		needExtra := f.serverPubKey != nil
+		if currentCount > 1 || needExtra {
 			ctx, cancel := context.WithCancel(parent)
 			var (
 				wg     sync.WaitGroup
@@ -793,6 +959,15 @@ func (f *Fetcher) fetchMetadataExtended(parent context.Context, block0 []byte, c
 					blocks[idx] = b
 				}(i)
 			}
+			if needExtra {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if b, err := f.FetchBlock(ctx, protocol.MetadataChannel, uint16(currentCount)); err == nil {
+						extraRaw = b
+					}
+				}()
+			}
 			wg.Wait()
 			cancel()
 			if blkErr != nil {
@@ -817,6 +992,12 @@ func (f *Fetcher) fetchMetadataExtended(parent context.Context, block0 []byte, c
 		meta, err := protocol.ParseMetadata(assembled)
 		if err != nil {
 			return nil, fmt.Errorf("parse: %w", err)
+		}
+		// Verify the server signature over the metadata block concatenation
+		// using the ExtraBlock fetched above. A present-but-invalid signature
+		// is a hard failure; a missing one (old server) is tolerated.
+		if verr := f.verifyExtraBytes(protocol.MetadataChannel, assembled, extraRaw); verr == ErrExtraBlockInvalid {
+			return nil, fmt.Errorf("metadata: %w", verr)
 		}
 		return meta, nil
 	}
@@ -864,11 +1045,13 @@ func (f *Fetcher) extInCooldown() bool {
 // version channel. The block is padded to a random size matching regular content
 // blocks (DPI-resistant). Empty string means unknown/unavailable.
 func (f *Fetcher) FetchLatestVersion(ctx context.Context) (string, error) {
-	data, err := f.FetchBlock(ctx, protocol.VersionChannel, 0)
+	// Fetch block 0 and (when a key is pinned) the signature ExtraBlock in
+	// parallel, verifying the version block before trusting it.
+	raw, err := f.fetchRawAndVerify(ctx, protocol.VersionChannel, 1, nil)
 	if err != nil {
 		return "", fmt.Errorf("fetch version block: %w", err)
 	}
-	return protocol.DecodeVersionData(data)
+	return protocol.DecodeVersionData(raw)
 }
 
 // RelayInfo carries the relay-discovery data the server publishes on
@@ -893,37 +1076,20 @@ func (f *Fetcher) FetchRelayInfo(ctx context.Context) (RelayInfo, error) {
 		return RelayInfo{}, nil
 	}
 	totalBlocks := int(binary.BigEndian.Uint16(block0))
-	payload0 := block0[2:]
-	if totalBlocks <= 1 {
-		return ParseRelayInfo(payload0), nil
+	if totalBlocks < 1 {
+		totalBlocks = 1
 	}
-
-	type blockResult struct {
-		data []byte
-		err  error
-	}
-	results := make([]blockResult, totalBlocks)
-	results[0] = blockResult{data: payload0}
-
-	var wg sync.WaitGroup
-	for blk := 1; blk < totalBlocks; blk++ {
-		wg.Add(1)
-		go func(blk int) {
-			defer wg.Done()
-			data, fetchErr := f.FetchBlock(fetchCtx, protocol.RelayInfoChannel, uint16(blk))
-			results[blk] = blockResult{data: data, err: fetchErr}
-		}(blk)
-	}
-	wg.Wait()
-
-	var allData []byte
-	for _, r := range results {
-		if r.err != nil {
-			return RelayInfo{}, fmt.Errorf("fetch relay-info block: %w", r.err)
+	// Fetch any remaining blocks + the signature ExtraBlock in parallel and
+	// verify over the raw concatenation (which includes block 0's count
+	// prefix — matching exactly what the server signed).
+	raw, err := f.fetchRawAndVerify(fetchCtx, protocol.RelayInfoChannel, totalBlocks, block0)
+	if err != nil {
+		if errors.Is(err, ErrExtraBlockInvalid) {
+			return RelayInfo{}, nil // tamper → ignore optional relay discovery
 		}
-		allData = append(allData, r.data...)
+		return RelayInfo{}, fmt.Errorf("fetch relay-info block: %w", err)
 	}
-	return ParseRelayInfo(allData), nil
+	return ParseRelayInfo(raw[2:]), nil
 }
 
 // ParseRelayInfo decodes the relay-info payload (one "key=value" pair per
@@ -958,45 +1124,19 @@ func (f *Fetcher) FetchTitles(ctx context.Context) (map[string]string, error) {
 	if err != nil || len(block0) < 2 {
 		return map[string]string{}, nil
 	}
-
 	totalBlocks := int(binary.BigEndian.Uint16(block0))
-	payload0 := block0[2:]
-
-	if totalBlocks <= 1 {
-		titles, _ := protocol.DecodeTitlesData(payload0)
-		if titles == nil {
-			titles = map[string]string{}
-		}
-		return titles, nil
+	if totalBlocks < 1 {
+		totalBlocks = 1
 	}
-
-	// Fetch remaining blocks in parallel.
-	type blockResult struct {
-		data []byte
-		err  error
+	// Fetch any remaining blocks + the signature ExtraBlock in parallel and
+	// verify over the raw concatenation (block 0 includes the count prefix,
+	// matching the signed bytes). Any failure or tamper → empty map; titles
+	// are optional and the UI falls back to channel handles.
+	raw, err := f.fetchRawAndVerify(fetchCtx, protocol.TitlesChannel, totalBlocks, block0)
+	if err != nil {
+		return map[string]string{}, nil
 	}
-	results := make([]blockResult, totalBlocks)
-	results[0] = blockResult{data: payload0}
-
-	var wg sync.WaitGroup
-	for blk := 1; blk < totalBlocks; blk++ {
-		wg.Add(1)
-		go func(blk int) {
-			defer wg.Done()
-			data, fetchErr := f.FetchBlock(fetchCtx, protocol.TitlesChannel, uint16(blk))
-			results[blk] = blockResult{data: data, err: fetchErr}
-		}(blk)
-	}
-	wg.Wait()
-
-	var allData []byte
-	for _, r := range results {
-		if r.err != nil {
-			return map[string]string{}, nil
-		}
-		allData = append(allData, r.data...)
-	}
-	titles, _ := protocol.DecodeTitlesData(allData)
+	titles, _ := protocol.DecodeTitlesData(raw[2:])
 	if titles == nil {
 		titles = map[string]string{}
 	}
@@ -1066,12 +1206,40 @@ func (f *Fetcher) fetchChannelBlocks(ctx context.Context, channelNum int, blockC
 		}(i)
 	}
 
+	// When a key is pinned, fetch the signature ExtraBlock (index ==
+	// blockCount) in the same parallel batch so verification adds no extra
+	// round-trip. It does not feed `results` (the count stays blockCount); a
+	// missing block (old server) is tolerated.
+	var extraRaw []byte
+	needExtra := f.serverPubKey != nil
+	if needExtra {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			if b, err := f.FetchBlock(ctx, uint16(channelNum), uint16(blockCount)); err == nil {
+				extraRaw = b
+			}
+		}()
+	}
+
 	go func() {
 		wg.Wait()
 		close(results)
 	}()
 
 	ordered := make([][]byte, blockCount)
+	// When a key is pinned the signature ExtraBlock is one more fetch, so show
+	// the progress bar with one extra slot that fills once verification passes.
+	progressTotal := blockCount
+	if needExtra {
+		progressTotal++
+	}
 	completed := 0
 	for r := range results {
 		if r.err != nil {
@@ -1085,12 +1253,31 @@ func (f *Fetcher) fetchChannelBlocks(ctx context.Context, channelNum int, blockC
 		}
 		ordered[r.idx] = r.data
 		completed++
-		f.logProgress(fmt.Sprintf("Channel %d (%d/%d)", channelNum, completed, blockCount), float64(completed), float64(blockCount))
+		f.logProgress(fmt.Sprintf("Channel %d (%d/%d)", channelNum, completed, progressTotal), float64(completed), float64(progressTotal))
 	}
 
 	var allData []byte
 	for _, b := range ordered {
 		allData = append(allData, b...)
+	}
+
+	// Verify the server signature over the raw (pre-decompression) block
+	// concatenation using the ExtraBlock fetched above. A present-but-invalid
+	// signature is a hard failure (active tamper); a missing one (old server)
+	// is tolerated so the feed still works, just unverified. Log the outcome
+	// per channel so the verification state is visible.
+	if f.serverPubKey != nil {
+		switch verr := f.verifyExtraBytes(uint16(channelNum), allData, extraRaw); verr {
+		case nil:
+			f.log("[verify] channel %d: signature OK", channelNum)
+		case ErrExtraBlockInvalid:
+			f.log("[verify] channel %d: SIGNATURE INVALID — rejecting", channelNum)
+			return nil, fmt.Errorf("channel %d: %w", channelNum, verr)
+		default: // ErrUnverified
+			f.log("[verify] channel %d: no signature block (UNVERIFIED)", channelNum)
+		}
+		// Fill the extra progress slot once the verification step is done.
+		f.logProgress(fmt.Sprintf("Channel %d (%d/%d)", channelNum, progressTotal, progressTotal), float64(progressTotal), float64(progressTotal))
 	}
 
 	// Decompress if data has compression header

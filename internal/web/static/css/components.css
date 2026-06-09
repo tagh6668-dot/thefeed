@@ -1034,6 +1034,11 @@
       box-shadow: 0 0 0 1px var(--border)
     }
 
+    .default-config-row .btn {
+      flex: none;
+      white-space: nowrap
+    }
+
     .default-config-info {
       flex: 1;
       min-width: 0
@@ -1110,14 +1115,16 @@
       color: var(--text);
       border: 1px solid var(--border);
       padding: var(--space-2) var(--space-5);
-      border-radius: var(--radius-pill);
+      border-radius: var(--radius-md);
       font-size: var(--text-sm);
       box-shadow: var(--shadow-md);
       opacity: 0;
       transition: opacity var(--motion) var(--ease), transform var(--motion) var(--ease);
       z-index: 999;
       pointer-events: none;
-      white-space: nowrap
+      max-width: min(90vw, 420px);
+      text-align: center;
+      overflow-wrap: anywhere
     }
 
     #toast.show {

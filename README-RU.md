@@ -195,6 +195,7 @@ curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/instal
 `sudo bash install.sh v1.0.0` тоже работает.
 
 Повторный вход: `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --login`
+Показать конфиг (URI для импорта — домен, ключ, серверный ключ `sk=`, резолверы): `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --config`
 Удаление: `curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh | sudo bash -s -- --uninstall`
 
 
