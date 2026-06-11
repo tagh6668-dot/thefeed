@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseAndAggregate(t *testing.T) {
@@ -18,7 +19,7 @@ Jun 10 host thefeed[1]: [dns_hourly] {"type":"dns_hourly_report","from":"2026-06
 	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	agg, err := parseLines(path)
+	agg, err := parseLines(path, time.Time{}, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,9 +42,10 @@ Jun 10 host thefeed[1]: [dns_hourly] {"type":"dns_hourly_report","from":"2026-06
 	if agg.domains["t.example.com"] != 700 {
 		t.Fatalf("domain total = %d", agg.domains["t.example.com"])
 	}
-	// channelFetch = 3000 - 300 - 0(version) - 50(media) - reserved(100+20)
-	if cf := agg.channelFetch(); cf != 2530 {
-		t.Fatalf("channelFetch = %d, want 2530", cf)
+	// channelFetch = 3000 - 300(meta) - 0(version) - 50(media) - 40(chat) -
+	// reserved(100+20): chat cells are NOT channel fetches.
+	if cf := agg.channelFetch(); cf != 2490 {
+		t.Fatalf("channelFetch = %d, want 2490", cf)
 	}
 	// latest chat stats win.
 	if agg.lastChatStats["accounts"] != 15 {
@@ -51,7 +53,7 @@ Jun 10 host thefeed[1]: [dns_hourly] {"type":"dns_hourly_report","from":"2026-06
 	}
 
 	out := renderDashboard(agg, 21, 10, false)
-	for _, want := range []string{"thefeed server report", "Top channels", "Chat (messenger)", "Registered accounts", "t.example.com"} {
+	for _, want := range []string{"thefeed server report", "Channel-fetch queries", "Metadata queries", "Top channels", "Chat (messenger)", "Registered accounts", "t.example.com"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("dashboard missing %q", want)
 		}
@@ -59,6 +61,55 @@ Jun 10 host thefeed[1]: [dns_hourly] {"type":"dns_hourly_report","from":"2026-06
 	// -chat-db live count (21) overrides the report's 15.
 	if !strings.Contains(out, "21") {
 		t.Fatal("live account count not rendered")
+	}
+}
+
+func TestParseTimeRange(t *testing.T) {
+	const log = `[dns_hourly] {"type":"dns_hourly_report","from":"2026-06-10T09:00:00Z","to":"2026-06-10T10:00:00Z","totalDnsQueries":1000}
+[dns_hourly] {"type":"dns_hourly_report","from":"2026-06-10T10:00:00Z","to":"2026-06-10T11:00:00Z","totalDnsQueries":2000}
+[dns_hourly] {"type":"dns_hourly_report","from":"2026-06-11T09:00:00Z","to":"2026-06-11T10:00:00Z","totalDnsQueries":4000}
+`
+	path := filepath.Join(t.TempDir(), "log.txt")
+	if err := os.WriteFile(path, []byte(log), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	from, _, err := ParseTimeArg("2026-06-10 10:30")
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, dateOnly, err := ParseTimeArg("2026-06-10")
+	if err != nil || !dateOnly {
+		t.Fatalf("bare date: dateOnly=%v err=%v", dateOnly, err)
+	}
+	to = to.Add(24*time.Hour - time.Second) // whole day, as main.go does
+
+	agg, err := parseLines(path, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg.reports != 1 || agg.total != 2000 {
+		t.Fatalf("range filter: reports=%d total=%d, want 1/2000", agg.reports, agg.total)
+	}
+	// Open-ended from.
+	agg, err = parseLines(path, time.Time{}, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg.reports != 2 || agg.total != 3000 {
+		t.Fatalf("to-only filter: reports=%d total=%d, want 2/3000", agg.reports, agg.total)
+	}
+	// The header notes the active range; empty result says so.
+	out := renderDashboard(agg, -1, 10, false)
+	if !strings.Contains(out, "range:") {
+		t.Fatal("filtered dashboard missing range header")
+	}
+	agg, _ = parseLines(path, from.AddDate(1, 0, 0), time.Time{})
+	out = renderDashboard(agg, -1, 10, false)
+	if !strings.Contains(out, "No hourly reports in the selected range") {
+		t.Fatal("empty-range message missing")
+	}
+	if _, _, err := ParseTimeArg("not a time"); err == nil {
+		t.Fatal("bad time accepted")
 	}
 }
 

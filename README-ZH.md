@@ -154,6 +154,7 @@ thefeed-server ... --chat-domains c.example.com
 thefeed-server --report                       # 读取 ./data/dns_hourly.jsonl 和 ./data/chat.db
 thefeed-server --data-dir /srv/thefeed --report
 thefeed-server --report --report-refresh 5s   # 实时,每 5 秒刷新
+thefeed-server --report --report-from 2026-06-10 --report-to "2026-06-11 18:00"   # 仅此 UTC 时间范围
 ```
 
 它显示总查询/频道抓取/元数据/媒体/私信查询、带条形图的每频道均值、各域名总计、每报告火花线、按小时查询量以及私信统计(包括来自 `chat.db` 的实时账户数)— 与 `scripts/thefeed_log_report.py` 相同的聚合,绘制在终端中。

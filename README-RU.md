@@ -154,6 +154,7 @@ thefeed-server ... --chat-domains c.example.com
 thefeed-server --report                       # читает ./data/dns_hourly.jsonl и ./data/chat.db
 thefeed-server --data-dir /srv/thefeed --report
 thefeed-server --report --report-refresh 5s   # вживую, перерисовка каждые 5 с
+thefeed-server --report --report-from 2026-06-10 --report-to "2026-06-11 18:00"   # только этот диапазон UTC
 ```
 
 Показывает суммарные запросы / channel-fetch / метаданные / медиа / чат, средние по каналам со столбчатыми диаграммами, суммы по доменам, спарклайн по отчётам, запросы по часам суток и статистику чата (включая живой счётчик аккаунтов из `chat.db`) — те же агрегаты, что и `scripts/thefeed_log_report.py`, в терминале.

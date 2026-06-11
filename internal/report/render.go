@@ -107,9 +107,24 @@ func renderDashboard(a *aggregate, accounts, top int, live bool) string {
 		w("   %s(live; Ctrl-C to quit)%s", cDim, cReset)
 	}
 	w("\n")
+	filtered := !a.filterFrom.IsZero() || !a.filterTo.IsZero()
+	if filtered {
+		from, to := "start", "now"
+		if !a.filterFrom.IsZero() {
+			from = a.filterFrom.Format("2006-01-02 15:04")
+		}
+		if !a.filterTo.IsZero() {
+			to = a.filterTo.Format("2006-01-02 15:04")
+		}
+		w("%srange: %s … %s UTC%s\n", cDim, from, to, cReset)
+	}
 	if a.reports == 0 {
-		w("%sNo hourly reports yet.%s\n", cYel, cReset)
-		w("%sThe server writes one line per hour to {data-dir}/dns_hourly.jsonl.%s\n", cDim, cReset)
+		if filtered {
+			w("%sNo hourly reports in the selected range.%s\n", cYel, cReset)
+		} else {
+			w("%sNo hourly reports yet.%s\n", cYel, cReset)
+			w("%sThe server writes one line per hour to {data-dir}/dns_hourly.jsonl.%s\n", cDim, cReset)
+		}
 		return b.String()
 	}
 	span := fmt.Sprintf("%s … %s", a.firstTo.Format("2006-01-02 15:04"), a.lastTo.Format("2006-01-02 15:04"))
@@ -118,19 +133,19 @@ func renderDashboard(a *aggregate, accounts, top int, live bool) string {
 	// ---- totals ----
 	cf := a.channelFetch()
 	w("%sTotals%s\n", cBold, cReset)
-	w("  DNS queries        : %14s\n", comma(a.total))
-	w("  Channel-fetch      : %14s   (~%s–%s channel loads)\n",
+	w("  DNS queries          : %14s\n", comma(a.total))
+	w("  Channel-fetch queries: %14s   (~%s–%s channel loads)\n",
 		comma(cf), comma(cf/qpcHigh), comma(cf/qpcLow))
-	w("  Metadata           : %14s   (%.1f%%)\n", comma(a.metadata), pct(a.metadata, a.total))
+	w("  Metadata queries     : %14s   (%.1f%%)\n", comma(a.metadata), pct(a.metadata, a.total))
 	if a.media > 0 {
-		w("  Media              : %14s\n", comma(a.media))
+		w("  Media queries        : %14s\n", comma(a.media))
 	}
-	w("  Chat queries       : %14s   (%.1f%%)\n", comma(a.chat), pct(a.chat, a.total))
+	w("  Chat queries         : %14s   (%.1f%%)\n", comma(a.chat), pct(a.chat, a.total))
 	if a.version > 0 {
-		w("  Latest-version     : %14s\n", comma(a.version))
+		w("  Latest-version       : %14s\n", comma(a.version))
 	}
 	if a.invalid > 0 {
-		w("  Invalid (excluded) : %14s\n", comma(a.invalid))
+		w("  Invalid (excluded)   : %14s\n", comma(a.invalid))
 	}
 
 	// ---- chat block ----

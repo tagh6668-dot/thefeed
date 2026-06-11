@@ -305,6 +305,55 @@ func TestChatStorePersistenceAcrossReopen(t *testing.T) {
 	}
 }
 
+// TestChatStorePeriodicModePersistence: in periodic mode mutations live only in
+// RAM until a flush; Close must flush dirty accounts so a clean shutdown loses
+// nothing across reopen.
+func TestChatStorePeriodicModePersistence(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "chat.db")
+	limits := protocol.DefaultChatLimits()
+	now := time.Unix(1750003600, 0)
+
+	a := newChatTestUser(t)
+	b := newChatTestUser(t)
+
+	s1, err := OpenChatStore(path, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A long interval so nothing auto-flushes; only Close persists.
+	s1.EnablePeriodicSync(time.Hour)
+	s1.Register(a.rec, a.raw, now)
+	s1.Register(b.rec, b.raw, now)
+	if st, _, _, _, _ := s1.CommitMessage(a.addr, b.addr, 3, []byte("ram only"), now); st != protocol.ChatStatusOK {
+		t.Fatal("commit failed")
+	}
+	if st, _ := s1.Ack(b.addr, a.addr, 0, now); st != protocol.ChatStatusOK {
+		t.Fatal("ack failed")
+	}
+	s1.Close()
+
+	s2, err := OpenChatStore(path, limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if _, _, ok, _ := s2.Keys(a.addr, now); !ok {
+		t.Fatal("account a lost across reopen")
+	}
+	entries, err := s2.InboxStatus(b.addr, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Seq != 3 {
+		t.Fatalf("inbox after reopen: %+v", entries)
+	}
+	acc, del, _, _ := s2.PairState(b.addr, a.addr, now)
+	if acc != 3 || del != 0 {
+		t.Fatalf("pair state after reopen: acc=%d del=%d", acc, del)
+	}
+}
+
 func TestChatStoreSweepTTL(t *testing.T) {
 	s := newTestStore(t)
 	a := newChatTestUser(t)

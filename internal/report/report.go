@@ -74,6 +74,10 @@ type aggregate struct {
 	series          []int64       // per-report total, in order (for the sparkline)
 	lastChatStats   map[string]int64
 	firstTo, lastTo time.Time
+
+	// filterFrom/filterTo (either may be zero) limit which hourly reports are
+	// aggregated, by each report's window timestamp.
+	filterFrom, filterTo time.Time
 }
 
 func newAggregate() *aggregate {
@@ -96,6 +100,23 @@ func (a *aggregate) add(rep *hourlyReport) {
 	if rep.Type != "dns_hourly_report" {
 		return
 	}
+	ts := rep.To
+	if ts == "" {
+		ts = rep.From
+	}
+	t, terr := time.Parse(time.RFC3339, ts)
+	// Range filter: a report must carry a parsable timestamp to qualify.
+	if !a.filterFrom.IsZero() || !a.filterTo.IsZero() {
+		if terr != nil {
+			return
+		}
+		if !a.filterFrom.IsZero() && t.Before(a.filterFrom) {
+			return
+		}
+		if !a.filterTo.IsZero() && t.After(a.filterTo) {
+			return
+		}
+	}
 	a.reports++
 	a.total += rep.Total
 	a.metadata += rep.Metadata
@@ -107,11 +128,7 @@ func (a *aggregate) add(rep *hourlyReport) {
 	if rep.ChatStats != nil {
 		a.lastChatStats = rep.ChatStats
 	}
-	ts := rep.To
-	if ts == "" {
-		ts = rep.From
-	}
-	if t, err := time.Parse(time.RFC3339, ts); err == nil {
+	if terr == nil {
 		a.hours[t.Hour()] += rep.Total
 		if a.firstTo.IsZero() || t.Before(a.firstTo) {
 			a.firstTo = t
@@ -136,20 +153,38 @@ func (a *aggregate) add(rep *hourlyReport) {
 	}
 }
 
-// channelFetch = total - overhead (matches the python script).
+// channelFetch = total minus everything that isn't a content-block fetch:
+// metadata, version, media, chat cells, and the reserved/control channels.
 func (a *aggregate) channelFetch() int64 {
 	var reserved int64
 	for _, q := range a.reserved {
 		reserved += q
 	}
-	cf := a.total - a.metadata - a.version - a.media - reserved
+	cf := a.total - a.metadata - a.version - a.media - a.chat - reserved
 	if cf < 0 {
 		cf = 0
 	}
 	return cf
 }
 
-func parseLines(path string) (*aggregate, error) {
+// ParseTimeArg parses a --report-from/--report-to value as UTC. Accepted:
+// "2006-01-02", "2006-01-02 15:04", or RFC3339. dateOnly reports whether the
+// value named a bare date, so a range end can be widened to cover that day.
+func ParseTimeArg(s string) (t time.Time, dateOnly bool, err error) {
+	s = strings.TrimSpace(s)
+	if t, err = time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC(), false, nil
+	}
+	if t, err = time.ParseInLocation("2006-01-02 15:04", s, time.UTC); err == nil {
+		return t, false, nil
+	}
+	if t, err = time.ParseInLocation("2006-01-02", s, time.UTC); err == nil {
+		return t, true, nil
+	}
+	return time.Time{}, false, fmt.Errorf("unrecognized time %q (use 2006-01-02, \"2006-01-02 15:04\", or RFC3339)", s)
+}
+
+func parseLines(path string, from, to time.Time) (*aggregate, error) {
 	var f *os.File
 	if path == "" || path == "-" {
 		f = os.Stdin
@@ -162,6 +197,7 @@ func parseLines(path string) (*aggregate, error) {
 		defer f.Close()
 	}
 	agg := newAggregate()
+	agg.filterFrom, agg.filterTo = from, to
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for sc.Scan() {
@@ -208,6 +244,8 @@ type Options struct {
 	ChatDB  string        // optional chat bbolt path for a live account count
 	Top     int           // number of top channels to show (0 → 15)
 	Refresh time.Duration // 0 = render once; >0 = redraw every interval
+	From    time.Time     // include only reports at/after this time (zero = all)
+	To      time.Time     // include only reports at/before this time (zero = all)
 	Out     io.Writer     // defaults to os.Stdout
 }
 
@@ -222,7 +260,7 @@ func Run(opts Options) error {
 	live := opts.Refresh > 0 && opts.Path != "" && opts.Path != "-"
 
 	render := func() error {
-		agg, err := parseLines(opts.Path)
+		agg, err := parseLines(opts.Path, opts.From, opts.To)
 		if err != nil {
 			return err
 		}

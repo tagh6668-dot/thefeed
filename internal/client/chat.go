@@ -142,6 +142,7 @@ const (
 	chatInfoMaxAge      = 1 * time.Hour
 	chatControlAttempts = 6
 	chatProbeAttempts   = 3
+	chatCellAttempts    = 3
 	chatMaxUploadRounds = 20
 	chatMaxFinRounds    = 6
 	chatMaxRestarts     = 3
@@ -498,9 +499,24 @@ func (c *ChatClient) exchange(ctx context.Context, plaintext []byte) (status byt
 	if err != nil {
 		return 0, nil, err
 	}
-	data, err := c.sendQuery(ctx, qname)
-	if err != nil {
-		return 0, nil, err
+	// Retransmit the identical cell on transport loss (UDP has no delivery
+	// guarantee): every op is idempotent and the server handles each counter
+	// statelessly, so a duplicate — or a retry whose first copy did arrive —
+	// just re-runs the op and returns the same answer.
+	var data []byte
+	for attempt := 0; ; attempt++ {
+		data, err = c.sendQuery(ctx, qname)
+		if err == nil {
+			break
+		}
+		if attempt+1 >= chatCellAttempts {
+			return 0, nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, nil, ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 200 * time.Millisecond):
+		}
 	}
 	if protocol.ChatIsSessionLost(data) {
 		return 0, nil, errChatSessionLost

@@ -16,16 +16,19 @@ import (
 )
 
 // ChatStore persists chat accounts: a hot RAM cache in front of a bbolt file
-// (pure Go, single mmap'd file). Every mutation is written through to disk, so
-// a crash never loses committed state; the RAM cache is only a read cache with
-// idle eviction. Upload sessions are NOT here — they are ephemeral and live in
-// ChatService.
+// (pure Go, single mmap'd file). Two durability modes:
+//
+//   - write-through (default): every mutation is committed to disk before the
+//     op returns, so a crash never loses committed state. Concurrent writes go
+//     through bbolt's Batch (coalesced fsyncs).
+//   - periodic (EnablePeriodicSync): RAM is authoritative; mutations only mark
+//     the account dirty and RunSync writes all dirty accounts + fsyncs every
+//     interval. The hot path never touches disk, so ops stop convoying on the
+//     batch commit — a crash can lose up to ~interval of state.
 //
 // The RAM cache + its lock are SHARDED by address so commits to different
-// accounts proceed in parallel, and writes go through bbolt's Batch (which
-// coalesces the concurrent write transactions into far fewer fsyncs). Per
-// account, operations still serialize on that account's shard, so ordering and
-// correctness are preserved.
+// accounts proceed in parallel. Per account, operations still serialize on
+// that account's shard, so ordering and correctness are preserved.
 type ChatStore struct {
 	db     *bolt.DB
 	limits protocol.ChatLimits
@@ -39,6 +42,10 @@ type ChatStore struct {
 	// syncEvery > 0 enables periodic group durability: per-commit fsync is off
 	// and RunSync flushes the page cache to disk on this interval instead.
 	syncEvery time.Duration
+
+	// dirty tracks accounts whose RAM state is newer than disk (periodic mode).
+	dirtyMu sync.Mutex
+	dirty   map[[protocol.AddressSize]byte]struct{}
 }
 
 type chatShard struct {
@@ -121,7 +128,7 @@ func OpenChatStore(path string, limits protocol.ChatLimits) (*ChatStore, error) 
 		db.Close()
 		return nil, fmt.Errorf("chatstore bucket: %w", err)
 	}
-	s := &ChatStore{db: db, limits: limits}
+	s := &ChatStore{db: db, limits: limits, dirty: make(map[[protocol.AddressSize]byte]struct{})}
 	for i := range s.shards {
 		s.shards[i].hot = make(map[[protocol.AddressSize]byte]*chatHotEntry)
 	}
@@ -137,11 +144,11 @@ func (s *ChatStore) SetAccountTTL(d time.Duration) { s.accountTTL = d }
 // OpenChatStore.
 func (s *ChatStore) SetMaxAccounts(n int) { s.maxAccounts = n }
 
-// EnablePeriodicSync trades per-commit fsync for a periodic flush every
-// interval: commits land in the OS page cache immediately (high throughput,
-// CPU/RAM-bound rather than fsync-bound) and RunSync forces them to disk on the
-// interval. A crash can lose up to ~interval of just-received messages. Call
-// once after OpenChatStore, before serving, then start RunSync.
+// EnablePeriodicSync trades per-commit durability for a periodic flush every
+// interval: ops mutate only the RAM cache (high throughput, CPU/RAM-bound
+// rather than disk-bound) and RunSync writes the dirty accounts + fsyncs on
+// the interval. A crash can lose up to ~interval of just-received messages.
+// Call once after OpenChatStore, before serving, then start RunSync.
 func (s *ChatStore) EnablePeriodicSync(interval time.Duration) {
 	if interval <= 0 {
 		return
@@ -150,25 +157,29 @@ func (s *ChatStore) EnablePeriodicSync(interval time.Duration) {
 	s.db.NoSync = true
 }
 
-// RunSync flushes the store to disk every syncEvery until ctx is done, with a
-// final flush on shutdown. No-op unless EnablePeriodicSync was called.
+// RunSync writes dirty accounts and fsyncs every syncEvery until ctx is done,
+// with a final flush on shutdown. No-op unless EnablePeriodicSync was called.
 func (s *ChatStore) RunSync(ctx context.Context) {
 	if s.syncEvery <= 0 {
 		return
+	}
+	flush := func(tag string) {
+		if _, err := s.flushDirty(); err != nil {
+			log.Printf("[chat] %s store flush: %v", tag, err)
+		}
+		if err := s.db.Sync(); err != nil {
+			log.Printf("[chat] %s store sync: %v", tag, err)
+		}
 	}
 	t := time.NewTicker(s.syncEvery)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			if err := s.db.Sync(); err != nil {
-				log.Printf("[chat] final store sync: %v", err)
-			}
+			flush("final")
 			return
 		case <-t.C:
-			if err := s.db.Sync(); err != nil {
-				log.Printf("[chat] store sync: %v", err)
-			}
+			flush("periodic")
 		}
 	}
 }
@@ -176,8 +187,15 @@ func (s *ChatStore) RunSync(ctx context.Context) {
 // AccountCount returns the number of stored accounts.
 func (s *ChatStore) AccountCount() int { return int(s.accountCount.Load()) }
 
-// Close flushes nothing (write-through) and closes the file.
-func (s *ChatStore) Close() error { return s.db.Close() }
+// Close writes any dirty accounts (periodic mode) and closes the file.
+func (s *ChatStore) Close() error {
+	if s.syncEvery > 0 {
+		if _, err := s.flushDirty(); err != nil {
+			log.Printf("[chat] close store flush: %v", err)
+		}
+	}
+	return s.db.Close()
+}
 
 // Limits returns the store's configured limits.
 func (s *ChatStore) Limits() protocol.ChatLimits { return s.limits }
@@ -231,9 +249,23 @@ func (s *ChatStore) loadLocked(addr [protocol.AddressSize]byte, now time.Time) (
 	return acc, nil
 }
 
-// putLocked writes accounts through to disk via a coalescing batch and refreshes
-// the RAM cache. Caller holds the shard lock(s) for every addr in accs.
+// putLocked commits accounts and refreshes the RAM cache. Caller holds the
+// shard lock(s) for every addr in accs. Write-through mode blocks on a
+// coalescing bbolt batch; periodic mode just marks the accounts dirty (the
+// disk write happens in flushDirty), keeping the lock hold sub-microsecond —
+// holding shard locks across the batch wait was the throughput wall.
 func (s *ChatStore) putLocked(now time.Time, accs map[[protocol.AddressSize]byte]*chatAccount) error {
+	if s.syncEvery > 0 {
+		for addr, acc := range accs {
+			s.shardFor(addr).hot[addr] = &chatHotEntry{acc: acc, lastUsed: now}
+		}
+		s.dirtyMu.Lock()
+		for addr := range accs {
+			s.dirty[addr] = struct{}{}
+		}
+		s.dirtyMu.Unlock()
+		return nil
+	}
 	err := s.db.Batch(func(tx *bolt.Tx) error {
 		b := tx.Bucket(chatAccountsBucket)
 		for addr, acc := range accs {
@@ -254,6 +286,68 @@ func (s *ChatStore) putLocked(now time.Time, accs map[[protocol.AddressSize]byte
 		s.shardFor(addr).hot[addr] = &chatHotEntry{acc: acc, lastUsed: now}
 	}
 	return nil
+}
+
+// flushDirty writes every dirty account's current RAM state to disk in one
+// transaction (periodic mode). On failure the accounts are re-marked so the
+// next flush retries.
+func (s *ChatStore) flushDirty() (int, error) {
+	s.dirtyMu.Lock()
+	if len(s.dirty) == 0 {
+		s.dirtyMu.Unlock()
+		return 0, nil
+	}
+	dirty := s.dirty
+	s.dirty = make(map[[protocol.AddressSize]byte]struct{})
+	s.dirtyMu.Unlock()
+
+	type kv struct {
+		addr [protocol.AddressSize]byte
+		raw  []byte
+	}
+	raws := make([]kv, 0, len(dirty))
+	for addr := range dirty {
+		sh := s.shardFor(addr)
+		sh.mu.Lock()
+		e, ok := sh.hot[addr]
+		var raw []byte
+		var merr error
+		if ok {
+			raw, merr = json.Marshal(e.acc)
+		}
+		sh.mu.Unlock()
+		if !ok {
+			// Dirty entries are pinned in the hot cache until flushed; a miss
+			// means an eviction bug, and the state is gone.
+			log.Printf("[chat] flush: dirty account %x missing from cache", addr[:4])
+			continue
+		}
+		if merr != nil {
+			return 0, merr
+		}
+		raws = append(raws, kv{addr, raw})
+	}
+	if len(raws) == 0 {
+		return 0, nil
+	}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(chatAccountsBucket)
+		for _, e := range raws {
+			if err := b.Put(e.addr[:], e.raw); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		s.dirtyMu.Lock()
+		for _, e := range raws {
+			s.dirty[e.addr] = struct{}{}
+		}
+		s.dirtyMu.Unlock()
+		return 0, err
+	}
+	return len(raws), nil
 }
 
 // Register creates or refreshes the account for a verified registration record.
@@ -620,6 +714,15 @@ func (s *ChatStore) ResolvePeerHandle(owner [protocol.AddressSize]byte, handle [
 // Sweep expires idle RAM entries, inbox messages past TTL, and (if an account
 // TTL is set) long-inactive accounts.
 func (s *ChatStore) Sweep(now time.Time) (expiredMsgs, deletedAccounts int, err error) {
+	// Periodic mode: flush RAM first so the disk pass below prunes current
+	// state, not stale snapshots. Anything still dirty after this was touched
+	// moments ago, so the idle eviction can't hit it.
+	if s.syncEvery > 0 {
+		if _, err := s.flushDirty(); err != nil {
+			return 0, 0, err
+		}
+	}
+
 	// Drop idle RAM entries per shard.
 	for i := range s.shards {
 		sh := &s.shards[i]
@@ -692,12 +795,25 @@ func (s *ChatStore) Sweep(now time.Time) (expiredMsgs, deletedAccounts int, err 
 	if err != nil {
 		return 0, 0, err
 	}
-	// Drop any swept account from RAM so stale inboxes aren't served.
+	// Drop any swept account from RAM so stale inboxes aren't served — except
+	// entries dirtied during the disk pass: their RAM state is newer than what
+	// was just written/pruned, and dropping them would lose it. The next flush
+	// re-syncs disk; their expired messages go in the next sweep cycle.
 	if expiredMsgs > 0 || deletedAccounts > 0 {
+		keep := make(map[[protocol.AddressSize]byte]struct{})
+		s.dirtyMu.Lock()
+		for addr := range s.dirty {
+			keep[addr] = struct{}{}
+		}
+		s.dirtyMu.Unlock()
 		for i := range s.shards {
 			sh := &s.shards[i]
 			sh.mu.Lock()
-			sh.hot = make(map[[protocol.AddressSize]byte]*chatHotEntry)
+			for addr := range sh.hot {
+				if _, d := keep[addr]; !d {
+					delete(sh.hot, addr)
+				}
+			}
 			sh.mu.Unlock()
 		}
 	}

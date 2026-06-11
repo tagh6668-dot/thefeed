@@ -157,6 +157,7 @@ The server appends each hourly report as one JSON line to `<data-dir>/dns_hourly
 thefeed-server --report                       # reads ./data/dns_hourly.jsonl + ./data/chat.db
 thefeed-server --data-dir /srv/thefeed --report
 thefeed-server --report --report-refresh 5s   # live, redraw every 5s
+thefeed-server --report --report-from 2026-06-10 --report-to "2026-06-11 18:00"   # only this UTC range
 ```
 
 It shows total/channel-fetch/metadata/media/chat queries, per-channel averages with bar charts, per-domain totals, a per-report sparkline, queries-per-hour-of-day, and the chat stats (including a live account count from `chat.db`) — the same aggregations as `scripts/thefeed_log_report.py`, drawn in the terminal.

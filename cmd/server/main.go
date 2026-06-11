@@ -68,6 +68,8 @@ func main() {
 	showReport := flag.Bool("report", false, "Show the hourly stats dashboard (reads {data-dir}/dns_hourly.jsonl) and exit")
 	reportRefresh := flag.Duration("report-refresh", 0, "With --report, redraw every interval (e.g. 5s; 0 = once)")
 	reportTop := flag.Int("report-top", 15, "With --report, number of top channels to show")
+	reportFrom := flag.String("report-from", "", "With --report, include only reports from this UTC time (e.g. 2026-06-10 or \"2026-06-10 18:00\")")
+	reportTo := flag.String("report-to", "", "With --report, include only reports up to this UTC time (a bare date covers that whole day)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "thefeed-server %s\n\nServes Telegram/X feed content over encrypted DNS for censorship-resistant access.\n\nUsage:\n  thefeed-server [flags]\n\nFlags:\n", version.Version)
 		flag.PrintDefaults()
@@ -96,11 +98,33 @@ func main() {
 		if _, err := os.Stat(chatDB); err != nil {
 			chatDB = "" // no chat.db → skip the live account count
 		}
+		var fromT, toT time.Time
+		if *reportFrom != "" {
+			t, _, err := report.ParseTimeArg(*reportFrom)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "report: --report-from:", err)
+				os.Exit(1)
+			}
+			fromT = t
+		}
+		if *reportTo != "" {
+			t, dateOnly, err := report.ParseTimeArg(*reportTo)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "report: --report-to:", err)
+				os.Exit(1)
+			}
+			if dateOnly {
+				t = t.Add(24*time.Hour - time.Second)
+			}
+			toT = t
+		}
 		if err := report.Run(report.Options{
 			Path:    filepath.Join(*dataDir, "dns_hourly.jsonl"),
 			ChatDB:  chatDB,
 			Top:     *reportTop,
 			Refresh: *reportRefresh,
+			From:    fromT,
+			To:      toT,
 		}); err != nil {
 			fmt.Fprintln(os.Stderr, "report:", err)
 			os.Exit(1)

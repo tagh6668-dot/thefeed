@@ -356,6 +356,63 @@ func TestChatClientSessionRecovery(t *testing.T) {
 	}
 }
 
+// TestChatClientLossyTransport drops the first transmission of every in-context
+// cell (simulating UDP loss) and expects the cell retransmit layer to deliver
+// every op anyway — one lost datagram must not fail a whole SendMessage.
+func TestChatClientLossyTransport(t *testing.T) {
+	ts := newChatTestServer(t, protocol.DefaultChatLimits())
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+
+	var lossMu sync.Mutex
+	seen := map[string]bool{}
+	inner := a.f.exchangeFn
+	a.f.exchangeFn = func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+		qname := strings.TrimSuffix(m.Question[0].Name, ".")
+		for _, cd := range chatTestDomains {
+			if !strings.HasSuffix(strings.ToLower(qname), "."+cd) {
+				continue
+			}
+			sel, _, _, err := protocol.DecodeChatCell(a.f.queryKey, qname, cd)
+			// Handshake cells have their own round-level retry; the retransmit
+			// layer under test covers in-context cells, whose qname is identical
+			// across attempts.
+			if err == nil && !protocol.ChatIsHandshakeSelector(sel) {
+				lossMu.Lock()
+				first := !seen[qname]
+				seen[qname] = true
+				lossMu.Unlock()
+				if first {
+					return nil, 0, errors.New("synthetic packet loss")
+				}
+			}
+		}
+		return inner(ctx, m, addr)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := b.Register(ctx, nil); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+	if _, err := a.SendMessage(ctx, b.Identity().Addr, 1, "through the noise", nil); err != nil {
+		t.Fatalf("send over lossy transport: %v", err)
+	}
+	msgs, err := b.FetchInbox(ctx, nil)
+	if err != nil {
+		t.Fatalf("fetch: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Text != "through the noise" {
+		t.Fatalf("message not delivered intact: %+v", msgs)
+	}
+	lossMu.Lock()
+	dropped := len(seen)
+	lossMu.Unlock()
+	if dropped == 0 {
+		t.Fatal("transport never dropped a cell — test exercised nothing")
+	}
+}
+
 func TestChatClientFailClosed(t *testing.T) {
 	limits := protocol.DefaultChatLimits()
 	ts := newChatTestServer(t, limits)

@@ -500,6 +500,7 @@ thefeed-server ... --chat-domains c.example.com
 thefeed-server --report                       # خواندن ./data/dns_hourly.jsonl و ./data/chat.db
 thefeed-server --data-dir /srv/thefeed --report
 thefeed-server --report --report-refresh 5s   # زنده، هر ۵ ثانیه تازه‌سازی
+thefeed-server --report --report-from 2026-06-10 --report-to "2026-06-11 18:00"   # فقط همین بازه زمانی UTC
 ```
 
 مجموع کوئری‌ها، channel-fetch، متادیتا، مدیا و چت، میانگین هر کانال با نمودار میله‌ای، مجموع هر دامنه، اسپارک‌لاین، کوئری در هر ساعت روز و آمار چت (از جمله شمارش زنده اکانت‌ها از `chat.db`) را نشان می‌دهد — همان محاسبات `scripts/thefeed_log_report.py` در ترمینال.

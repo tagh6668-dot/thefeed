@@ -242,10 +242,22 @@ func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 		mux.HandleFunc(d+".", s.handleQuery)
 	}
 
+	// Bind the UDP socket ourselves so its buffers can be enlarged: under a
+	// query burst the kernel's default receive buffer overflows and silently
+	// drops packets before the handler ever sees them. Best-effort — the OS
+	// caps the value (e.g. net.core.rmem_max on Linux).
+	pc, err := net.ListenPacket("udp", s.listenAddr)
+	if err != nil {
+		s.reportFile.Close()
+		return err
+	}
+	if uc, ok := pc.(*net.UDPConn); ok {
+		_ = uc.SetReadBuffer(8 << 20)
+		_ = uc.SetWriteBuffer(8 << 20)
+	}
 	server := &dns.Server{
-		Addr:    s.listenAddr,
-		Net:     "udp",
-		Handler: mux,
+		PacketConn: pc,
+		Handler:    mux,
 	}
 
 	go func() {
@@ -265,10 +277,10 @@ func (s *DNSServer) ListenAndServe(ctx context.Context) error {
 	}()
 
 	log.Printf("[dns] listening on %s (domains: %s)", s.listenAddr, strings.Join(s.domains, ", "))
-	err := server.ListenAndServe()
+	err = server.ActivateAndServe()
 
-	// Server has stopped (clean shutdown or bind failure). Ensure the reporter
-	// exits, wait for its final flush to hit disk, then close the file.
+	// Server has stopped. Ensure the reporter exits, wait for its final flush
+	// to hit disk, then close the file.
 	cancelReport()
 	<-reportsDone
 	s.reportFile.Close()
