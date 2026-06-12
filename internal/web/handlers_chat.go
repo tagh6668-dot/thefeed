@@ -938,7 +938,7 @@ func (s *Server) handleChatThread(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		Peer   string `json:"peer"`
-		Action string `json:"action"` // delete | pin | unpin
+		Action string `json:"action"` // delete | clear | pin | unpin
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", 400)
@@ -962,6 +962,16 @@ func (s *Server) handleChatThread(w http.ResponseWriter, r *http.Request) {
 		delete(h.contacts, addr)
 		h.saveThreadsLocked()
 		h.saveContactsLocked()
+	case "clear":
+		// Wipe local message history but keep the conversation itself — the
+		// contact name, server binding, seq counters and delivery ticks all
+		// stay, so the chat stays open and the next send keeps numbering
+		// correctly. Local-only: the server keeps no delivered messages.
+		if th := h.threads[addr]; th != nil {
+			th.Msgs = nil
+			th.Unread = 0
+			h.saveThreadsLocked()
+		}
 	case "pin", "unpin":
 		th := h.threads[addr]
 		if th == nil {

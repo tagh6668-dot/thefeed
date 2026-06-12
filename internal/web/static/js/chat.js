@@ -748,7 +748,41 @@ async function chatDelete(addr) {
   if (!confirm(chatT('chat_delete_confirm'))) return;
   await fetch('/api/chat/thread', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: addr, action: 'delete' }) });
   showToast(chatT('chat_deleted'));
+  chatBackToList();
+}
+
+// chatClearMessages wipes the message history of a conversation but keeps the
+// conversation itself (contact, server, seq counters, ✓/✓✓). Local-only.
+async function chatClearMessages(addr) {
+  chatCloseMenu();
+  if (!confirm(chatT('chat_clear_confirm'))) return;
+  await fetch('/api/chat/thread', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: addr, action: 'clear' }) });
+  showToast(chatT('chat_cleared'));
+  if (chatState.view === 'thread' && chatState.peer === addr) chatRenderThread();
   chatLoadThreads();
+}
+
+// chatThreadMenu is the ⋮ overflow in the conversation header: clear just the
+// messages (keep the chat), or delete the whole conversation.
+function chatThreadMenu() {
+  var addr = chatState.peer;
+  if (!addr) return;
+  chatCloseMenu();
+  var nm = chatState.contacts[addr] || chatName(addr);
+  var sheet = document.createElement('div');
+  sheet.className = 'chat-sheet-overlay';
+  sheet.id = 'chatSheet';
+  sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+  sheet.innerHTML =
+    '<div class="chat-sheet">' +
+    '<div class="chat-sheet-title">' + esc(nm) + '</div>' +
+    '<button class="chat-sheet-item" onclick="chatClearMessages(\'' + escAttr(addr) + '\')">' +
+    icon('eraser') + ' ' + esc(chatT('chat_clear')) + '</button>' +
+    '<button class="chat-sheet-item chat-sheet-danger" onclick="chatDelete(\'' + escAttr(addr) + '\')">' +
+    icon('delete') + ' ' + esc(chatT('chat_delete')) + '</button>' +
+    '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>' +
+    '</div>';
+  document.getElementById('chatModal').appendChild(sheet);
 }
 
 async function chatRenderThread() {
@@ -794,6 +828,8 @@ async function chatRenderThread() {
   }
   html += '<button id="chatRefreshBtn" class="chat-icon-btn' + (chatState.polling ? ' spinning' : '') + '" ' +
     (chatState.polling ? 'disabled ' : '') + 'title="' + escAttr(chatT('chat_refresh')) + '" onclick="chatThreadRefresh()">' + icon('refresh') + '</button>';
+  html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_menu')) +
+    '" aria-label="' + escAttr(chatT('chat_menu')) + '" onclick="chatThreadMenu()">' + icon('more') + '</button>';
   html += '</div>';
   html += '<div class="chat-nextpoll-bar"><span id="chatNextPoll" class="chat-next-poll"></span>' +
     '<div class="chat-progress chat-progress-inline" id="chatRecvProgress"><div class="chat-progress-fill" id="chatRecvProgressFill"></div></div>' +
