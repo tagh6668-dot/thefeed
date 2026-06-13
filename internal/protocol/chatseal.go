@@ -21,9 +21,9 @@ import (
 // rate-limited DNS round-trips and only yields E2E-encrypted payloads.
 
 const (
-	chatSessionInfo = "thefeed-chat-session-v2"
-	chatSealEncInfo = "thefeed-chat-seal-enc-v2"
-	chatSealMacInfo = "thefeed-chat-seal-mac-v2"
+	chatSessionInfo = "thefeed-chat-session-v1"
+	chatSealEncInfo = "thefeed-chat-seal-enc-v1"
+	chatSealMacInfo = "thefeed-chat-seal-mac-v1"
 	// ChatSealTagSize is the truncated per-query MAC length.
 	ChatSealTagSize = 4
 )

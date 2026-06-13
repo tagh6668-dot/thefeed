@@ -45,7 +45,7 @@ const (
 const (
 	chatIdentityInfo = "thefeed-chat-identity-v1"
 	chatEncInfo      = "thefeed-chat-encryption-v1"
-	chatContentInfo  = "thefeed-chat-content-v2"
+	chatContentInfo  = "thefeed-chat-content-v1"
 	chatServerInfo   = "thefeed-chat-server-v1"
 	chatRoutingInfo  = "thefeed-chat-routing-v1"
 	chatChunkMACInfo = "thefeed-chat-chunkmac-v1"
@@ -213,7 +213,7 @@ func ChatPeerHandle(addr [AddressSize]byte) [ChatPeerHandleSize]byte {
 // auth handshake.
 const ChatAccountProofSize = 8
 
-const chatAccountProofInfo = "thefeed-chat-acct-proof-v2"
+const chatAccountProofInfo = "thefeed-chat-acct-proof-v1"
 
 // ChatAccountProof binds an auth handshake to the account: HMAC under kss (the
 // client↔server shared key, computable only by the account holder and the

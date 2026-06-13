@@ -18,7 +18,7 @@ import (
 
 const (
 	// ChatMessageVersion is the wire version of message envelopes.
-	ChatMessageVersion = 2
+	ChatMessageVersion = 1
 	// ChatRegisterVersion is the wire version of registration records.
 	ChatRegisterVersion = 1
 
