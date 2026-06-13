@@ -416,7 +416,8 @@ async function chatCheckAvailability() {
     // user actually turns one on. If none are reachable, fall through: the list
     // shows the unreachable banner (with its Retry button), and the next open
     // probes again.
-    if (chatState.open && chatAvailServers().length > 0 && chatUsableServers().length === 0) {
+    if (chatState.open && chatState.view === 'list' &&
+      chatAvailServers().length > 0 && chatUsableServers().length === 0) {
       chatServerSheet();
     }
   }
@@ -433,10 +434,20 @@ function chatShowCheckingServers() {
   var ov = document.createElement('div');
   ov.className = 'chat-sheet-overlay';
   ov.id = 'chatCheckingOverlay';
+  // Tappable backdrop: a slow/stuck DNS probe must never trap the user behind a
+  // full-screen blocking spinner. Tapping cancels the guide and frees the UI.
+  ov.onclick = function (e) {
+    if (e.target !== ov) return;
+    chatState.guideAfterAvail = false;
+    chatHideCheckingServers();
+    chatFlushPendingRender();
+  };
   ov.innerHTML = '<div class="chat-sheet chat-checking-card">' +
     '<div class="chat-spinner" aria-hidden="true"></div>' +
     '<div class="chat-checking-title">' + esc(chatT('chat_checking_servers')) + '</div>' +
-    '<div class="chat-sheet-hint">' + esc(chatT('chat_checking_servers_sub')) + '</div></div>';
+    '<div class="chat-sheet-hint">' + esc(chatT('chat_checking_servers_sub')) + '</div>' +
+    '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatState.guideAfterAvail=false;chatHideCheckingServers();chatFlushPendingRender()">' +
+    esc(chatT('cancel')) + '</button></div>';
   document.getElementById('chatModal').appendChild(ov);
 }
 function chatHideCheckingServers() {
@@ -858,10 +869,12 @@ function chatPickServer(addr, key) {
 // ---- conversation view ----
 
 async function openChatThread(addr) {
-  // Opening a conversation dismisses any open sheet (e.g. the server picker),
-  // so the render guard doesn't defer this user-initiated navigation.
-  var s = document.getElementById('chatSheet');
-  if (s) s.remove();
+  // Opening a conversation is explicit navigation: tear down EVERY overlay
+  // (server picker, the first-run "checking servers" spinner, a stray prompt) so
+  // the render guard can't defer it and a full-screen overlay can't eat the tap.
+  document.querySelectorAll('#chatModal .chat-sheet-overlay').forEach(function (o) { o.remove(); });
+  chatState.guideAfterAvail = false; // don't re-pop the guide over the thread
+  chatState.renderPending = false;
   chatState.view = 'thread';
   chatState.peer = addr;
   chatState.draft = ''; // each conversation starts with an empty compose box
