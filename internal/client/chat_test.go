@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -486,6 +487,67 @@ func TestChatClientSurvivesLostFinAck(t *testing.T) {
 	}
 }
 
+// TestChatClientRestartsOnFinUnknownSession reproduces the "progress reaches the
+// end then the send fails / sticks" bug: the session is replaced between DATA
+// and FIN (here by a server reboot), so the re-handshaked FIN lands on a session
+// with no upload and the server returns unknown_session. The message has in fact
+// committed (lost FIN-OK), so SendMessage must recover — reconcile via PeerStatus
+// and report success — not treat it as fatal or loop re-uploading.
+func TestChatClientRestartsOnFinUnknownSession(t *testing.T) {
+	ts := newChatTestServer(t, protocol.DefaultChatLimits())
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := b.Register(ctx, nil); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+
+	// The instant the server has committed A→B seq 1 (the FIN landed), reboot it
+	// and drop that FIN-OK. The FIN retransmit then hits the rebooted server,
+	// which re-handshakes A onto a fresh session that has no upload → opFin
+	// returns unknown_session. The fix must restart from SEND_START.
+	inner := a.f.exchangeFn
+	var mu sync.Mutex
+	tripped := false
+	a.f.exchangeFn = func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+		resp, rtt, err := inner(ctx, m, addr) // server processes (and may commit) here
+		mu.Lock()
+		defer mu.Unlock()
+		if !tripped {
+			if acc, _, _, _ := ts.store.PairState(b.Identity().Addr, a.Identity().Addr, time.Now()); acc >= 1 {
+				tripped = true
+				ts.reboot() // RAM sessions gone; the committed message persists
+				return nil, 0, errors.New("synthetic FIN-OK loss")
+			}
+		}
+		return resp, rtt, err
+	}
+
+	res, err := a.SendMessage(ctx, b.Identity().Addr, 1, "survives session swap at fin", nil)
+	if err != nil {
+		t.Fatalf("send must restart on fin unknown_session, got: %v", err)
+	}
+	if res.Seq != 1 {
+		t.Fatalf("seq = %d, want 1", res.Seq)
+	}
+	mu.Lock()
+	ok := tripped
+	mu.Unlock()
+	if !ok {
+		t.Fatal("reboot trigger never fired — test exercised nothing")
+	}
+
+	// Delivered exactly once despite the restart.
+	msgs, err := b.FetchInbox(ctx, nil)
+	if err != nil {
+		t.Fatalf("fetch inbox: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Text != "survives session swap at fin" {
+		t.Fatalf("inbox = %d msgs (%+v), want exactly 1", len(msgs), msgs)
+	}
+}
+
 // TestChatClientCounterCapRehandshakes drives the per-session op counter up to
 // the cap and verifies the next op transparently re-handshakes (resetting the
 // counter) instead of sealing into the reserved counter region — which would
@@ -675,5 +737,93 @@ func TestChatClientIsRegistered(t *testing.T) {
 	ghost[5] = 0x42
 	if ok, err := a.IsRegistered(ctx, ghost); err != nil || ok {
 		t.Fatalf("unknown peer: ok=%v err=%v, want false,nil", ok, err)
+	}
+}
+
+// TestChatInboxHoldsSeqAfterTransientGap guards the ack-gap data loss: when an
+// earlier message fails transiently (flaky resolver / sender key not yet
+// propagated) but a later one from the same sender fetches fine, FetchInbox
+// must withhold the later one too — otherwise the caller's ack watermark would
+// free the still-pending earlier seq and the sender would see ✓✓ for a message
+// the recipient never stored.
+func TestChatInboxHoldsSeqAfterTransientGap(t *testing.T) {
+	limits := protocol.DefaultChatLimits()
+	ts := newChatTestServer(t, limits)
+	a := newChatTestClient(t, ts)
+	b := newChatTestClient(t, ts)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	if err := b.Register(ctx, nil); err != nil {
+		t.Fatalf("register B: %v", err)
+	}
+	if _, err := a.SendMessage(ctx, b.Identity().Addr, 1, "first", nil); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if _, err := a.SendMessage(ctx, b.Identity().Addr, 2, "second", nil); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	// Warm B's peer-key cache so the in-FetchInbox keylookup doesn't hit the
+	// wire: STATUS is then cell #1 and the two block FETCHes are cells #2 (lower
+	// seq) and #3 (higher seq).
+	if _, err := b.FetchPeerKey(ctx, a.Identity().Addr); err != nil {
+		t.Fatalf("warm peer key: %v", err)
+	}
+
+	// Drop every retransmit of the lower seq's block fetch. exchange() retries
+	// the identical cell (same qname), so failing by qname — the 2nd distinct
+	// chat cell, after STATUS — exhausts all attempts and surfaces as a
+	// transient block-fetch failure for that one message.
+	var (
+		mu     sync.Mutex
+		order  int
+		target string
+		armed  int32
+	)
+	orig := b.f.exchangeFn
+	b.f.exchangeFn = func(ctx context.Context, m *dns.Msg, addr string) (*dns.Msg, time.Duration, error) {
+		qn := strings.ToLower(strings.TrimSuffix(m.Question[0].Name, "."))
+		isCell := false
+		for _, cd := range chatTestDomains {
+			if strings.HasSuffix(qn, "."+cd) {
+				isCell = true
+				break
+			}
+		}
+		if isCell && atomic.LoadInt32(&armed) == 1 {
+			mu.Lock()
+			if qn != target {
+				order++
+				if order == 2 {
+					target = qn
+				}
+			}
+			fail := qn == target
+			mu.Unlock()
+			if fail {
+				return nil, 0, fmt.Errorf("flaky resolver")
+			}
+		}
+		return orig(ctx, m, addr)
+	}
+
+	atomic.StoreInt32(&armed, 1)
+	msgs, err := b.FetchInbox(ctx, nil)
+	if err != nil {
+		t.Fatalf("fetch inbox (gap): %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("higher seq delivered across a gap (would be acked, losing the lower): %+v", msgs)
+	}
+
+	// Resolver recovers: both messages arrive intact, in order.
+	atomic.StoreInt32(&armed, 0)
+	msgs, err = b.FetchInbox(ctx, nil)
+	if err != nil {
+		t.Fatalf("fetch inbox (recovered): %v", err)
+	}
+	if len(msgs) != 2 || msgs[0].Seq != 1 || msgs[1].Seq != 2 ||
+		msgs[0].Text != "first" || msgs[1].Text != "second" {
+		t.Fatalf("recovered inbox mismatch: %+v", msgs)
 	}
 }

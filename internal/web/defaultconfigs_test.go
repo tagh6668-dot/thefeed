@@ -46,6 +46,18 @@ func TestHandleProfileDefaults(t *testing.T) {
 		if p.Nickname == "" || p.Domain == "" || p.Key == "" {
 			t.Errorf("incomplete profile: %+v", p)
 		}
+		// Both bundled profiles pin a server key and spread over extra domains.
+		if p.ServerKey == "" {
+			t.Errorf("profile %q missing server key", p.Nickname)
+		}
+		if len(p.ExtraDomains) == 0 {
+			t.Errorf("profile %q missing extra domains", p.Nickname)
+		}
+		for _, d := range p.ExtraDomains {
+			if d == "" || strings.Contains(d, "=") {
+				t.Errorf("profile %q extra domain not decoded: %q", p.Nickname, d)
+			}
+		}
 	}
 	if len(resp.Resolvers) != len(parseDefaultProfileResolvers()) {
 		t.Errorf("resolvers = %d, want %d", len(resp.Resolvers), len(parseDefaultProfileResolvers()))

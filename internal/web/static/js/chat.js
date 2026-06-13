@@ -15,6 +15,11 @@ var chatState = {
   pinned: {},        // addr -> true
   pendingServer: {}, // addr -> serverKey, for a new chat before its first send binds it
   peerStatus: {},    // addr -> {accepted, delivered, emojis}
+  pendingServers: {}, // addr -> [serverKey] with not-yet-delivered out messages (for ✓✓ probes)
+  scrollPeer: '',    // peer the scroll counters below belong to
+  msgCount: 0,       // messages currently rendered in the open thread
+  seenCount: 0,      // messages seen while at the bottom (for the ↓ button's unread badge)
+  lastActivity: 0,   // epoch ms of the last sent/received message (drives the adaptive poll rate)
   sending: false,
   sendProg: null,   // {done,total} of the in-flight send, so a mid-send thread
                     // re-render can repaint the progress bar it destroys
@@ -45,10 +50,14 @@ var chatState = {
 var CHAT_AVAIL_RETRIES = 4;      // probe attempts while guiding (resolvers may be flaky)
 var CHAT_AVAIL_RETRY_MS = 2500;  // wait between probe attempts
 
-// While the messenger is OPEN, poll the server this often for new messages and
-// delivery (✓✓) updates. When the messenger is closed the Go background loop
-// polls every 3 min. Each poll is ~1 query when the inbox is empty.
-var CHAT_FG_POLL_MS = 15000;
+// While the messenger is OPEN, poll the server for new messages and delivery
+// (✓✓) updates. When the messenger is closed the Go background loop polls every
+// 3 min. Each poll is ~1 query when the inbox is empty. The cadence is adaptive:
+// fast right after a message is sent/received, relaxing back to the idle rate
+// once the conversation goes quiet for CHAT_FG_ACTIVE_MS.
+var CHAT_FG_POLL_MS = 15000;       // idle cadence
+var CHAT_FG_POLL_FAST_MS = 5000;   // cadence during an active conversation
+var CHAT_FG_ACTIVE_MS = 60000;     // a send/receive keeps us "active" for this long
 
 function chatT(key) { return t(key) || key }
 
@@ -188,34 +197,57 @@ window.addEventListener('popstate', function () {
 });
 
 function chatStopForegroundTimer() {
-  if (chatState.fgTimer) { clearInterval(chatState.fgTimer); chatState.fgTimer = null; }
+  if (chatState.fgTimer) { clearTimeout(chatState.fgTimer); chatState.fgTimer = null; }
   if (chatState.cdTimer) { clearInterval(chatState.cdTimer); chatState.cdTimer = null; }
 }
 
-// chatStartForegroundTimer keeps the open messenger live: every CHAT_FG_POLL_MS
-// it pulls new incoming messages and, in a conversation, re-checks delivery
-// (✓✓). It runs in both the list and thread views. A 1s ticker drives the
-// "next check in Ns" countdown.
+// chatPollDelay picks the foreground poll cadence: fast while the conversation
+// is active (a message in the last CHAT_FG_ACTIVE_MS), idle otherwise.
+function chatPollDelay() {
+  var active = (Date.now() - (chatState.lastActivity || 0)) < CHAT_FG_ACTIVE_MS;
+  return active ? CHAT_FG_POLL_FAST_MS : CHAT_FG_POLL_MS;
+}
+
+// chatScheduleNextPoll arms a single timer for the next poll at the current
+// cadence (re-armed after each poll, and on chatBumpActivity to tighten it).
+function chatScheduleNextPoll() {
+  if (chatState.fgTimer) { clearTimeout(chatState.fgTimer); chatState.fgTimer = null; }
+  var delay = chatPollDelay();
+  chatState.nextPollAt = Date.now() + delay;
+  chatState.fgTimer = setTimeout(function () {
+    chatForegroundPoll();
+    if (chatState.open) chatScheduleNextPoll();
+  }, delay);
+}
+
+// chatBumpActivity marks a send/receive and tightens the poll cadence at once.
+function chatBumpActivity() {
+  chatState.lastActivity = Date.now();
+  if (chatState.fgTimer) chatScheduleNextPoll();
+}
+
+// chatStartForegroundTimer keeps the open messenger live: it pulls new incoming
+// messages and, in a conversation, re-checks delivery (✓✓). Runs in both the
+// list and thread views. A 1s ticker drives the "next check in Ns" countdown.
 function chatStartForegroundTimer() {
   chatStopForegroundTimer();
-  chatState.nextPollAt = Date.now() + CHAT_FG_POLL_MS;
-  chatState.fgTimer = setInterval(chatForegroundPoll, CHAT_FG_POLL_MS);
+  chatScheduleNextPoll();
   chatState.cdTimer = setInterval(chatUpdateCountdown, 1000);
   chatUpdateCountdown();
 }
 
 function chatForegroundPoll() {
   if (!chatState.open) { chatStopForegroundTimer(); return; }
-  chatState.nextPollAt = Date.now() + CHAT_FG_POLL_MS;
   // If chat is currently unavailable (e.g. the server was rebooting), keep
   // re-probing so the banner clears itself when the server returns — the user
   // shouldn't have to leave and re-enter to recover.
   if (chatState.info && chatState.info.exists && !chatAvailable()) chatCheckAvailability();
   var peer = chatState.peer;
-  if (chatState.view === 'thread' && peer) chatFetchPeerStatus(peer);
+  if (chatState.view === 'thread' && peer) chatRefreshStatus(peer);
   fetch('/api/chat/poll', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
     chatHidePollProgress();
     if (d && d.ok && d.got > 0) {
+      chatBumpActivity();
       chatNotifyNew(d.got);
       chatLoadThreads();
       if (chatState.view === 'thread' && chatState.peer === peer) chatRenderThread();
@@ -444,6 +476,34 @@ function chatUpdateBadge() {
   b.className = 'chat-sidebar-badge' + (total > 0 ? ' on' : '');
 }
 
+// chatMaxMap returns a new {serverKey:seq} holding the larger value per key
+// across a and b (delivery counters only ever rise).
+function chatMaxMap(a, b) {
+  var out = {};
+  [a, b].forEach(function (m) {
+    if (!m) return;
+    for (var k in m) if (m[k] > (out[k] || 0)) out[k] = m[k];
+  });
+  return out;
+}
+
+// chatMergeStatus combines two {accepted,delivered} status sources into one,
+// taking the per-server max so the freshest counter from either side wins.
+function chatMergeStatus(a, b) {
+  return {
+    accepted: chatMaxMap(a && a.accepted, b && b.accepted),
+    delivered: chatMaxMap(a && a.delivered, b && b.delivered)
+  };
+}
+
+// Refresh the unread badge whenever the app returns to the foreground: a
+// message stored while we were backgrounded (the case behind a tapped
+// notification) has no live SSE event to replay, so reload the persisted
+// threads. Without this the badge stays stale until the messenger is opened.
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden) chatLoadThreads();
+});
+
 function chatQuotaLine() {
   var q = chatState.quota;
   if (q && q.remaining != null) {
@@ -516,19 +576,21 @@ function chatRenderList() {
   html += '<button class="chat-back" onclick="closeMessenger()" aria-label="close">' + icon('arrowLeft') + '</button>';
   // The title doubles as the server picker: tap it (or the antenna button) to
   // see and toggle which servers the messenger is on for.
-  var sub = avail ? chatT('chat_servers_active').replace('{n}', chatUsableServers().length) : chatT('chat_checking');
+  // Subtitle: the live probe's usable count once it lands; before that, if a
+  // server is already set up, the disk-backed enabled count (instant, from
+  // /api/chat/info) so a known-good setup never shows "checking…" on every open.
+  var sub = avail ? chatT('chat_servers_active').replace('{n}', chatUsableServers().length)
+    : (info.anyEnabled ? chatT('chat_servers_active').replace('{n}', info.enabledCount || 0)
+      : chatT('chat_checking'));
   html += '<div class="chat-topbar-title chat-servers-link" onclick="chatServerSheet()">' +
-    '<div class="chat-peer-name">' + esc(chatT('chat_title')) +
-    ' <span class="chat-exp-tag">' + esc(chatT('chat_experimental')) + '</span></div>' +
-    '<div class="chat-peer-sub">' + esc(sub) + ' ' + icon('chevronDown') + '</div></div>';
-  html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_manage_servers')) + '" onclick="chatServerSheet()">' + icon('antenna') + '</button>';
-  html += '<button class="chat-icon-btn' + (chatSoundOff() ? ' chat-muted' : '') + '" title="' +
-    escAttr(chatT(chatSoundOff() ? 'chat_sound_off' : 'chat_sound_on')) + '" onclick="chatToggleSound()">' + icon('music') + '</button>';
-  html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_log')) + '" onclick="chatOpenLog()">' + icon('log') + '</button>';
+    '<div class="chat-peer-name">' + esc(chatT('chat_title')) + '</div>' +
+    '<div class="chat-peer-sub"><span class="chat-exp-tag">' + esc(chatT('chat_experimental')) + '</span> ' +
+    esc(sub) + ' ' + icon('chevronDown') + '</div></div>';
   if (chatAvailable()) {
     html += '<button id="chatRefreshBtn" class="chat-icon-btn' + (chatState.polling ? ' spinning' : '') + '" ' +
       (chatState.polling ? 'disabled ' : '') + 'title="' + escAttr(chatT('chat_refresh')) + '" onclick="chatPollNow()">' + icon('refresh') + '</button>';
   }
+  html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_menu')) + '" aria-label="' + escAttr(chatT('chat_menu')) + '" onclick="chatListMenu()">' + icon('more') + '</button>';
   html += '</div>';
   if (chatAvailable()) html += '<div class="chat-nextpoll-bar"><span id="chatNextPoll" class="chat-next-poll"></span></div>';
 
@@ -537,7 +599,13 @@ function chatRenderList() {
   // Status banner: distinct states (checking / pick-a-server / need-key /
   // disabled / ok).
   if (avail === null) {
-    html += '<div class="chat-banner chat-banner-info">' + esc(chatT('chat_checking')) + '</div>';
+    // Only show "checking…" on a fresh setup. If a server is already enabled the
+    // messenger is functional (threads + address render from local state), so
+    // skip the banner and let the background probe quietly refresh — no flash on
+    // every app open.
+    if (!info.anyEnabled) {
+      html += '<div class="chat-banner chat-banner-info">' + esc(chatT('chat_checking')) + '</div>';
+    }
   } else if (!avail.available) {
     if (chatAvailServers().length > 0) {
       // Reachable servers exist but none is enabled — guide the opt-in (warn
@@ -711,12 +779,16 @@ function chatServerSheet() {
     var state = !sv.available ? chatT('chat_server_unreachable')
       : (sv.enabled ? chatT('chat_server_on') : chatT('chat_server_off'));
     var action = sv.enabled ? chatT('chat_server_turn_off') : chatT('chat_server_turn_on');
+    // No turn-on button for a server with no chat: there's nothing to enable.
+    // An enabled-but-unreachable server keeps its "turn off" so the user can
+    // still opt out.
+    var btn = (sv.available || sv.enabled) ?
+      '<button class="chat-btn-soft" onclick="chatToggleServer(\'' + escAttr(sv.key) + '\',' +
+      (sv.enabled ? 'false' : 'true') + ')">' + esc(action) + '</button>' : '';
     items += '<div class="chat-server-row">' +
       '<div class="chat-server-info"><div class="chat-server-name">' + esc(label) + '</div>' +
       '<div class="chat-server-state' + (sv.enabled ? ' on' : '') + (sv.available ? '' : ' off') + '">' + esc(state) + '</div></div>' +
-      '<button class="chat-btn-soft" ' + (sv.available ? '' : 'disabled ') +
-      'onclick="chatToggleServer(\'' + escAttr(sv.key) + '\',' + (sv.enabled ? 'false' : 'true') + ')">' +
-      esc(action) + '</button></div>';
+      btn + '</div>';
   });
   items += '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>';
   sheet.innerHTML = '<div class="chat-sheet">' + items + '</div>';
@@ -937,6 +1009,24 @@ function chatThreadMenu() {
   document.getElementById('chatModal').appendChild(sheet);
 }
 
+// chatListMenu is the ⋮ overflow on the chat list: sound toggle and log.
+function chatListMenu() {
+  chatCloseMenu();
+  var sheet = document.createElement('div');
+  sheet.className = 'chat-sheet-overlay';
+  sheet.id = 'chatSheet';
+  sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+  sheet.innerHTML =
+    '<div class="chat-sheet">' +
+    '<button class="chat-sheet-item" onclick="chatToggleSound();chatListMenu()">' +
+    icon('music') + ' ' + esc(chatT(chatSoundOff() ? 'chat_sound_off' : 'chat_sound_on')) + '</button>' +
+    '<button class="chat-sheet-item" onclick="chatCloseMenu();chatOpenLog()">' +
+    icon('log') + ' ' + esc(chatT('chat_log')) + '</button>' +
+    '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>' +
+    '</div>';
+  document.getElementById('chatModal').appendChild(sheet);
+}
+
 async function chatRenderThread() {
   var addr = chatState.peer;
   if (!addr) return;
@@ -968,11 +1058,13 @@ async function chatRenderThread() {
     data = await r.json();
   } catch (e) { }
   var msgs = data.msgs || []; // server may omit / null for an empty thread
-  // Ticks: prefer the live peer-status probe, but fall back to the counters
-  // persisted in the thread file so ✓/✓✓ survive an app restart instead of
-  // regressing to 🕓 until the first DNS status round trip completes.
-  var st = chatState.peerStatus[addr] ||
-    { accepted: data.accepted || 0, delivered: data.delivered || 0 };
+  // Per-server ✓/✓✓ high-water seq (seq numbering is per server). Merge the
+  // persisted thread counters (fresh: a just-committed send is bumped here)
+  // with the live probe, taking the max per server. Merging — not "probe ||
+  // persisted" — is what keeps a sent message's ✓ from regressing to 🕓 when a
+  // stale probe (e.g. taken on another server mid-switch) lacks that seq.
+  var st = chatMergeStatus({ accepted: data.accepted, delivered: data.delivered },
+    chatState.peerStatus[addr]);
   var nm = data.name || chatName(addr);
   var threadServer = data.server || chatState.pendingServer[addr] || '';
   chatState.curServer = threadServer; // server this conversation currently sends via
@@ -998,6 +1090,7 @@ async function chatRenderThread() {
     '<div class="chat-progress chat-progress-inline" id="chatRecvProgress"><div class="chat-progress-fill" id="chatRecvProgressFill"></div></div>' +
     '<span class="chat-progress-label" id="chatRecvProgressLabel"></span></div>';
 
+  html += '<div class="chat-body-wrap">';
   html += '<div class="chat-body" id="chatMsgsBody">';
   // E2E safety code at the top; tap to expand the explainer.
   if (st.emojis) {
@@ -1021,7 +1114,7 @@ async function chatRenderThread() {
   for (var pj = msgs.length - 1; pj >= 0; pj--) {
     if (msgs[pj].dir === 'in' && msgs[pj].server) { peerServer = msgs[pj].server; peerTS = msgs[pj].ts || 0; break; }
   }
-  var lastDate = '', lastServer = '';
+  var lastDate = '', lastServer = '', pending = {};
   msgs.forEach(function (m) {
     // Day separator: insert a centered date chip whenever the day changes, so a
     // multi-day conversation reads correctly (Jalali for fa, Gregorian for en).
@@ -1038,18 +1131,26 @@ async function chatRenderThread() {
     if (m.server) lastServer = m.server;
     var ticks = '';
     if (m.dir === 'out') {
-      if (st.delivered >= m.seq) ticks = ' ✓✓';
-      else if (st.accepted >= m.seq) ticks = ' ✓';
-      else ticks = ' 🕓';
+      var sk = m.server || threadServer || '';
+      var acc = (st.accepted && st.accepted[sk]) || 0;
+      var del = (st.delivered && st.delivered[sk]) || 0;
+      // ticks is HTML (inline SVG icons), inserted unescaped.
+      if (del >= m.seq) ticks = ' ' + icon('tickDouble');
+      else if (acc >= m.seq) ticks = ' ' + icon('tickSingle');
+      else ticks = ' ' + icon('clock');
+      // Track servers with a sent-but-undelivered message so the status refresh
+      // probes them too — otherwise ✓✓ never lands after switching servers.
+      if (sk && del < m.seq) pending[sk] = true;
     }
     html += '<div class="chat-msg ' + (m.dir === 'in' ? 'in' : 'out') + '" dir="auto">' +
       '<span class="chat-msg-text">' + esc(m.text) + '</span>' +
       '<span class="chat-msg-meta">' +
       '<button type="button" class="chat-msg-copy"' +
       ' onclick="event.stopPropagation();chatCopyMsg(this)">' + esc(chatT('chat_copy')) + '</button>' +
-      '<span class="chat-msg-time">' + chatFmtTime(m.ts) + esc(ticks) + '</span></span></div>' +
+      '<span class="chat-msg-time">' + chatFmtTime(m.ts) + ticks + '</span></span></div>' +
       '<div class="chat-clearfix"></div>';
   });
+  chatState.pendingServers[addr] = Object.keys(pending);
   // Peer moved to a server we don't send through, after our own last switch →
   // offer to follow (server-verified).
   if (peerServer && threadServer && peerServer !== threadServer && peerTS > (data.serverSetAt || 0)) {
@@ -1061,7 +1162,12 @@ async function chatRenderThread() {
       escAttr(peerServer) + '\')">' +
       chatFmtBidi(chatT('chat_switch_reply'), { s: plabel }) + '</button></div>';
   }
-  html += '</div>';
+  html += '</div>'; // .chat-body
+  html += '<button id="chatScrollDown" class="chat-scroll-down hidden" aria-label="' +
+    escAttr(chatT('chat_scroll_bottom')) + '" title="' + escAttr(chatT('chat_scroll_bottom')) +
+    '" onclick="chatScrollToBottom()">' + icon('chevronDown') +
+    '<span class="chat-scroll-down-badge" id="chatScrollDownBadge"></span></button>';
+  html += '</div>'; // .chat-body-wrap
 
   html += '<div class="chat-footer">';
   var ql = chatQuotaLine();
@@ -1078,6 +1184,13 @@ async function chatRenderThread() {
   document.getElementById('chatModal').innerHTML = html;
   var body = document.getElementById('chatMsgsBody');
   if (body) body.scrollTop = keepScroll ? prevScroll : body.scrollHeight;
+  // ↓ button + unread-while-scrolled badge. Reset the seen-count when the open
+  // peer changes; if we're at the bottom now, everything is seen.
+  if (chatState.scrollPeer !== addr) { chatState.scrollPeer = addr; chatState.seenCount = msgs.length; }
+  chatState.msgCount = msgs.length;
+  if (!keepScroll) chatState.seenCount = msgs.length;
+  if (body) body.onscroll = chatUpdateScrollBtn;
+  chatUpdateScrollBtn();
   // Restore the in-progress draft + caret before resizing the input.
   var inp = document.getElementById('chatInput');
   if (inp) {
@@ -1102,6 +1215,33 @@ async function chatRenderThread() {
   if (inp && (firstRender || hadFocus)) {
     try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   }
+}
+
+// chatUpdateScrollBtn shows the floating ↓ button while the user is scrolled up,
+// with a badge counting messages that arrived since they were last at the
+// bottom. Runs on every body scroll and after each thread render.
+function chatUpdateScrollBtn() {
+  var body = document.getElementById('chatMsgsBody');
+  var btn = document.getElementById('chatScrollDown');
+  if (!body || !btn) return;
+  var atBottom = body.scrollHeight - body.scrollTop - body.clientHeight <= 40;
+  if (atBottom) chatState.seenCount = chatState.msgCount; // caught up
+  btn.classList.toggle('hidden', atBottom);
+  var unseen = Math.max(0, chatState.msgCount - chatState.seenCount);
+  var badge = document.getElementById('chatScrollDownBadge');
+  if (badge) {
+    badge.textContent = unseen > 0 ? (unseen > 99 ? '99+' : unseen) : '';
+    badge.classList.toggle('on', unseen > 0);
+  }
+}
+
+// chatScrollToBottom jumps to the latest message (the ↓ button and post-send).
+function chatScrollToBottom() {
+  var body = document.getElementById('chatMsgsBody');
+  if (!body) return;
+  body.scrollTop = body.scrollHeight;
+  chatState.seenCount = chatState.msgCount;
+  chatUpdateScrollBtn();
 }
 
 // chatMaxBytes is the server's per-message byte cap (from ChatInfo), or a safe
@@ -1276,16 +1416,34 @@ function chatRenamePeer() {
   });
 }
 
-async function chatFetchPeerStatus(addr) {
+async function chatFetchPeerStatus(addr, server) {
   try {
-    var r = await fetch('/api/chat/peer-status?peer=' + encodeURIComponent(addr));
+    var url = '/api/chat/peer-status?peer=' + encodeURIComponent(addr);
+    if (server) url += '&server=' + encodeURIComponent(server);
+    var r = await fetch(url);
     var d = await r.json();
     if (d.ok) {
+      // The response carries the full per-server map; merge (max) so probing
+      // one server never drops another's already-known counters.
+      var prev = chatState.peerStatus[addr];
+      d.accepted = chatMaxMap(prev && prev.accepted, d.accepted);
+      d.delivered = chatMaxMap(prev && prev.delivered, d.delivered);
       chatState.peerStatus[addr] = d;
       if (d.quota) chatState.quota = d.quota; // live "N sends left this hour"
       if (chatState.view === 'thread' && chatState.peer === addr) chatRenderThread();
     }
   } catch (e) { }
+}
+
+// chatRefreshStatus probes the conversation's bound server AND every other
+// server it still has an undelivered message on, so ✓✓ lands even after the
+// user switched the conversation to a different server mid-thread.
+async function chatRefreshStatus(addr) {
+  await chatFetchPeerStatus(addr, '');
+  var pend = chatState.pendingServers[addr] || [];
+  for (var i = 0; i < pend.length; i++) {
+    if (pend[i] && pend[i] !== chatState.curServer) await chatFetchPeerStatus(addr, pend[i]);
+  }
 }
 
 async function sendChatMessage() {
@@ -1334,13 +1492,15 @@ async function sendChatMessage() {
       if (liveInp) liveInp.value = '';
       if (d.remaining != null) chatState.quota = { remaining: d.remaining, resetUnix: d.resetUnix };
       delete chatState.pendingServer[peerAddr]; // thread is now bound to its server
+      chatBumpActivity(); // active conversation → poll faster for the reply
       await chatRenderThread();
+      chatScrollToBottom(); // jump to your just-sent message, like Telegram
       // Nudge the delivery status: ✓ (accepted) is immediate; ✓✓ lands once
       // the recipient polls. The thread timer keeps refreshing after that.
       var peer = chatState.peer;
-      chatFetchPeerStatus(peer);
-      setTimeout(function () { if (chatState.peer === peer) chatFetchPeerStatus(peer); }, 3000);
-      setTimeout(function () { if (chatState.peer === peer) chatFetchPeerStatus(peer); }, 8000);
+      chatRefreshStatus(peer);
+      setTimeout(function () { if (chatState.peer === peer) chatRefreshStatus(peer); }, 3000);
+      setTimeout(function () { if (chatState.peer === peer) chatRefreshStatus(peer); }, 8000);
     } else {
       var msg = chatT(d.error || 'chat_err_generic');
       if (d.error === 'chat_err_rate_limited' && d.resetUnix) {
@@ -1510,13 +1670,14 @@ function chatOnSSE(data) {
     // Messages are stored but not yet acked — render them now so the UI doesn't
     // wait on the ack round trip. Notification is left to the 'inbox' event so
     // it isn't doubled.
+    chatBumpActivity();
     chatLoadThreads().then(function () {
       if (chatState.open && chatState.view === 'thread') chatRenderThread();
     });
     return;
   }
   if (data.type === 'inbox') {
-    if (data.got > 0) chatNotifyNew(data.got);
+    if (data.got > 0) { chatBumpActivity(); chatNotifyNew(data.got); }
     chatLoadThreads().then(function () {
       if (chatState.open && chatState.view === 'thread') chatRenderThread();
     });

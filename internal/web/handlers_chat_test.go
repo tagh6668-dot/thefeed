@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -125,6 +127,65 @@ func TestChatServerEnableConsent(t *testing.T) {
 		strings.NewReader(`{"action":"server","server":"srv.example.com","on":true}`)))
 	if rec.Code == 200 {
 		t.Fatal("server enabled without an identity")
+	}
+}
+
+// TestChatPostSendServer covers the binding decision after a send: a deliberate
+// mid-send switch must stick (no revert to the server we happened to send on),
+// while a reroute off a disabled bound server is followed.
+func TestChatPostSendServer(t *testing.T) {
+	cases := []struct {
+		name                           string
+		current, boundAtStart, sentVia string
+		wantServer                     string
+		wantChanged                    bool
+	}{
+		{"first send binds", "", "", "a.example", "a.example", true},
+		{"normal send, unchanged", "a.example", "a.example", "a.example", "a.example", false},
+		{"disabled reroute followed", "x.disabled", "x.disabled", "a.example", "a.example", true},
+		{"deliberate mid-send switch kept", "b.example", "a.example", "a.example", "b.example", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, changed := chatPostSendServer(c.current, c.boundAtStart, c.sentVia)
+			if got != c.wantServer || changed != c.wantChanged {
+				t.Fatalf("chatPostSendServer(%q,%q,%q) = (%q,%v), want (%q,%v)",
+					c.current, c.boundAtStart, c.sentVia, got, changed, c.wantServer, c.wantChanged)
+			}
+		})
+	}
+}
+
+// TestChatInfoEnabledCount checks /api/chat/info reports the enabled-server
+// count instantly (no DNS), so a set-up messenger renders its header without the
+// "checking…" flash on every open.
+func TestChatInfoEnabledCount(t *testing.T) {
+	s := newChatTestServer(t)
+	s.chat.mu.Lock()
+	_ = s.chat.ensureIdentityLocked()
+	s.chat.servers = map[string]*perServerChat{
+		"a.example.com": {serverKey: "a.example.com"},
+		"b.example.com": {serverKey: "b.example.com"},
+	}
+	s.chat.enabled = map[string]bool{"a.example.com": true}
+	s.chat.mu.Unlock()
+
+	rec := httptest.NewRecorder()
+	s.handleChatInfo(rec, httptest.NewRequest(http.MethodGet, "/api/chat/info", nil))
+	if rec.Code != 200 {
+		t.Fatalf("info: %d", rec.Code)
+	}
+	var resp struct {
+		Exists       bool `json:"exists"`
+		AnyEnabled   bool `json:"anyEnabled"`
+		EnabledCount int  `json:"enabledCount"`
+		ServerCount  int  `json:"serverCount"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Exists || !resp.AnyEnabled || resp.EnabledCount != 1 || resp.ServerCount != 2 {
+		t.Fatalf("unexpected info: %+v", resp)
 	}
 }
 
@@ -265,6 +326,7 @@ func TestChatResolveServerPrecedence(t *testing.T) {
 		"b.example.com": {serverKey: "b.example.com"},
 	}
 	h.activeKey = "a.example.com"
+	h.enabled = map[string]bool{"a.example.com": true, "b.example.com": true}
 	h.threads["addr1"] = &chatThreadFile{Server: "b.example.com"}
 	h.mu.Unlock()
 
@@ -280,9 +342,32 @@ func TestChatResolveServerPrecedence(t *testing.T) {
 	if ps := h.resolveServer("addr2", ""); ps == nil || ps.serverKey != "a.example.com" {
 		t.Fatal("active server should be the fallback")
 	}
+
+	// Disabling the bound server routes the conversation to an enabled one
+	// instead of silently continuing on the disabled server.
+	h.mu.Lock()
+	h.enabled["b.example.com"] = false
+	h.mu.Unlock()
+	if ps := h.resolveServer("addr1", ""); ps == nil || ps.serverKey != "a.example.com" {
+		t.Fatalf("disabled bound server should fall back to an enabled one, got %v", ps)
+	}
+	// But an explicit pick of the disabled server is still honored (the send
+	// path re-enables it).
+	if ps := h.resolveServer("addr1", "b.example.com"); ps == nil || ps.serverKey != "b.example.com" {
+		t.Fatal("explicit request should win even when disabled")
+	}
+	// No enabled server at all → nil.
+	h.mu.Lock()
+	h.enabled = map[string]bool{}
+	h.mu.Unlock()
+	if ps := h.resolveServer("addr1", ""); ps != nil {
+		t.Fatal("expected nil when no server is enabled")
+	}
+
 	// No servers at all → nil.
 	h.mu.Lock()
 	h.servers = map[string]*perServerChat{}
+	h.enabled = map[string]bool{"a.example.com": true}
 	h.mu.Unlock()
 	if ps := h.resolveServer("addr1", ""); ps != nil {
 		t.Fatal("expected nil with no servers")
@@ -345,6 +430,62 @@ func TestChatThreadPinAndDelete(t *testing.T) {
 	s.handleChatThread(rec, httptest.NewRequest(http.MethodPost, "/api/chat/thread", strings.NewReader(`{"peer":"nope","action":"pin"}`)))
 	if rec.Code == 200 {
 		t.Fatal("invalid peer accepted")
+	}
+}
+
+// TestChatStatusPerServerSurvivesSwitch guards the cross-server tick bug:
+// switching the send server (a status probe there reporting 0/0) must not blank
+// the old server's delivered ✓✓, since seq numbering is per server.
+func TestChatStatusPerServerSurvivesSwitch(t *testing.T) {
+	th := &chatThreadFile{Server: "a.example"}
+	th.bumpStatus("a.example", 2, 2) // both messages delivered on server A
+
+	// Switch to server B; its first peer-status probe knows nothing yet.
+	if th.bumpStatus("b.example", 0, 0) {
+		t.Fatal("zero probe on a new server reported a change")
+	}
+	if th.Accepted["a.example"] != 2 || th.Delivered["a.example"] != 2 {
+		t.Fatalf("server A ticks regressed: acc=%v del=%v", th.Accepted, th.Delivered)
+	}
+
+	// A delivery on B is tracked independently of A.
+	th.bumpStatus("b.example", 1, 1)
+	if th.Delivered["b.example"] != 1 || th.Delivered["a.example"] != 2 {
+		t.Fatalf("per-server delivered wrong: %v", th.Delivered)
+	}
+
+	// Ticks never regress (a stale lower probe is ignored).
+	th.bumpStatus("a.example", 1, 1)
+	if th.Delivered["a.example"] != 2 {
+		t.Fatalf("delivered regressed to %d", th.Delivered["a.example"])
+	}
+}
+
+// TestChatStatusMigratesLegacy checks the old single-server acc/del scalars are
+// folded into the per-server maps (under the bound server) on load.
+func TestChatStatusMigratesLegacy(t *testing.T) {
+	s := newChatTestServer(t)
+	dir := filepath.Join(s.dataDir, chatDirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const addr = "aebagbafaydqqcikbmga"
+	legacy := `{"threads":{"` + addr + `":{"server":"a.example","acc":3,"del":2,` +
+		`"msgs":[{"dir":"out","seq":1,"text":"hi","server":"a.example"}]}}}`
+	if err := os.WriteFile(filepath.Join(dir, "threads.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newChatHub(s, s.dataDir)
+	th := h.threads[addr]
+	if th == nil {
+		t.Fatal("thread not loaded")
+	}
+	if th.Accepted["a.example"] != 3 || th.Delivered["a.example"] != 2 {
+		t.Fatalf("legacy not migrated: acc=%v del=%v", th.Accepted, th.Delivered)
+	}
+	if th.LastAccepted != 0 || th.LastDelivered != 0 {
+		t.Fatalf("legacy scalars not cleared: %d/%d", th.LastAccepted, th.LastDelivered)
 	}
 }
 

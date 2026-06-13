@@ -120,6 +120,14 @@ type ChatClient struct {
 	f  *Fetcher
 	id *ChatIdentity
 
+	// opSeq serializes whole multi-op sequences (send / fetch / ack / register)
+	// on this client. They share one connection session (sessRef/ksession/
+	// sendCounter); without this a concurrent poll's re-handshake could swap the
+	// session out from under an in-progress upload, stranding it on a session
+	// with no upload (FIN → unknown_session). Held around the full sequence, NOT
+	// the per-op c.mu critical sections.
+	opSeq sync.Mutex
+
 	mu          sync.Mutex
 	info        *protocol.ChatInfo
 	infoAt      time.Time
@@ -592,6 +600,8 @@ func parseQuota(body []byte) (remaining uint16, reset uint32) {
 
 // Register establishes a session (registering the identity on first contact).
 func (c *ChatClient) Register(ctx context.Context, _ ChatProgress) error {
+	c.opSeq.Lock()
+	defer c.opSeq.Unlock()
 	info, err := c.EnsureInfo(ctx)
 	if err != nil {
 		return err
@@ -668,6 +678,8 @@ func (c *ChatClient) SendMessage(ctx context.Context, peer [protocol.AddressSize
 	if len(text) == 0 {
 		return nil, fmt.Errorf("chat: empty message")
 	}
+	c.opSeq.Lock()
+	defer c.opSeq.Unlock()
 
 	// Clamp progress to a high-water mark so restarts/retries never go backwards.
 	mono := progress
@@ -807,6 +819,9 @@ func (c *ChatClient) upload(ctx context.Context, info *protocol.ChatInfo, peer [
 			if e != nil {
 				continue // retried next round
 			}
+			if st == protocol.ChatStatusUnknownSession {
+				return false // session swapped/evicted: restart from SEND_START
+			}
 			if st == protocol.ChatStatusOK {
 				before := *count
 				markBitmap(body, acked, count)
@@ -853,6 +868,17 @@ func (c *ChatClient) upload(ctx context.Context, info *protocol.ChatInfo, peer [
 			if e != nil {
 				return 0, 0, 0, 0, e
 			}
+			if st == protocol.ChatStatusUnknownSession {
+				// The session was replaced under us (a concurrent poll/ack
+				// re-handshaked, or it was evicted) so its upload is gone. But the
+				// FIN may already have committed (a lost FIN-OK), so return rather
+				// than re-uploading: SendMessage reconciles via PeerStatus first and
+				// only re-sends if the message truly didn't land. Avoids the upload
+				// progress sticking near the end while the message is in fact
+				// delivered.
+				c.invalidateSession()
+				return 0, 0, 0, 0, fmt.Errorf("chat: session lost at fin")
+			}
 			if st == protocol.ChatStatusIncomplete {
 				// Authoritative bitmap: anything not set is truly missing.
 				ackedCount = 0
@@ -880,8 +906,13 @@ func (c *ChatClient) upload(ctx context.Context, info *protocol.ChatInfo, peer [
 	return 0, 0, 0, 0, fmt.Errorf("chat: upload restarts exhausted")
 }
 
-// FetchInbox polls the inbox, downloads and decrypts every waiting message.
+// FetchInbox polls the inbox and decrypts waiting messages. A message that
+// fails transiently (network, sender key not yet propagated) is withheld along
+// with any later message from the same sender, so the caller never acks past a
+// seq that's still on the server.
 func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]ChatIncoming, error) {
+	c.opSeq.Lock()
+	defer c.opSeq.Unlock()
 	info, err := c.EnsureInfo(ctx)
 	if err != nil {
 		return nil, err
@@ -936,6 +967,16 @@ func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]Ch
 	report()
 
 	var out []ChatIncoming
+	// First seq per sender that failed transiently (network/key not yet
+	// propagated): the caller must NOT ack at or past it — the message is still
+	// on the server and refetched next poll. Permanent failures (corrupt or
+	// undecryptable envelope) don't hold the line: they can never be delivered.
+	hold := map[[protocol.AddressSize]byte]uint32{}
+	markHold := func(src [protocol.AddressSize]byte, seq uint32) {
+		if cur, ok := hold[src]; !ok || seq < cur {
+			hold[src] = seq
+		}
+	}
 	for _, e := range entries {
 		env := make([]byte, 0, e.length)
 		fetchFailed := false
@@ -959,6 +1000,7 @@ func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]Ch
 			report()
 		}
 		if fetchFailed {
+			markHold(e.src, e.seq)
 			continue
 		}
 
@@ -967,6 +1009,7 @@ func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]Ch
 		report()
 		if err != nil {
 			c.f.log("[chat] sender key %x: %v", e.src[:4], err)
+			markHold(e.src, e.seq)
 			continue
 		}
 		m, err := protocol.ParseChatMessage(env)
@@ -985,12 +1028,26 @@ func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]Ch
 		}
 		out = append(out, ChatIncoming{From: e.src, Seq: m.Seq, Text: text})
 	}
+	// Drop any delivered message at/after a sender's first transient failure so
+	// the caller's per-sender ack watermark can't free a skipped earlier seq.
+	if len(hold) > 0 {
+		kept := out[:0]
+		for _, m := range out {
+			if h, ok := hold[m.From]; ok && m.Seq >= h {
+				continue
+			}
+			kept = append(kept, m)
+		}
+		out = kept
+	}
 	return out, nil
 }
 
 // Ack confirms delivery of peer's messages up to upToSeq, freeing inbox quota
 // and driving the sender's ✓✓.
 func (c *ChatClient) Ack(ctx context.Context, peer [protocol.AddressSize]byte, upToSeq uint32) error {
+	c.opSeq.Lock()
+	defer c.opSeq.Unlock()
 	info, err := c.EnsureInfo(ctx)
 	if err != nil {
 		return err

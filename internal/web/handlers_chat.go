@@ -61,11 +61,15 @@ type chatThreadFile struct {
 	// Server is the chat server (profile main domain) this conversation is
 	// bound to — chosen when the chat was started, used for sending.
 	Server string `json:"server,omitempty"`
-	// LastAccepted/LastDelivered cache the server's ✓/✓✓ counters so ticks
-	// render correctly right after a restart, instead of showing 🕓 until the
-	// first peer-status DNS round trip returns.
-	LastAccepted  uint32 `json:"acc,omitempty"`
-	LastDelivered uint32 `json:"del,omitempty"`
+	// Accepted/Delivered cache the server's ✓/✓✓ high-water seq PER server key.
+	// Seq numbering is per server (see LastOutSeq), so a single counter can't
+	// represent two servers — switching the send server would otherwise blank
+	// the old server's delivered ticks. LastAccepted/LastDelivered are the
+	// legacy single-server fields, migrated into the maps on load.
+	Accepted      map[string]uint32 `json:"accBy,omitempty"`
+	Delivered     map[string]uint32 `json:"delBy,omitempty"`
+	LastAccepted  uint32            `json:"acc,omitempty"`
+	LastDelivered uint32            `json:"del,omitempty"`
 	// ServerSetAt: when the user last switched send server — the UI shows the
 	// "peer switched" banner only for peer messages newer than this.
 	ServerSetAt int64 `json:"serverSetAt,omitempty"`
@@ -74,6 +78,66 @@ type chatThreadFile struct {
 // chatThreadsFile is chat/threads.json.
 type chatThreadsFile struct {
 	Threads map[string]*chatThreadFile `json:"threads"`
+}
+
+// bumpStatus raises the per-server ✓/✓✓ high-water seq for server (never lowers
+// it — ticks don't regress). Returns whether anything changed.
+func (th *chatThreadFile) bumpStatus(server string, accepted, delivered uint32) bool {
+	if th.Accepted == nil {
+		th.Accepted = map[string]uint32{}
+	}
+	if th.Delivered == nil {
+		th.Delivered = map[string]uint32{}
+	}
+	changed := false
+	if accepted > th.Accepted[server] {
+		th.Accepted[server] = accepted
+		changed = true
+	}
+	if delivered > th.Delivered[server] {
+		th.Delivered[server] = delivered
+		changed = true
+	}
+	return changed
+}
+
+// chatStatusMap returns a snapshot copy of m (never nil), so the JSON response
+// marshals {} rather than null and isn't raced by concurrent counter bumps.
+func chatStatusMap(m map[string]uint32) map[string]uint32 {
+	out := make(map[string]uint32, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// chatPostSendServer decides a conversation's bound server after a send.
+// current is the binding now, boundAtStart the binding when the send began,
+// sentVia the server the message actually went out on. It follows a reroute off
+// a disabled bound server, but preserves a deliberate switch the user made
+// mid-send (current != boundAtStart). Returns the new binding and whether it
+// changed.
+func chatPostSendServer(current, boundAtStart, sentVia string) (string, bool) {
+	if current == "" {
+		return sentVia, true
+	}
+	if current == boundAtStart && boundAtStart != sentVia {
+		return sentVia, true
+	}
+	return current, false
+}
+
+// migrateStatus folds legacy single-server counters into the per-server maps
+// under the thread's bound server, so ticks survive the upgrade.
+func (th *chatThreadFile) migrateStatus() {
+	if th.Accepted != nil || th.Delivered != nil {
+		return
+	}
+	if th.Server == "" || (th.LastAccepted == 0 && th.LastDelivered == 0) {
+		return
+	}
+	th.bumpStatus(th.Server, th.LastAccepted, th.LastDelivered)
+	th.LastAccepted, th.LastDelivered = 0, 0
 }
 
 // perServerChat is one chat-enabled profile's client. The same identity is
@@ -154,6 +218,9 @@ func (h *chatHub) loadState() {
 		var f chatThreadsFile
 		if json.Unmarshal(raw, &f) == nil && f.Threads != nil {
 			h.threads = f.Threads
+			for _, th := range h.threads {
+				th.migrateStatus()
+			}
 		}
 	}
 	if raw, err := os.ReadFile(filepath.Join(h.dir, "servers.json")); err == nil {
@@ -300,26 +367,33 @@ func (h *chatHub) snapshotServers() []*perServerChat {
 	return out
 }
 
-// resolveServer picks the chat server for a conversation: an explicitly
-// requested server key, else the thread's bound server, else the active
-// profile's server, else any. Returns nil when no chat server exists.
+// resolveServer picks the chat server for a conversation. An explicitly
+// requested server wins (the picker enables it on send). Otherwise it routes
+// only through ENABLED servers — the thread's bound server, else the active
+// profile's, else any enabled one — so disabling a server stops its
+// conversations from silently continuing on it. Returns nil when none fit.
 func (h *chatHub) resolveServer(addr, requested string) *perServerChat {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	key := chatServerKey(requested)
-	if key == "" {
-		if th := h.threads[addr]; th != nil && th.Server != "" {
-			key = th.Server
+	if key := chatServerKey(requested); key != "" {
+		if ps := h.servers[key]; ps != nil {
+			return ps
 		}
 	}
-	if key == "" {
-		key = h.activeKey
+	if th := h.threads[addr]; th != nil && th.Server != "" && h.enabled[th.Server] {
+		if ps := h.servers[th.Server]; ps != nil {
+			return ps
+		}
 	}
-	if ps := h.servers[key]; ps != nil {
-		return ps
+	if h.enabled[h.activeKey] {
+		if ps := h.servers[h.activeKey]; ps != nil {
+			return ps
+		}
 	}
-	for _, ps := range h.servers {
-		return ps
+	for k, ps := range h.servers {
+		if h.enabled[k] {
+			return ps
+		}
 	}
 	return nil
 }
@@ -613,11 +687,10 @@ func (s *Server) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"exists": false})
 		return
 	}
-	anyEnabled := false
+	enabledCount := 0
 	for key := range h.servers {
 		if h.enabled[key] {
-			anyEnabled = true
-			break
+			enabledCount++
 		}
 	}
 	writeJSON(w, map[string]any{
@@ -625,11 +698,14 @@ func (s *Server) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 		"address":     client.ChatAddressString(h.identity.Addr),
 		"backedUp":    h.backedUp,
 		"serverCount": len(h.servers),
-		// anyEnabled is the server-side source of truth for "has the user set up
-		// a chat server" — the client uses it to drive first-run guidance. It
-		// lives on disk (h.enabled), so it survives the Android loopback-port
-		// change that wipes localStorage.
-		"anyEnabled": anyEnabled,
+		// anyEnabled / enabledCount are the server-side source of truth for "has
+		// the user set up a chat server" — the client uses them to drive first-run
+		// guidance and to render the header instantly on open (no "checking…"
+		// flash) before the slow DNS availability probe returns. They live on disk
+		// (h.enabled), surviving the Android loopback-port change that wipes
+		// localStorage.
+		"anyEnabled":   enabledCount > 0,
+		"enabledCount": enabledCount,
 	})
 }
 
@@ -1050,8 +1126,8 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		"name":        h.contacts[addr],
 		"msgs":        msgs,
 		"server":      th.Server,
-		"accepted":    th.LastAccepted,
-		"delivered":   th.LastDelivered,
+		"accepted":    chatStatusMap(th.Accepted),
+		"delivered":   chatStatusMap(th.Delivered),
 		"serverSetAt": th.ServerSetAt,
 	}
 	h.mu.Unlock()
@@ -1116,6 +1192,7 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		th = &chatThreadFile{}
 		h.threads[peerStr] = th
 	}
+	boundAtStart := th.Server // to tell a mid-send switch from a disabled reroute
 	if th.Server == "" {
 		th.Server = serverKey // bind the conversation to this server
 	}
@@ -1175,13 +1252,17 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		th = &chatThreadFile{Server: serverKey}
 		h.threads[peerStr] = th
 	}
+	if ns, changed := chatPostSendServer(th.Server, boundAtStart, serverKey); changed {
+		// Follow a reroute off a disabled bound server — but NOT a deliberate
+		// switch the user made mid-send (that binding must stick).
+		th.Server = ns
+		th.ServerSetAt = time.Now().Unix()
+	}
 	if th.LastOutSeq == nil {
 		th.LastOutSeq = make(map[string]uint32)
 	}
 	th.LastOutSeq[serverKey] = res.Seq
-	if res.Seq > th.LastAccepted {
-		th.LastAccepted = res.Seq // a committed send IS accepted (✓)
-	}
+	th.bumpStatus(serverKey, res.Seq, 0) // a committed send IS accepted (✓)
 	th.Msgs = append(th.Msgs, chatStoredMsg{
 		Dir: "out", Seq: res.Seq, Text: text,
 		TS: time.Now().Unix(), Server: serverKey,
@@ -1298,14 +1379,22 @@ func (s *Server) handleChatPeerStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": false, "error": chatStatusKey(err)})
 		return
 	}
-	// Cache the counters in the thread file so ticks survive a restart.
+	// Cache the counters per server so ticks survive a restart and a later
+	// server switch doesn't blank this server's delivered messages.
 	h.mu.Lock()
-	if th := h.threads[addr]; th != nil && (th.LastAccepted != accepted || th.LastDelivered != delivered) {
-		th.LastAccepted, th.LastDelivered = accepted, delivered
+	th := h.threads[addr]
+	if th != nil && th.bumpStatus(ps.serverKey, accepted, delivered) {
 		h.saveThreadsLocked()
 	}
+	out := map[string]any{"ok": true}
+	if th != nil {
+		out["accepted"] = chatStatusMap(th.Accepted)
+		out["delivered"] = chatStatusMap(th.Delivered)
+	} else {
+		out["accepted"] = map[string]uint32{ps.serverKey: accepted}
+		out["delivered"] = map[string]uint32{ps.serverKey: delivered}
+	}
 	h.mu.Unlock()
-	out := map[string]any{"ok": true, "accepted": accepted, "delivered": delivered}
 	if rem, reset, known := chatc.Quota(); known {
 		out["quota"] = map[string]any{"remaining": rem, "resetUnix": reset}
 	}

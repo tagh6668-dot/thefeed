@@ -156,6 +156,10 @@ async function init() {
   loadBgImage();
   connectSSE();
   refreshResolversBadge();
+  // Seed the messenger unread badge from persisted threads so a cold start
+  // (e.g. opening the app by tapping a new-message notification) shows the
+  // count immediately, without having to open the messenger first.
+  if (typeof chatLoadThreads === 'function') chatLoadThreads();
   // Populate profilePicCache so the channel list renders avatars
   // without a per-item probe.
   loadProfilePicState().catch(function () { });

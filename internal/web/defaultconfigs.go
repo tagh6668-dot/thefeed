@@ -17,13 +17,25 @@ type defaultProfile struct {
 	ExtraDomains []string `json:"extraDomains,omitempty"` // extra sub-domains feed queries spread across
 }
 
-// Domain and key are stored base64-encoded so the plain values are
-// not indexed by code search. ServerKey is the server's signing public key
-// (base64url, from `thefeed-server -print-pubkey`); fill it in once the
-// chat/feed server has generated its key so clients verify feed content.
+// Domain, key and extra domains are stored base64-encoded so the plain values
+// are not indexed by code search. ServerKey is the server's signing public key
+// (base64url, from `thefeed-server -print-pubkey`) and clients verify feed
+// content against it.
 var defaultProfiles = []defaultProfile{
-	{Nickname: "اخبار و تحلیل", Domain: b64("bndzLmVtampleS5kZQ=="), Key: b64("c2FydG8="), ServerKey: ""},
-	{Nickname: "فیلترشکن", Domain: b64("Y2ZnLmVtampleS5kZQ=="), Key: b64("c2FydG8="), ServerKey: ""},
+	{
+		Nickname:     "اخبار و تحلیل",
+		Domain:       b64("bndzLmVtampleS5kZQ=="),
+		Key:          b64("c2FydG8="),
+		ServerKey:    "8yIcxN4pJbepET0Vp2Yfz0NXYh_2wwP5n-Z62xxV3DI",
+		ExtraDomains: []string{b64("bndzMS5lbWpleS5iaXo="), b64("bndzLmVtamV5LmJpeg==")},
+	},
+	{
+		Nickname:     "فیلترشکن",
+		Domain:       b64("Y2ZnLmVtampleS5kZQ=="),
+		Key:          b64("c2FydG8="),
+		ServerKey:    "B7KSHRn_qKPYHwAZxMAHRJ_B8pzePvoxhv4l8MfEXDI",
+		ExtraDomains: []string{b64("Y2ZnLmVtamV5LmJpeg=="), b64("Y2ZnMS5lbWpleS5iaXo=")},
+	},
 }
 
 // b64 decodes a base64 literal; returns "" on malformed input.

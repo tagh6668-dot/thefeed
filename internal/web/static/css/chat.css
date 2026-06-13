@@ -209,16 +209,17 @@
 
 /* "Experimental" tag next to the messenger title. */
 .chat-exp-tag {
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .04em;
   color: var(--accent);
   border: 1px solid var(--accent);
-  border-radius: 4px;
-  padding: 0 4px;
+  border-radius: 3px;
+  padding: 0 3px;
   vertical-align: middle;
-  white-space: nowrap
+  white-space: nowrap;
+  font-family: -apple-system, BlinkMacSystemFont, 'Vazirmatn', 'SF Pro Text', system-ui, 'Segoe UI', sans-serif
 }
 
 .chat-topbar-title .chat-peer-sub {
@@ -283,10 +284,71 @@
   gap: 8px
 }
 
+.chat-body-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column
+}
+
 .chat-body {
   flex: 1;
   overflow-y: auto;
   padding: 14px
+}
+
+/* Floating "jump to latest" button — sits above the composer, hidden while at
+   the bottom. */
+.chat-scroll-down {
+  position: absolute;
+  bottom: 14px;
+  inset-inline-end: 14px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 5;
+  transition: opacity .15s ease, transform .15s ease
+}
+
+.chat-scroll-down.hidden {
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none
+}
+
+.chat-scroll-down .icon svg {
+  width: 22px;
+  height: 22px
+}
+
+.chat-scroll-down-badge {
+  position: absolute;
+  top: -4px;
+  inset-inline-end: -2px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  display: none
+}
+
+.chat-scroll-down-badge.on {
+  display: block
 }
 
 /* Buttons — themed so they're never white-on-white in dark mode. */
