@@ -223,7 +223,7 @@ func TestChatSendRoundTrip(t *testing.T) {
 	// B: fetch + reassemble + decrypt.
 	var got []byte
 	for blk := uint8(0); blk < blocks; blk++ {
-		st, fb := chatOp(t, svc, refB, ksB, &ctrB, protocol.BuildChatFetchPlain(eSeq, blk))
+		st, fb := chatOp(t, svc, refB, ksB, &ctrB, protocol.BuildChatFetchPlain(protocol.ChatPeerHandle(a.addr), eSeq, blk))
 		if st != protocol.ChatStatusOK {
 			t.Fatalf("fetch blk %d st=%d", blk, st)
 		}

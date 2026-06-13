@@ -208,7 +208,7 @@ func TestChatStoreInboxFetchAck(t *testing.T) {
 	// Fetch both blocks, reassemble.
 	var got []byte
 	for blk := uint8(0); blk < e.Blocks; blk++ {
-		part, ok, err := s.FetchBlock(b.addr, 1, blk, now)
+		part, ok, err := s.FetchBlock(b.addr, a.addr, 1, blk, now)
 		if err != nil || !ok {
 			t.Fatalf("fetch block %d: ok=%v err=%v", blk, ok, err)
 		}
@@ -217,7 +217,7 @@ func TestChatStoreInboxFetchAck(t *testing.T) {
 	if !bytes.Equal(got, env) {
 		t.Fatal("fetched envelope mismatch")
 	}
-	if _, ok, _ := s.FetchBlock(b.addr, 1, 5, now); ok {
+	if _, ok, _ := s.FetchBlock(b.addr, a.addr, 1, 5, now); ok {
 		t.Fatal("out-of-range block served")
 	}
 
@@ -299,7 +299,7 @@ func TestChatStorePersistenceAcrossReopen(t *testing.T) {
 	if len(entries) != 1 || entries[0].Seq != 7 {
 		t.Fatalf("inbox after reopen: %+v", entries)
 	}
-	blk, ok, _ := s2.FetchBlock(b.addr, 7, 0, now)
+	blk, ok, _ := s2.FetchBlock(b.addr, a.addr, 7, 0, now)
 	if !ok || string(blk) != "persisted" {
 		t.Fatal("envelope lost across reopen")
 	}
@@ -466,5 +466,37 @@ func TestChatStoreCommitIdempotent(t *testing.T) {
 	// A strictly older seq is still a replay.
 	if st, _, _, _, _ := s.CommitMessage(a.addr, b.addr, 0, []byte("x"), now); st != protocol.ChatStatusReplay {
 		t.Fatalf("older seq: %d, want Replay", st)
+	}
+}
+
+// TestChatStoreFetchDisambiguatesSenders guards the receive-path bug: two
+// senders can both have a pending seq=1 (seq is per-pair), so FetchBlock must
+// key on (src, seq), not seq alone, or it returns the wrong sender's envelope.
+func TestChatStoreFetchDisambiguatesSenders(t *testing.T) {
+	s := newTestStore(t)
+	a := newChatTestUser(t)
+	c := newChatTestUser(t)
+	b := newChatTestUser(t)
+	now := time.Unix(1750003600, 0)
+	s.Register(a.rec, a.raw, now)
+	s.Register(c.rec, c.raw, now)
+	s.Register(b.rec, b.raw, now)
+
+	envA := []byte("from-A-at-seq-1")
+	envC := []byte("from-C-at-seq-1")
+	if st, _, _, _, _ := s.CommitMessage(a.addr, b.addr, 1, envA, now); st != protocol.ChatStatusOK {
+		t.Fatal("commit A")
+	}
+	if st, _, _, _, _ := s.CommitMessage(c.addr, b.addr, 1, envC, now); st != protocol.ChatStatusOK {
+		t.Fatal("commit C")
+	}
+
+	gotA, ok, _ := s.FetchBlock(b.addr, a.addr, 1, 0, now)
+	if !ok || string(gotA) != string(envA) {
+		t.Fatalf("fetch A seq1 = %q (ok=%v), want %q", gotA, ok, envA)
+	}
+	gotC, ok, _ := s.FetchBlock(b.addr, c.addr, 1, 0, now)
+	if !ok || string(gotC) != string(envC) {
+		t.Fatalf("fetch C seq1 = %q (ok=%v), want %q", gotC, ok, envC)
 	}
 }

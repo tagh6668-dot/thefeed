@@ -981,7 +981,7 @@ func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]Ch
 		env := make([]byte, 0, e.length)
 		fetchFailed := false
 		for blk := uint8(0); blk < e.blocks; blk++ {
-			fst, fbody, ferr := c.op(ctx, info, protocol.BuildChatFetchPlain(e.seq, blk))
+			fst, fbody, ferr := c.op(ctx, info, protocol.BuildChatFetchPlain(protocol.ChatPeerHandle(e.src), e.seq, blk))
 			if ferr != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()

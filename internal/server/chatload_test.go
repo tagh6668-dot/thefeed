@@ -107,7 +107,7 @@ func loadDrain(svc *ChatService, lc *loadClient) (int, error) {
 		seq := binaryBE32(body[off+protocol.AddressSize:])
 		blocks := body[off+protocol.AddressSize+6]
 		for blk := uint8(0); blk < blocks; blk++ {
-			if st, _, err := loadOp(svc, lc, protocol.BuildChatFetchPlain(seq, blk)); err != nil || st != protocol.ChatStatusOK {
+			if st, _, err := loadOp(svc, lc, protocol.BuildChatFetchPlain(protocol.ChatPeerHandle(src), seq, blk)); err != nil || st != protocol.ChatStatusOK {
 				return received, fmt.Errorf("fetch st=%d err=%v", st, err)
 			}
 		}

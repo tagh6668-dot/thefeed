@@ -271,9 +271,13 @@ func OpenChatCellPayload(ksession [KeySize]byte, selector [chatSelectorSize]byte
 // BuildChatStatusPlain: INBOX_STATUS (freshness comes from the cell counter).
 func BuildChatStatusPlain() []byte { return []byte{chatHdr(ChatOpStatus)} }
 
-// BuildChatFetchPlain: INBOX_FETCH for (seq, block).
-func BuildChatFetchPlain(seq uint32, block uint8) []byte {
-	return append(appendUint32([]byte{chatHdr(ChatOpFetch)}, seq), block)
+// BuildChatFetchPlain: INBOX_FETCH for (peer, seq, block). The peer handle
+// disambiguates the sender — seq is per-pair, so two senders can both have a
+// pending message at the same seq; the server resolves the handle to the full
+// address within the caller's known pairs (as ACK does). 10 bytes, fits a cell.
+func BuildChatFetchPlain(peer [ChatPeerHandleSize]byte, seq uint32, block uint8) []byte {
+	out := append([]byte{chatHdr(ChatOpFetch)}, peer[:]...)
+	return append(appendUint32(out, seq), block)
 }
 
 // BuildChatAckPlain: ACK peer's messages up to upToSeq (peer by handle).
@@ -315,16 +319,22 @@ func BuildChatFinPlain(crc uint32) []byte {
 
 // ChatFetch is a parsed INBOX_FETCH.
 type ChatFetch struct {
+	Peer  [ChatPeerHandleSize]byte
 	Seq   uint32
 	Block uint8
 }
 
 // ParseChatFetchPlain parses an INBOX_FETCH plaintext.
 func ParseChatFetchPlain(pt []byte) (*ChatFetch, error) {
-	if len(pt) < 1+4+1 {
+	if len(pt) < 1+ChatPeerHandleSize+4+1 {
 		return nil, fmt.Errorf("chat fetch: short")
 	}
-	return &ChatFetch{Seq: binary.BigEndian.Uint32(pt[1:]), Block: pt[5]}, nil
+	f := &ChatFetch{
+		Seq:   binary.BigEndian.Uint32(pt[1+ChatPeerHandleSize:]),
+		Block: pt[1+ChatPeerHandleSize+4],
+	}
+	copy(f.Peer[:], pt[1:])
+	return f, nil
 }
 
 // ChatAck is a parsed ACK.

@@ -606,8 +606,11 @@ func (s *ChatStore) InboxStatus(addr [protocol.AddressSize]byte, now time.Time) 
 	return out, nil
 }
 
-// FetchBlock returns one slice of a stored envelope by (seq, block index).
-func (s *ChatStore) FetchBlock(addr [protocol.AddressSize]byte, seq uint32, block uint8, now time.Time) ([]byte, bool, error) {
+// FetchBlock returns one slice of a stored envelope by (src, seq, block index).
+// src disambiguates the sender — seq is per-pair, so the same seq can exist from
+// two different senders in one inbox; matching seq alone would return the wrong
+// envelope.
+func (s *ChatStore) FetchBlock(addr, src [protocol.AddressSize]byte, seq uint32, block uint8, now time.Time) ([]byte, bool, error) {
 	sh := s.shardFor(addr)
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -616,7 +619,7 @@ func (s *ChatStore) FetchBlock(addr [protocol.AddressSize]byte, seq uint32, bloc
 		return nil, false, err
 	}
 	for _, m := range acc.Inbox {
-		if m.Seq != seq {
+		if m.Seq != seq || string(m.Src) != string(src[:]) {
 			continue
 		}
 		start := int(block) * chatFetchBlockSize

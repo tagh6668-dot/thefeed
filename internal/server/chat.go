@@ -428,7 +428,14 @@ func (c *ChatService) opFetch(sess *chatSession, pt []byte, resp func(byte, []by
 	if err != nil {
 		return resp(protocol.ChatStatusBadRequest, nil)
 	}
-	block, ok, err := c.store.FetchBlock(sess.account, f.Seq, f.Block, now)
+	src, ok, err := c.store.ResolvePeerHandle(sess.account, f.Peer, now)
+	if err != nil {
+		return resp(protocol.ChatStatusBusy, nil)
+	}
+	if !ok {
+		return resp(protocol.ChatStatusNotFound, nil)
+	}
+	block, ok, err := c.store.FetchBlock(sess.account, src, f.Seq, f.Block, now)
 	if err != nil || !ok {
 		return resp(protocol.ChatStatusNotFound, nil)
 	}

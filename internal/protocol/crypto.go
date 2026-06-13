@@ -68,28 +68,37 @@ func Decrypt(key [KeySize]byte, ciphertext []byte) ([]byte, error) {
 	return gcm.Open(nil, nonce, ciphertext[gcm.NonceSize():], nil)
 }
 
-// EncryptFixedNonce seals with an all-zero nonce and no transmitted nonce —
-// ONLY for single-use keys (a key that never seals two different plaintexts),
-// e.g. the chat content key, which is unique per (src,dst,seq). Output is
-// ciphertext+tag, no nonce prefix.
-func EncryptFixedNonce(key [KeySize]byte, plaintext []byte) ([]byte, error) {
+// GCMNonceSize is the AES-GCM nonce length (carried in the chat envelope).
+const GCMNonceSize = 12
+
+// EncryptWithNonce seals plaintext under key with an explicit (caller-supplied)
+// nonce. The nonce MUST be unique per key; the chat envelope uses a fresh random
+// one per message so a repeated (src,dst,seq) — e.g. the same recipient on two
+// servers — never reuses the keystream. Output is ciphertext+tag (no nonce).
+func EncryptWithNonce(key [KeySize]byte, nonce, plaintext []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
 	}
-	return gcm.Seal(nil, make([]byte, gcm.NonceSize()), plaintext, nil), nil
+	if len(nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("bad nonce size %d", len(nonce))
+	}
+	return gcm.Seal(nil, nonce, plaintext, nil), nil
 }
 
-// DecryptFixedNonce reverses EncryptFixedNonce.
-func DecryptFixedNonce(key [KeySize]byte, ct []byte) ([]byte, error) {
+// DecryptWithNonce reverses EncryptWithNonce.
+func DecryptWithNonce(key [KeySize]byte, nonce, ct []byte) ([]byte, error) {
 	gcm, err := newGCM(key)
 	if err != nil {
 		return nil, err
+	}
+	if len(nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("bad nonce size %d", len(nonce))
 	}
 	if len(ct) < gcm.Overhead() {
 		return nil, fmt.Errorf("ciphertext too short: %d bytes", len(ct))
 	}
-	return gcm.Open(nil, make([]byte, gcm.NonceSize()), ct, nil)
+	return gcm.Open(nil, nonce, ct, nil)
 }
 
 // encryptQueryBlock encrypts an 8-byte query payload using a direct AES-256 block cipher.

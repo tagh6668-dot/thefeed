@@ -301,3 +301,43 @@ func TestDecompressMessagesLimited(t *testing.T) {
 		t.Fatal("over-cap raw body accepted")
 	}
 }
+
+// TestChatMessageNonceUnique guards the keystream-reuse fix: the same
+// (src,dst,seq,content_key) — e.g. the same recipient on two servers, where seq
+// is per-server — must NOT reuse the keystream. A fresh random nonce per message
+// makes the ciphertexts differ while both still decrypt.
+func TestChatMessageNonceUnique(t *testing.T) {
+	sender := newChatParty(t)
+	recip := newChatParty(t)
+	content, kss := pairKeys(t, sender, recip, 1)
+
+	r1, err := EncodeChatMessage(content, kss, sender.addr, recip.addr, 1, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := EncodeChatMessage(content, kss, sender.addr, recip.addr, 1, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m1, err := ParseChatMessage(r1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := ParseChatMessage(r2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(m1.Nonce, m2.Nonce) {
+		t.Fatal("nonce reused across two encryptions")
+	}
+	if bytes.Equal(m1.Ciphertext, m2.Ciphertext) {
+		t.Fatal("identical ciphertext → keystream reuse")
+	}
+	rk, _ := ChatContentKey(recip.enc, sender.encPub, sender.addr, recip.addr, 1)
+	for i, m := range []*ChatMessage{m1, m2} {
+		got, err := m.Open(rk)
+		if err != nil || got != "secret" {
+			t.Fatalf("open #%d: %v %q", i, err, got)
+		}
+	}
+}

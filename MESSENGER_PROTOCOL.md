@@ -24,9 +24,12 @@ Domains shown as `chat.example.com` are placeholders.
    small set of operator sub-domains. No TCP, no HTTP, no TLS SNI.
 2. **End-to-end confidentiality.** The server stores and forwards ciphertext it
    cannot read. Only the two endpoints derive the message content key.
-3. **Indistinguishable queries.** A passive resolver sees fixed-length,
-   random-looking DNS labels. It cannot tell a registration from a send from a
-   poll, nor recover the operation, the peer, or the read metadata.
+3. **Uniform, content-hiding queries.** Every query is one fixed-size,
+   random-looking cell, and in-context op payloads are *sealed* (the operation,
+   peer, and read metadata are encrypted). Against a resolver **without** the feed
+   passphrase the cells are indistinguishable noise. A passphrase-**aware**
+   resolver (explicitly modeled in §2) can recover the cell *framing* but not the
+   sealed op contents — see the honest scoping in §2 and §8.
 4. **Fail-closed.** A client refuses to chat with a server whose feed-signing
    key it has not pinned. There is no opportunistic / unauthenticated mode.
 5. **Amnesia-safe client.** A client that loses all local state can recover its
@@ -49,7 +52,8 @@ Domains shown as `chat.example.com` are placeholders.
 
 | Adversary | Assumed power | What the protocol defends |
 |-----------|---------------|---------------------------|
-| Passive resolver / on-path DNS | Sees every query name + response, knows the *public* feed passphrase | Cannot recover op, peer, counters, or content; sees uniform random labels |
+| Passive resolver **without** the passphrase | Sees every query name + response | Cells are uniform, random labels; learns no framing, op, peer, counter, or content — chat is indistinguishable from other obfuscated feed traffic |
+| Passive resolver **with** the public passphrase | Also knows `query_key` | **Recovers the cell framing** (un-masks selector+counter) → can group cells by session, see the handshake top-bit and the cleartext `kind` byte (REGISTER vs AUTH), and traffic-analyze a multi-cell SEND vs a single-cell poll. In-context op **payloads stay sealed**, so the op/peer/read-metadata and content remain hidden. (So the masking is an obfuscation layer against a passphrase-ignorant censor, **not** a metadata shield against a passphrase holder.) |
 | Malicious/compromised server | Stores & routes all ciphertext, can drop/delay/reorder, can lie | Cannot read content; cannot substitute a peer's key (address = hash of identity key); cannot forge a delivery; cannot impersonate (per-op seal + pinned signing key) |
 | Active forger on the wire | Can inject DNS answers | Sealed responses fail closed; a forged 4-byte op tag costs ~2³² rate-limited online round-trips and only yields E2E ciphertext |
 | Peer | A registered account you talk to | Standard E2E peer; cannot misattribute a message to a third party (content key binds src,dst,seq) |
@@ -186,8 +190,11 @@ resolvers that mangle long single labels.)
 ciphertext or a random-looking ephemeral-key slab), so the mask — and therefore
 the visible label — is different every time, with no constant per-session prefix
 and no low-counter zero runs. A resolver without the public passphrase (which
-gates `query_key`) sees uniform randomness; the server, holding `query_key` and
-the payload at a fixed offset, recovers `selector` and `counter`.
+gates `query_key`) sees uniform randomness. **Anyone holding `query_key`** — the
+server, but also a passphrase-aware resolver — recovers `selector` and `counter`
+(see §2): the masking hides framing from a passphrase-ignorant observer, not from
+a passphrase holder. The *sealed payload* of an in-context op stays encrypted
+regardless.
 
 The cell has **two byte-indistinguishable uses**:
 
@@ -203,19 +210,26 @@ handshake cell; otherwise return the session-lost sentinel (§10).
 ### 8.1 The per-op seal
 
 ```
-SealChat(Ksession, selector, counter, pt):
+SealChat(Ksession, selector, counter, pt):          // variable-length pt
   enc = HKDF(Ksession, info="thefeed-chat-seal-enc-v1")
   mac = HKDF(Ksession, info="thefeed-chat-seal-mac-v1")
-  nonce = selector(≤4) ‖ counter(4)            (unique per sealed query)
-  ct  = AES-256-CTR(enc, nonce, pt)
-  tag = HMAC-SHA256(mac, nonce ‖ ct)[:4]
-  return ct ‖ tag
+  nonce16 = selector(3) ‖ 0x00 ‖ counter(4) ‖ 0×8    (one AES block; unique per query)
+  ct  = AES-256-CTR(enc, nonce16, pt)
+  tag = HMAC-SHA256(mac, nonce16 ‖ ct)[:4]
+  return ct ‖ tag                                     // len(pt)+4, no padding
 ```
 
-Plaintext is zero-padded to a fixed **15 bytes** (`op(1) + fields(14)`) so every
-in-context cell is identical length. The 4-byte tag is deliberately short:
-forging it requires ~2³² *online*, rate-limited DNS round-trips, and success only
-yields an E2E-encrypted payload. (Reviewers: is 4 bytes the right trade? §15.)
+`SealChat` itself is **variable-length** (it seals any plaintext, e.g. the
+133-byte REGISTER bootstrap in §9). Uniform cells come from a thin wrapper used
+for in-context ops only: the op plaintext is first zero-padded to a fixed **15
+bytes** (`op(1) + fields(14)`) before sealing, so every in-context cell payload
+is exactly 19 bytes. The handshake bootstrap is sealed with `SealChat` directly
+on its variable-length plaintext and streamed across 19-byte slabs (§9) — so the
+"fixed 15 bytes" applies to in-context cells, not to `SealChat` as such.
+
+The 4-byte tag is deliberately short: forging it requires ~2³² *online*,
+rate-limited DNS round-trips, and success only yields an E2E-encrypted payload.
+(Reviewers: is 4 bytes the right trade? §15.)
 
 ---
 
@@ -290,7 +304,7 @@ Op byte = `version<<4 | op` in the first sealed plaintext byte.
 | Op | # | Plaintext fields | Purpose |
 |----|---|------------------|---------|
 | `INBOX_STATUS` | 1 | — | list waiting messages + quota |
-| `INBOX_FETCH`  | 2 | `seq(4) ‖ block(1)` | fetch one envelope block |
+| `INBOX_FETCH`  | 2 | `peer_handle(4) ‖ seq(4) ‖ block(1)` | fetch one envelope block |
 | `ACK`          | 3 | `peer_handle(4) ‖ up_to_seq(3)` | confirm delivery, free inbox |
 | `KEY_FETCH`    | 4 | `addr(12)` | fetch a peer's registration record |
 | `SEND_STATUS`  | 5 | `addr(12)` | read ✓/✓✓ counters for messages I sent |
@@ -330,22 +344,31 @@ content_key = HKDF( ECDH(sender_enc_priv, recipient_enc_pub),
                     info = "thefeed-chat-content-v1" ‖ src ‖ dst ‖ seq )
 ```
 
-Unique per `(src, dst, seq)`, so the inner body is sealed with **AES-256-GCM
-under a fixed zero nonce** — no nonce on the wire, and never reused because the
-key itself never repeats.
+The inner body is sealed with **AES-256-GCM under a fresh random 12-byte nonce
+carried in the envelope**.
 
 ```
-inner   = cflag(1) ‖ (deflate(text) | raw text)   ; cflag picks the smaller
-envelope = ver(1)=1 ‖ seq(4) ‖ GCM_ciphertext ‖ srv_mac(8)
-srv_mac  = HMAC( kss, "thefeed-chat-srvmac-v1" ‖ src ‖ dst ‖ seq ‖ SHA-256(ct) )[:8]
+inner    = cflag(1) ‖ (deflate(text) | raw text)   ; cflag picks the smaller
+envelope = ver(1)=1 ‖ seq(4) ‖ nonce(12) ‖ GCM_ciphertext ‖ srv_mac(8)
+srv_mac  = HMAC( kss, "thefeed-chat-srvmac-v1" ‖ src ‖ dst ‖ seq ‖ SHA-256(nonce‖ct) )[:8]
 ```
 
+- **Why a transmitted random nonce, not a fixed zero one.** `seq` is per-server,
+  so the same `(src, dst, seq)` — hence the same `content_key` — recurs when you
+  message the same contact on two servers (a normal use of the multi-server
+  feature). A fixed nonce would then reuse the keystream across two different
+  plaintexts (XOR of ciphertexts = XOR of plaintexts) and break GCM auth. A
+  per-message random nonce makes each encryption unique *regardless* of `seq`
+  reuse (the same principle behind Signal's per-message keys), so confidentiality
+  never hinges on `seq` uniqueness. Cost: +12 bytes per message (≈ one extra
+  fixed-size cell), and the wire stays uniform — every cell is still 25 bytes.
 - The **sender address is not in the envelope.** The recipient derives
   `content_key` using the `src` from its inbox entry; a wrong `src` yields a wrong
   key and GCM fails. Misattribution is therefore impossible.
 - `srv_mac` authenticates the envelope *to the server* (only the registered
   holder of `sender_enc_pub` can compute `kss`), binding the routing pair, the
-  seq, and the exact ciphertext. The server checks it at `FIN`.
+  seq, and the exact nonce‖ciphertext. The server checks it at `FIN`, so a relay
+  cannot flip the nonce undetected.
 
 ### 11.2 Chunked upload (selective-repeat)
 
@@ -390,13 +413,17 @@ the client reconciles via `SEND_STATUS` before re-sending.
 
 ```
 INBOX_STATUS → quota ‖ [ (src(12), seq(4), len(2), blocks(1)) … ]
-INBOX_FETCH(seq, block) → one block of the envelope
+INBOX_FETCH(peer_handle, seq, block) → one block of that sender's envelope
 ACK(peer_handle, up_to_seq) → frees src→me messages ≤ up_to_seq, bumps last_delivered
 ```
 
-`peer_handle` is the first 4 bytes of the peer address; the server disambiguates
-it within the caller's own known pairs (a collision only ever names another of
-*your* contacts).
+Both `INBOX_FETCH` and `ACK` carry a `peer_handle` — the first 4 bytes of the
+sender's address. **It is required, not cosmetic:** `seq` is per-pair, so two
+contacts can each have a pending message at the same `seq` (every new contact
+starts at 1); without the handle the server would return the wrong sender's
+envelope. The server resolves the handle to the full address within the caller's
+own known pairs (a collision only ever names another of *your* contacts; on an
+ambiguous handle the op returns `not_found` and the client retries).
 
 **Delivery ticks** are per-pair-per-server counters the sender reads with
 `SEND_STATUS`:
@@ -448,8 +475,8 @@ an open problem (§15).
 | Client↔server (kss) | HKDF(ECDH(enc, ek)) | "…server-v1" ‖ client_enc ‖ ek |
 | Account proof | HMAC(kss)[:8] | "…acct-proof-v1" ‖ eph ‖ addr ‖ ts ‖ domain |
 | E2E content | HKDF(ECDH(enc,enc)) | "…content-v1" ‖ src ‖ dst ‖ seq |
-| Message body | AES-256-GCM, fixed zero nonce | content_key (unique per src,dst,seq) |
-| Server MAC | HMAC(kss)[:8] | src ‖ dst ‖ seq ‖ SHA-256(ct) |
+| Message body | AES-256-GCM, random 12-byte nonce (in envelope) | content_key |
+| Server MAC | HMAC(kss)[:8] | src ‖ dst ‖ seq ‖ SHA-256(nonce‖ct) |
 | Registration | ed25519 signature | "…register-v1" |
 
 HKDF is HKDF-SHA256 throughout. All multi-byte integers are big-endian.
@@ -467,14 +494,21 @@ These are the design choices we are least sure about. Comments very welcome.
    keys, so a seed compromise decrypts all past messages held by the server.
    Worth a ratchet (e.g. X3DH + Double Ratchet) given the constraints, or out of
    scope for a "lite" relay messenger?
-3. **Fixed zero GCM nonce.** Safe *iff* `content_key` is truly never reused.
-   Reuse would happen only on a seq collision within a pair; the per-pair seq is
-   server-anchored and idempotent. Is there a reachable reuse path we missed?
+3. **Content nonce — RESOLVED.** An earlier draft used a fixed zero GCM nonce,
+   "safe iff `content_key` never repeats". It did repeat: `seq` is per-server, so
+   the same `(src,dst,seq)` recurs across servers → keystream reuse. Fixed by
+   carrying a random 12-byte nonce per message (§11.1). Remaining residual: GCM
+   is not nonce-misuse-resistant, so a broken RNG would still be catastrophic; a
+   future move to a nonce-misuse-resistant AEAD (AES-GCM-SIV / deterministic
+   construction) would harden this at zero wire cost — worth it?
 4. **Metadata to the server.** The relay sees the full routing graph. Sealed
    sender addresses, cover traffic, or per-recipient pseudonymous mailboxes are
    all possible — what is the right cost/benefit here?
-5. **`peer_handle` = 4 bytes** disambiguated within the caller's own pairs for
-   ACK/SEND_STATUS. Acceptable, or should these carry the full address?
+5. **`peer_handle` = 4 bytes** disambiguates the sender within the caller's own
+   pairs for `INBOX_FETCH`, `ACK`, and `SEND_STATUS` (the full 12-byte address
+   would not fit a cell alongside seq+block). A prefix collision among *your own*
+   contacts forces a retry; acceptable, or worth a larger handle / different
+   scheme?
 6. **Account proof replay window.** Domain-bound and timestamped; is the skew
    handling (one clock-corrected retry) safe against a replay-within-window?
 7. **DoS / abuse.** Rate limits are per account, but registration is cheap

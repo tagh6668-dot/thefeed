@@ -4,6 +4,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 )
@@ -36,11 +37,13 @@ const (
 //
 // Wire layout:
 //
-//	ver(1) msg_seq(4 BE) ciphertext(N) srvmac(8)
+//	ver(1) msg_seq(4 BE) nonce(12) ciphertext(N) srvmac(8)
 //
-// ciphertext seals the inner payload with the single-use content key
-// (AES-256-GCM, FIXED zero nonce — none on the wire — safe because the content
-// key is unique per (src,dst,seq)). Inner layout:
+// ciphertext seals the inner payload with the pair content key (AES-256-GCM)
+// under a fresh RANDOM nonce carried in the envelope. The random nonce is what
+// guarantees no keystream reuse even if the same (src,dst,seq) recurs — e.g. the
+// same recipient on two servers (seq is per-server) — so confidentiality does
+// not hinge on seq uniqueness. Inner layout:
 //
 //	cflag(1) body     // body = deflate(text) or raw text; cflag says which
 //
@@ -49,13 +52,14 @@ const (
 // misattribution is impossible without an inner copy.
 type ChatMessage struct {
 	Seq        uint32
+	Nonce      []byte
 	Ciphertext []byte
 	SrvMAC     [ChatSrvMACSize]byte
 }
 
-// chatMsgMinLen: ver + seq + smallest sealed inner (GCM 16-byte tag over a
-// possibly-empty body, fixed nonce so none on the wire) + srvmac.
-const chatMsgMinLen = 1 + 4 + 16 + ChatSrvMACSize
+// chatMsgMinLen: ver + seq + nonce + smallest sealed inner (GCM 16-byte tag over
+// a possibly-empty body) + srvmac.
+const chatMsgMinLen = 1 + 4 + GCMNonceSize + 16 + ChatSrvMACSize
 
 // EncodeChatMessage seals text into a message envelope. The text is
 // deflate-compressed (store-raw if not smaller) before encryption. contentKey
@@ -63,15 +67,23 @@ const chatMsgMinLen = 1 + 4 + 16 + ChatSrvMACSize
 // ChatServerSharedKey.
 func EncodeChatMessage(contentKey, kss [KeySize]byte, src, dst [AddressSize]byte, seq uint32, text string) ([]byte, error) {
 	inner := CompressMessages([]byte(text)) // 1-byte flag + deflate|raw
-	ct, err := EncryptFixedNonce(contentKey, inner)
+	nonce := make([]byte, GCMNonceSize)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	ct, err := EncryptWithNonce(contentKey, nonce, inner)
 	if err != nil {
 		return nil, err
 	}
-	mac := ChatServerMAC(kss, src, dst, seq, ct)
+	// The server MAC binds nonce‖ct, so a relay can't flip the nonce undetected
+	// (it would still fail the recipient's AEAD, but this rejects it at the
+	// server too rather than storing an undecryptable message).
+	mac := ChatServerMAC(kss, src, dst, seq, append(append([]byte(nil), nonce...), ct...))
 
-	out := make([]byte, 0, 1+4+len(ct)+ChatSrvMACSize)
+	out := make([]byte, 0, 1+4+GCMNonceSize+len(ct)+ChatSrvMACSize)
 	out = append(out, ChatMessageVersion)
 	out = appendUint32(out, seq)
+	out = append(out, nonce...)
 	out = append(out, ct...)
 	out = append(out, mac[:]...)
 	return out, nil
@@ -87,8 +99,9 @@ func ParseChatMessage(data []byte) (*ChatMessage, error) {
 		return nil, fmt.Errorf("chat: unsupported envelope version %d", data[0])
 	}
 	m := &ChatMessage{Seq: binary.BigEndian.Uint32(data[1:])}
+	m.Nonce = append([]byte(nil), data[5:5+GCMNonceSize]...)
 	macStart := len(data) - ChatSrvMACSize
-	m.Ciphertext = append([]byte(nil), data[5:macStart]...)
+	m.Ciphertext = append([]byte(nil), data[5+GCMNonceSize:macStart]...)
 	copy(m.SrvMAC[:], data[macStart:])
 	return m, nil
 }
@@ -96,7 +109,7 @@ func ParseChatMessage(data []byte) (*ChatMessage, error) {
 // VerifyServerMAC checks the sender-to-server MAC. The server calls this at
 // FIN with the session's routing pair and the sender's registered enc key.
 func (m *ChatMessage) VerifyServerMAC(kss [KeySize]byte, src, dst [AddressSize]byte) error {
-	want := ChatServerMAC(kss, src, dst, m.Seq, m.Ciphertext)
+	want := ChatServerMAC(kss, src, dst, m.Seq, append(append([]byte(nil), m.Nonce...), m.Ciphertext...))
 	if !hmac.Equal(want[:], m.SrvMAC[:]) {
 		return fmt.Errorf("chat: server mac invalid")
 	}
@@ -108,7 +121,7 @@ func (m *ChatMessage) VerifyServerMAC(kss [KeySize]byte, src, dst [AddressSize]b
 // contentKey, which is bound to src,dst,seq), so no inner address check is
 // needed.
 func (m *ChatMessage) Open(contentKey [KeySize]byte) (string, error) {
-	inner, err := DecryptFixedNonce(contentKey, m.Ciphertext)
+	inner, err := DecryptWithNonce(contentKey, m.Nonce, m.Ciphertext)
 	if err != nil {
 		return "", fmt.Errorf("chat: open message: %w", err)
 	}
