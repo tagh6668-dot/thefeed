@@ -607,11 +607,23 @@ func (s *Server) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"exists": false})
 		return
 	}
+	anyEnabled := false
+	for key := range h.servers {
+		if h.enabled[key] {
+			anyEnabled = true
+			break
+		}
+	}
 	writeJSON(w, map[string]any{
 		"exists":      true,
 		"address":     client.ChatAddressString(h.identity.Addr),
 		"backedUp":    h.backedUp,
 		"serverCount": len(h.servers),
+		// anyEnabled is the server-side source of truth for "has the user set up
+		// a chat server" — the client uses it to drive first-run guidance. It
+		// lives on disk (h.enabled), so it survives the Android loopback-port
+		// change that wipes localStorage.
+		"anyEnabled": anyEnabled,
 	})
 }
 

@@ -25,8 +25,20 @@ var chatState = {
   vvBound: false,   // visualViewport listener attached
   notifyReady: false,
   promptCb: null,    // pending chatPrompt callback
-  renderPending: false // a poll/status render was deferred while a popup was open
+  renderPending: false, // a poll/status render was deferred while a popup was open
+  guideAfterAvail: false // show "checking servers" + open the server sheet once availability resolves
 };
+
+// First-run server guidance: while NO chat server is enabled, every messenger
+// open probes all configs (with a "checking servers" popup) and then opens the
+// server sheet so the user actually turns one on — instead of landing on the
+// "pick a server" dead-end and forgetting. The "is a server enabled" truth is
+// server-side (info.anyEnabled), NOT localStorage — Android changes the
+// loopback port between launches, which wipes localStorage but not the on-disk
+// enabled set. The probe is retried a few times so a momentary resolver outage
+// doesn't make every server look chatless.
+var CHAT_AVAIL_RETRIES = 4;      // probe attempts while guiding (resolvers may be flaky)
+var CHAT_AVAIL_RETRY_MS = 2500;  // wait between probe attempts
 
 // While the messenger is OPEN, poll the server this often for new messages and
 // delivery (✓✓) updates. When the messenger is closed the Go background loop
@@ -271,7 +283,13 @@ async function chatLoadInfo() {
   if (chatState.open && chatState.view === 'list') chatRenderList();
   // No identity yet → show the opt-in prompt, don't probe servers (and don't
   // create anything) until the user enables the messenger.
-  if (chatState.info && chatState.info.exists) chatCheckAvailability();
+  if (chatState.info && chatState.info.exists) {
+    // Guide to the server sheet whenever no server is enabled yet — re-checked
+    // from server-side truth every open (not localStorage), so it keeps asking
+    // until the user finally turns one on, then goes quiet.
+    chatState.guideAfterAvail = !chatState.info.anyEnabled;
+    chatCheckAvailability();
+  }
 }
 
 // chatEnableMessenger is the explicit opt-in: create the local identity, then
@@ -294,14 +312,58 @@ async function chatEnableMessenger() {
 async function chatCheckAvailability() {
   if (chatState.availChecking) return;
   chatState.availChecking = true;
+  var guiding = chatState.guideAfterAvail;
+  chatState.guideAfterAvail = false;
+  if (guiding) chatShowCheckingServers();
+  // While guiding, retry a few times: if the resolvers are momentarily down
+  // every server looks chatless, so one failed probe must not be the verdict.
+  var attempts = guiding ? CHAT_AVAIL_RETRIES : 1;
   try {
-    var r = await fetch('/api/chat/availability');
-    chatState.avail = await r.json();
-  } catch (e) { chatState.avail = { available: false, reason: 'chat_err_generic' } }
-  finally { chatState.availChecking = false; }
+    for (var i = 0; i < attempts; i++) {
+      try {
+        var r = await fetch('/api/chat/availability');
+        chatState.avail = await r.json();
+      } catch (e) { chatState.avail = { available: false, reason: 'chat_err_generic' }; }
+      if (!chatState.open) break;                 // user left — stop probing
+      if (chatAvailServers().length > 0) break;   // found a chat-capable server
+      if (i + 1 < attempts) {
+        await new Promise(function (res) { setTimeout(res, CHAT_AVAIL_RETRY_MS); });
+        if (!chatState.open) break;
+      }
+    }
+  } finally { chatState.availChecking = false; }
+  if (guiding) {
+    chatHideCheckingServers();
+    // Chat-capable servers exist but none enabled → open the toggles so the
+    // user actually turns one on. If none are reachable, fall through: the list
+    // shows the unreachable banner (with its Retry button), and the next open
+    // probes again.
+    if (chatState.open && chatAvailServers().length > 0 && chatUsableServers().length === 0) {
+      chatServerSheet();
+    }
+  }
   if (!chatState.open) return;
   if (chatState.view === 'list') chatRenderList();
   else chatRenderThread();
+}
+
+// chatShowCheckingServers / chatHideCheckingServers: the first-run "probing all
+// configs" popup. It uses the .chat-sheet-overlay class so the render guard
+// keeps it (and focus) intact while the probe runs.
+function chatShowCheckingServers() {
+  if (document.getElementById('chatCheckingOverlay')) return;
+  var ov = document.createElement('div');
+  ov.className = 'chat-sheet-overlay';
+  ov.id = 'chatCheckingOverlay';
+  ov.innerHTML = '<div class="chat-sheet chat-checking-card">' +
+    '<div class="chat-spinner" aria-hidden="true"></div>' +
+    '<div class="chat-checking-title">' + esc(chatT('chat_checking_servers')) + '</div>' +
+    '<div class="chat-sheet-hint">' + esc(chatT('chat_checking_servers_sub')) + '</div></div>';
+  document.getElementById('chatModal').appendChild(ov);
+}
+function chatHideCheckingServers() {
+  var o = document.getElementById('chatCheckingOverlay');
+  if (o) o.remove();
 }
 
 function chatAvailable() { return !!(chatState.avail && chatState.avail.available) }
