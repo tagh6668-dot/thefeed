@@ -32,6 +32,10 @@ var (
 	ErrChatDisabled       = errors.New("chat not enabled on this server")
 	ErrChatServerDisabled = errors.New("chat is turned off by this server")
 	ErrChatUnverified     = errors.New("chat info signature missing or invalid")
+	// ErrChatVersion means the server speaks a chat protocol this client can't
+	// (e.g. an old server still on the previous wire) — a stable mismatch, so it
+	// is backed off long and never retried in a tight loop.
+	ErrChatVersion = errors.New("chat protocol version incompatible")
 	// ErrChatUnreachable means a transport/handshake failure (e.g. the server
 	// is rebooting) — transient, retry — not "no chat here".
 	ErrChatUnreachable = errors.New("chat server unreachable")
@@ -311,7 +315,7 @@ func (c *ChatClient) EnsureInfo(ctx context.Context) (*protocol.ChatInfo, error)
 		return nil, ErrChatDisabled
 	}
 	if protocol.ChatProtocolVersion < info.MinVersion || protocol.ChatProtocolVersion > info.MaxVersion {
-		return nil, fmt.Errorf("chat: server requires protocol %d-%d", info.MinVersion, info.MaxVersion)
+		return nil, fmt.Errorf("%w: server requires %d-%d", ErrChatVersion, info.MinVersion, info.MaxVersion)
 	}
 
 	c.mu.Lock()

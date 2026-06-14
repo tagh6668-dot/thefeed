@@ -62,6 +62,13 @@ var CHAT_FG_POLL_MS = 15000;       // idle cadence
 var CHAT_FG_POLL_FAST_MS = 5000;   // cadence during an active conversation
 var CHAT_FG_ACTIVE_MS = 60000;     // a send/receive keeps us "active" for this long
 
+// Pull-to-refresh (mobile): drag the message list / thread down past
+// CHAT_PULL_TRIGGER px to poll for new mail. CHAT_REFRESH_MIN_MS throttles it —
+// a pull within this window of the last refresh is ignored, so a flick can't
+// spam the server.
+var CHAT_PULL_TRIGGER = 64;        // px the finger must travel to fire
+var CHAT_REFRESH_MIN_MS = 1000;    // min gap between pull refreshes
+
 function chatT(key) { return t(key) || key }
 
 function chatName(addr) {
@@ -398,11 +405,14 @@ function chatFetchTimeout(url, ms) {
   return fetch(url, { signal: ctrl.signal }).finally(function () { clearTimeout(t); });
 }
 
-async function chatCheckAvailability() {
+async function chatCheckAvailability(force) {
   if (chatState.availChecking) return;
   chatState.availChecking = true;
   var guiding = chatState.guideAfterAvail;
   chatState.guideAfterAvail = false;
+  // force=1 → ask the server to clear per-config backoffs first, so a manual
+  // retry re-probes even servers parked after an earlier failure.
+  var availURL = '/api/chat/availability' + (force ? '?retry=1' : '');
   // Everything below runs under one try/finally: availChecking and the blocking
   // "checking" overlay MUST be cleared even if a probe throws/aborts, or the
   // whole messenger wedges (taps eaten, renders deferred).
@@ -413,7 +423,7 @@ async function chatCheckAvailability() {
     var attempts = guiding ? CHAT_AVAIL_RETRIES : 1;
     for (var i = 0; i < attempts; i++) {
       try {
-        var r = await chatFetchTimeout('/api/chat/availability', CHAT_AVAIL_TIMEOUT_MS);
+        var r = await chatFetchTimeout(availURL, CHAT_AVAIL_TIMEOUT_MS);
         chatState.avail = await r.json();
       } catch (e) { chatState.avail = { available: false, reason: 'chat_err_generic' }; }
       if (!chatState.open) break;                 // user left — stop probing
@@ -472,7 +482,7 @@ function chatAvailable() { return !!(chatState.avail && chatState.avail.availabl
 function chatRetryAvailability() {
   chatState.avail = null;       // back to "checking…"
   if (chatState.view === 'list') chatRenderList();
-  chatCheckAvailability();
+  chatCheckAvailability(true);  // force: clear server-side backoffs first
 }
 
 async function chatLoadThreads() {
@@ -694,6 +704,7 @@ function chatRenderList() {
   html += '</div>';
 
   document.getElementById('chatModal').innerHTML = html;
+  chatBindPullRefresh(document.getElementById('chatBody'));
   chatUpdateCountdown();
 }
 
@@ -1215,6 +1226,7 @@ async function chatRenderThread() {
   chatState.msgCount = msgs.length;
   if (!keepScroll) chatState.seenCount = msgs.length;
   if (body) body.onscroll = chatUpdateScrollBtn;
+  chatBindPullRefresh(body);
   chatUpdateScrollBtn();
   // Restore the in-progress draft + caret before resizing the input.
   var inp = document.getElementById('chatInput');
@@ -1267,6 +1279,83 @@ function chatScrollToBottom() {
   body.scrollTop = body.scrollHeight;
   chatState.seenCount = chatState.msgCount;
   chatUpdateScrollBtn();
+}
+
+// chatPullRefresh runs the same poll as the header ↻ button, throttled to one
+// per CHAT_REFRESH_MIN_MS. The view's own refresh (chatPollNow/chatThreadRefresh)
+// keeps its in-flight guard + spinner, so this only adds the time throttle.
+// Returns whether a refresh actually started (so the gesture can snap back).
+function chatPullRefresh() {
+  if (Date.now() - (chatState.lastRefreshAt || 0) < CHAT_REFRESH_MIN_MS) return false;
+  if (chatState.polling) return false;
+  chatState.lastRefreshAt = Date.now();
+  if (chatState.view === 'thread' && chatState.peer) chatThreadRefresh();
+  else chatPollNow();
+  return true;
+}
+
+// chatPullIndicator is the spinner that follows the finger during a pull. It
+// lives on #chatModal (re-created after each render, which replaces innerHTML).
+function chatPullIndicator() {
+  var ind = document.getElementById('chatPullRefresh');
+  if (!ind) {
+    var modal = document.getElementById('chatModal');
+    if (!modal) return null;
+    ind = document.createElement('div');
+    ind.id = 'chatPullRefresh';
+    ind.className = 'chat-pull-refresh';
+    ind.innerHTML = icon('refresh');
+    modal.appendChild(ind);
+  }
+  return ind;
+}
+
+function chatPullSet(ind, pull) {
+  if (!ind) return;
+  ind.style.opacity = String(Math.min(1, pull / CHAT_PULL_TRIGGER));
+  ind.style.transform = 'translateX(-50%) translateY(' + (pull - CHAT_PULL_TRIGGER) +
+    'px) rotate(' + Math.round(pull * 2.5) + 'deg)';
+  ind.classList.toggle('ready', pull >= CHAT_PULL_TRIGGER);
+}
+
+function chatPullReset(ind) {
+  if (!ind) return;
+  ind.classList.remove('ready', 'spinning');
+  ind.style.opacity = '0';
+  ind.style.transform = 'translateX(-50%) translateY(-' + CHAT_PULL_TRIGGER + 'px)';
+}
+
+// chatBindPullRefresh wires the touch drag-down gesture on a scroll container.
+// It only engages when the list is already at the top, so a normal upward
+// scroll is never hijacked. Passive listeners keep scrolling smooth — we never
+// preventDefault (at scrollTop 0 there's nothing to scroll up into anyway).
+function chatBindPullRefresh(el) {
+  if (!el || el.dataset.pullBound) return;
+  el.dataset.pullBound = '1';
+  var startY = 0, dist = 0, pulling = false;
+  el.addEventListener('touchstart', function (e) {
+    pulling = el.scrollTop <= 0 && e.touches.length === 1;
+    if (pulling) { startY = e.touches[0].clientY; dist = 0; }
+  }, { passive: true });
+  el.addEventListener('touchmove', function (e) {
+    if (!pulling) return;
+    dist = e.touches[0].clientY - startY;
+    if (dist <= 0 || el.scrollTop > 0) { pulling = false; chatPullReset(chatPullIndicator()); return; }
+    chatPullSet(chatPullIndicator(), Math.min(dist, CHAT_PULL_TRIGGER * 1.6));
+  }, { passive: true });
+  var end = function () {
+    if (!pulling) return;
+    pulling = false;
+    var ind = chatPullIndicator();
+    if (dist >= CHAT_PULL_TRIGGER && chatPullRefresh()) {
+      if (ind) { ind.classList.add('spinning'); ind.style.opacity = '1'; ind.style.transform = 'translateX(-50%) translateY(6px)'; }
+      setTimeout(function () { chatPullReset(ind); }, 600);
+    } else {
+      chatPullReset(ind);
+    }
+  };
+  el.addEventListener('touchend', end, { passive: true });
+  el.addEventListener('touchcancel', end, { passive: true });
 }
 
 // chatMaxBytes is the server's per-message byte cap (from ChatInfo), or a safe

@@ -151,6 +151,7 @@ type perServerChat struct {
 	client       *client.ChatClient
 	f            *client.Fetcher // its fetcher, so resolvers can be re-synced live
 	backoffUntil time.Time       // skip polling until this time (guarded by chatHub.mu)
+	lastReason   string          // i18n key of the last probe failure (guarded by chatHub.mu)
 }
 
 // chatHub owns the web-layer chat state. Chat is multi-server: it polls and
@@ -403,7 +404,8 @@ func (h *chatHub) resolveServer(addr, requested string) *perServerChat {
 func chatServerBackoff(err error) time.Duration {
 	if errors.Is(err, client.ErrChatDisabled) ||
 		errors.Is(err, client.ErrChatNoServerKey) ||
-		errors.Is(err, client.ErrChatUnverified) {
+		errors.Is(err, client.ErrChatUnverified) ||
+		errors.Is(err, client.ErrChatVersion) {
 		return 30 * time.Minute
 	}
 	return 2 * time.Minute
@@ -448,6 +450,50 @@ func (h *chatHub) setBackoff(ps *perServerChat, until time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ps.backoffUntil = until
+	if until.IsZero() {
+		ps.lastReason = "" // reachable again — drop the stale failure reason
+	}
+}
+
+// setProbeFailure records a failed availability probe: the backoff window plus
+// the i18n reason, so a backed-off server can be listed from cache (with its
+// reason) instead of being re-probed every call.
+func (h *chatHub) setProbeFailure(ps *perServerChat, until time.Time, reason string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ps.backoffUntil = until
+	ps.lastReason = reason
+}
+
+// probeBackoff reports whether ps is in a failure backoff window, and its last
+// reason. Used by the availability handler to skip re-probing dead servers.
+func (h *chatHub) probeBackoff(ps *perServerChat, now time.Time) (bool, string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return now.Before(ps.backoffUntil), ps.lastReason
+}
+
+// shouldSkipProbe reports whether the availability handler should skip a live
+// probe of ps and report it from cache (with its last reason). Only DISABLED
+// servers in a failure backoff are skipped — so a couple of dead/old extra
+// configs can't keep flooding the shared resolver pool and starving sends.
+// Enabled servers are always probed, for prompt recovery once they come back.
+func (h *chatHub) shouldSkipProbe(ps *perServerChat, enabled bool, now time.Time) (bool, string) {
+	if enabled {
+		return false, ""
+	}
+	return h.probeBackoff(ps, now)
+}
+
+// clearBackoffs drops every server's backoff window so the next availability
+// probe is a full, fresh sweep — wired to the UI's manual "retry" button.
+func (h *chatHub) clearBackoffs() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, ps := range h.servers {
+		ps.backoffUntil = time.Time{}
+		ps.lastReason = ""
+	}
 }
 
 // serverEnabled reports whether the user has opted in to publish/poll on this
@@ -629,6 +675,8 @@ func chatStatusKey(err error) string {
 		return "chat_err_disabled"
 	case errors.Is(err, client.ErrChatUnverified):
 		return "chat_err_unverified"
+	case errors.Is(err, client.ErrChatVersion):
+		return "chat_err_version"
 	case errors.As(err, &serr):
 		switch serr.Status {
 		case protocol.ChatStatusRateLimited:
@@ -727,6 +775,9 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, resp)
 		return
 	}
+	if r.URL.Query().Get("retry") == "1" {
+		h.clearBackoffs() // manual retry → fresh full sweep, ignore prior backoffs
+	}
 	h.syncResolvers() // probe over the feed's current healthy resolver pool
 	servers := h.snapshotServers()
 	if len(servers) == 0 {
@@ -755,17 +806,30 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 		limits      map[string]any
 		firstReason string
 	)
+	now := time.Now()
 	for i, ps := range servers {
+		enabled := h.serverEnabled(ps.serverKey)
+		// A DISABLED server that recently failed (old/incompatible/dead) is
+		// reported from cache instead of re-probed. Re-probing such servers on
+		// every availability call — and this handler runs on every foreground
+		// poll while chat looks unavailable — floods the shared resolver pool
+		// with retried DNS fetches and starves the real send, which is exactly
+		// how a couple of stale extra configs broke chat. Enabled servers are
+		// always probed: the user opted in and wants prompt recovery.
+		if skip, reason := h.shouldSkipProbe(ps, enabled, now); skip {
+			out[i] = sres{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Reason: reason}
+			continue
+		}
 		wg.Add(1)
-		go func(i int, ps *perServerChat) {
+		go func(i int, ps *perServerChat, enabled bool) {
 			defer wg.Done()
 			cctx, c := context.WithTimeout(ctx, 45*time.Second)
 			defer c()
 			info, err := ps.client.EnsureInfo(cctx)
-			res := sres{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: h.serverEnabled(ps.serverKey)}
+			res := sres{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled}
 			if err != nil {
 				res.Reason = chatStatusKey(err)
-				h.setBackoff(ps, time.Now().Add(chatServerBackoff(err)))
+				h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(err)), res.Reason)
 			} else {
 				res.Available = true
 				h.setBackoff(ps, time.Time{}) // reachable → clear any backoff
@@ -784,7 +848,7 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 				mu.Unlock()
 			}
 			out[i] = res
-		}(i, ps)
+		}(i, ps, enabled)
 	}
 	wg.Wait()
 

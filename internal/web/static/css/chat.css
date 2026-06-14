@@ -325,6 +325,47 @@
   pointer-events: none
 }
 
+/* Pull-to-refresh spinner: floats at the top-centre of the modal and follows
+   the finger during a downward drag (transform/opacity set inline by JS). */
+.chat-pull-refresh {
+  position: absolute;
+  top: calc(var(--safe-top, 0px) + 56px);
+  inset-inline-start: 50%;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--accent, var(--text));
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: translateX(-50%) translateY(-64px);
+  pointer-events: none;
+  z-index: 30
+}
+
+.chat-pull-refresh svg {
+  width: 20px;
+  height: 20px
+}
+
+.chat-pull-refresh.ready {
+  color: var(--green, #34c759)
+}
+
+.chat-pull-refresh.spinning svg {
+  animation: chat-pull-spin .7s linear infinite
+}
+
+@keyframes chat-pull-spin {
+  to {
+    transform: rotate(360deg)
+  }
+}
+
 .chat-scroll-down .icon svg {
   width: 22px;
   height: 22px

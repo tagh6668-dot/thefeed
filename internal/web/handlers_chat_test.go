@@ -389,6 +389,48 @@ func TestChatBackoffConcurrent(t *testing.T) {
 	wg.Wait()
 }
 
+// TestChatAvailabilitySkipsBackedOffDisabled guards the multi-config fix: a
+// DISABLED server that recently failed (e.g. a stale extra config running an
+// old/incompatible chat) must be reported from cache, NOT re-probed on every
+// availability call. Re-probing dead disabled servers floods the shared
+// resolver pool and starves real sends — the exact bug a couple of extra
+// configs caused. Enabled servers are always probed for prompt recovery, and a
+// manual retry clears every backoff for a fresh sweep.
+func TestChatAvailabilitySkipsBackedOffDisabled(t *testing.T) {
+	h := newChatTestServer(t).chat
+	old := &perServerChat{serverKey: "old.example.com"}
+	good := &perServerChat{serverKey: "good.example.com"}
+	h.mu.Lock()
+	h.servers = map[string]*perServerChat{old.serverKey: old, good.serverKey: good}
+	h.enabled = map[string]bool{good.serverKey: true}
+	h.mu.Unlock()
+
+	now := time.Now()
+	// The old config failed an earlier probe (incompatible version) → parked.
+	h.setProbeFailure(old, now.Add(30*time.Minute), "chat_err_version")
+
+	// Disabled + backed off → skipped, reported from cache with its reason.
+	if skip, reason := h.shouldSkipProbe(old, h.enabled[old.serverKey], now); !skip || reason != "chat_err_version" {
+		t.Fatalf("disabled backed-off server: skip=%v reason=%q, want true/chat_err_version", skip, reason)
+	}
+	// Enabled server is always probed, even if it were backed off.
+	h.setProbeFailure(good, now.Add(30*time.Minute), "chat_err_unreachable")
+	if skip, _ := h.shouldSkipProbe(good, h.enabled[good.serverKey], now); skip {
+		t.Fatal("enabled server must never be skipped (it needs prompt recovery)")
+	}
+	// A reachable result (zero backoff) drops the stale reason.
+	h.setBackoff(old, time.Time{})
+	if backed, reason := h.probeBackoff(old, now); backed || reason != "" {
+		t.Fatalf("clearing backoff should clear reason: backed=%v reason=%q", backed, reason)
+	}
+	// Manual retry wipes every backoff for a fresh full sweep.
+	h.setProbeFailure(old, now.Add(30*time.Minute), "chat_err_version")
+	h.clearBackoffs()
+	if skip, _ := h.shouldSkipProbe(old, false, now); skip {
+		t.Fatal("clearBackoffs should re-arm every server for probing")
+	}
+}
+
 func TestChatThreadPinAndDelete(t *testing.T) {
 	s := newChatTestServer(t)
 	const addr = "aebagbafaydqqcikbmga"
