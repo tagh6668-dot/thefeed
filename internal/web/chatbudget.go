@@ -36,7 +36,7 @@ type chatBudgetArm struct {
 	Budget  int     `json:"budget"`
 	Queries float64 `json:"queries"` // EWMA queries per send (for display)
 	Errors  float64 `json:"errors"`  // EWMA lost queries per send (for display)
-	cost    float64 // EWMA combined cost used for ranking; lower = better
+	Cost    float64 `json:"cost"`    // EWMA combined cost used for ranking; lower = better
 	Used    int     `json:"used"`
 	lastAt  time.Time
 }
@@ -80,7 +80,7 @@ func (s *chatBudgetScorer) pick(now time.Time, r float64) int {
 	}
 	best := 0
 	for i := range s.arms {
-		if s.arms[i].cost < s.arms[best].cost {
+		if s.arms[i].Cost < s.arms[best].Cost {
 			best = i
 		}
 	}
@@ -105,9 +105,9 @@ func (s *chatBudgetScorer) record(i, queries, errs int, ok bool, now time.Time) 
 	}
 	a := &s.arms[i]
 	if a.Used == 0 {
-		a.cost, a.Queries, a.Errors = sampleCost, float64(queries), float64(errs)
+		a.Cost, a.Queries, a.Errors = sampleCost, float64(queries), float64(errs)
 	} else {
-		a.cost = ewma(a.cost, sampleCost)
+		a.Cost = ewma(a.Cost, sampleCost)
 		a.Queries = ewma(a.Queries, float64(queries))
 		a.Errors = ewma(a.Errors, float64(errs))
 	}

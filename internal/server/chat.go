@@ -48,6 +48,34 @@ type chatSession struct {
 	lastSeen time.Time
 	upload   *chatUpload
 	frag     *chatFragReasm // in-flight OP_FRAG reassembly (one op at a time)
+	opMu      sync.Mutex    // serializes ops so concurrent retransmits can't race
+	respCache chatRespCache // sealed response bytes keyed by request counter
+}
+
+// chatRespCache caches the sealed response for each request counter so that a
+// retransmitted request (same counter) gets the identical ciphertext — avoiding
+// AES-CTR nonce reuse when server state changed between retransmits.
+type chatRespCache struct {
+	keys [chatRespCacheSize]uint32
+	vals [chatRespCacheSize][]byte
+	pos  int
+}
+
+const chatRespCacheSize = 16
+
+func (c *chatRespCache) get(counter uint32) ([]byte, bool) {
+	for i := range c.keys {
+		if c.keys[i] == counter && c.vals[i] != nil {
+			return c.vals[i], true
+		}
+	}
+	return nil, false
+}
+
+func (c *chatRespCache) put(counter uint32, resp []byte) {
+	c.keys[c.pos] = counter
+	c.vals[c.pos] = resp
+	c.pos = (c.pos + 1) % chatRespCacheSize
 }
 
 // chatFragReasm reassembles one oversized control op split across OP_FRAG cells.
@@ -487,12 +515,29 @@ func (c *ChatService) handleInContext(sess *chatSession, selector [protocol.Chat
 		// Bad seal — corruption or a stale selector collision; ask to re-handshake.
 		return protocol.ChatSessionLostResp
 	}
+
+	// Per-session lock serializes ops so that concurrent retransmits (the same
+	// cell scattered across resolvers) cannot race past the cache check and
+	// seal different responses under the same nonce.
+	sess.opMu.Lock()
+	defer sess.opMu.Unlock()
+
 	c.mu.Lock()
 	sess.lastSeen = now
+	// Retransmit: if we already sealed a response for this counter, replay the
+	// cached bytes — avoids AES-CTR nonce reuse when server state changed.
+	if cached, ok := sess.respCache.get(counter); ok {
+		c.mu.Unlock()
+		return cached
+	}
 	c.mu.Unlock()
 
 	resp := func(status byte, body []byte) []byte {
-		return protocol.SealChatResponse(sess.ksession, selector, counter, status, body)
+		sealed := protocol.SealChatResponse(sess.ksession, selector, counter, status, body)
+		c.mu.Lock()
+		sess.respCache.put(counter, sealed)
+		c.mu.Unlock()
+		return sealed
 	}
 
 	// Recover the per-cell budget B = plaintext length minus the deterministic

@@ -213,7 +213,8 @@ handshake cell; otherwise return the session-lost sentinel (§10).
 SealChat(Ksession, selector, counter, pt):          // variable-length pt
   enc = HKDF(Ksession, info="thefeed-chat-seal-enc-v1")
   mac = HKDF(Ksession, info="thefeed-chat-seal-mac-v1")
-  nonce16 = selector(3) ‖ 0x00 ‖ counter(4) ‖ 0×8    (one AES block; unique per query)
+  nonce16 = selector(3) ‖ 0x00(1) ‖ counter(4) ‖ 0x00…(8)   (16 bytes = one AES block)
+  //        [0..2]        [3]       [4..7]       [8..15]     (unique per query)
   ct  = AES-256-CTR(enc, nonce16, pt)
   tag = HMAC-SHA256(mac, nonce16 ‖ ct)[:4]
   return ct ‖ tag                                     // len(pt)+4, no padding
@@ -290,26 +291,19 @@ are all unaffected by `B`.
 **Setting.** One **global** user setting: three fixed presets — **Compact /
 Standard / Wide** — over `B ∈ [6, 21]`, plus **Auto** (the **default**).
 
-**Auto mode.** Per server, Auto scores each preset by the **queries it spends per
-message and how many of them error** (the fetcher's success/failure delta across
-the send) — *not* by success alone, and not by latency. Cost = queries +
-weighted errors, with a penalty if the send failed; the cheapest mode is
-exploited, epsilon-greedy exploration keeps every mode measured (Compact is tried
-last and, on a weak path, ranked out so it can't flood), and an unused mode is
-re-measured after a while. This is what makes Auto safe on weak resolvers, where
+**Auto mode.** Per server (each network path scores independently), Auto scores
+each preset by the **queries it spends per message and how many of them error**
+— *not* by success alone, and not by latency. A send "succeeds" for its budget
+if the cells reached the server (a normal result *or* any server-status reply —
+replay/quota/… mean the transport worked); only a transport failure (unreachable/
+timeout) counts against it. Cost = queries + weighted errors, with a penalty if
+the send failed. Scores are an **EWMA** (recent sends dominate, so a mode that
+starts losing — or recovers — is re-scored within a handful of messages).
+Selection is **epsilon-greedy** (a bounded fraction explores so a poor mode is
+still sampled but not hammered; an unused mode is re-measured first, which is also
+how stale results age out). This is what makes Auto safe on weak resolvers, where
 Compact's fragmentation multiplies queries: the score sees the cost and avoids
-it. The UI shows each mode's recent queries/errors.
-
-**Auto mode.** Per server (each network path scores independently), Auto measures
-each preset by recent send success and prefers the best while never abandoning
-the others. A send "succeeds" for its budget if the cells reached the server
-(a normal result *or* any server-status reply — replay/quota/… mean the transport
-worked); only a transport failure (unreachable/timeout) counts against it. Scores
-are an **EWMA** (recent sends dominate, so a mode that starts losing — or recovers
-— is re-scored within a handful of messages), selection is **epsilon-greedy** (a
-bounded fraction explores so a poor mode is still sampled but not hammered), and a
-mode unused for a while is re-measured first — which is also how stale results age
-out. The UI shows each mode's live score.
+it. The UI shows each mode's recent queries and errors.
 
 **Blending via deterministic jitter.** A small `B` lands every chat query
 *inside* the feed's measured length range; the always-on background poll (one
@@ -468,9 +462,19 @@ before exhausting the 22-bit space; the server rejects any in-context counter
 **statelessly and idempotently** — that is what makes loss recovery work over
 DNS. A reject-on-duplicate window would break legitimate retransmits, and buys
 nothing: every op is idempotent, so replaying a captured cell merely re-runs the
-same op to the same result. Keystream reuse is likewise a non-issue: a counter is
-only ever reused for the *identical* plaintext (a retransmit), so no two distinct
-plaintexts share a nonce.
+same op to the same result.
+
+**Response-replay cache.** On the *request* side, a counter only ever carries the
+identical plaintext (a byte-for-byte retransmit), so the AES-CTR nonce is never
+reused for different data. On the *response* side the nonce is `(selector,
+counter | 0x800000)`, which is also deterministic — but the response *plaintext*
+can differ between retransmits when server state changes (e.g. a new message
+arrives between two `INBOX_STATUS` responses for the same request counter). To
+prevent this from leaking the XOR of two plaintexts the server **caches the
+sealed response bytes** for each `(session, counter)` and replays the cached
+ciphertext on any retransmit. This makes the response wire-identical across
+retransmits (same nonce → same ciphertext), costs only a small bounded LRU per
+session, and requires no wire change.
 
 ---
 
@@ -659,19 +663,42 @@ Deliberate choices and accepted trade-offs, recorded so the rationale isn't lost
 The protocol is pre-release, so incompatible improvements are still in scope
 (§17) — but these are where we have landed, not open questions.
 
-1. **4-byte per-op seal tag — accepted.** Forging a sealed cell costs ~2³²
-   *online*, rate-limited DNS round-trips per `(selector, counter)`, against
-   limits that are **per account** (the session cap and send-rate live on the
-   account address, so the multi-domain spread does not multiply the budget). A
-   forgery yields only E2E ciphertext; a forged *control* cell could corrupt
-   delivery state, but the 2³² online cost bounds that. Cell space is tight (15
-   plaintext bytes by default) and a longer tag costs payload, so 4 bytes stands.
+1. **AES-CTR + truncated HMAC, not a standard AEAD — accepted.** The per-op
+   seal uses AES-256-CTR with a 4-byte HMAC tag rather than a standard
+   AEAD like AES-GCM or AES-GCM-SIV. This is a *space* trade-off, not
+   carelessness: the cell budget is 15 plaintext bytes by default (10 + B wire
+   bytes total), and a standard AEAD adds 12–16 bytes of tag per operation —
+   nearly doubling the wire size and halving the payload. AES-CTR is
+   length-preserving, and the HMAC (Encrypt-then-MAC, constant-time compare)
+   provides the same authenticity guarantee with a 4-byte tag. Forging a cell
+   costs ~2³² *online*, rate-limited DNS round-trips per `(selector, counter)`,
+   against limits that are **per account** (the session cap and send-rate live
+   on the account address, so the multi-domain spread does not multiply the
+   budget). A forgery yields only E2E ciphertext; a forged *control* cell could
+   corrupt delivery state, but the 2³² online cost bounds that. Nonce
+   management is explicit: the nonce is `selector(3) ‖ 0(1) ‖ counter(4) ‖
+   0…(8)`, mechanically unique per `(session, counter)`, with the response bit
+   (`0x800000`) separating the request and response nonce spaces. The
+   response-replay cache (§10) prevents nonce reuse when the server re-processes
+   a retransmitted request under changed state. A nonce-misuse-resistant AEAD
+   (AES-GCM-SIV) would harden the **content layer** (§11.1) at zero wire cost
+   and is a candidate for a later version; the session-layer seal stays CTR+HMAC
+   for space reasons.
 2. **No content forward secrecy — by design.** `content_key` derives from
-   long-term enc keys, so a stolen seed decrypts past messages still held on a
-   server. This is the deliberate "lite messenger" trade-off: no per-message
-   ratchet (X3DH / Double Ratchet) and the complexity it would add. The *session
-   / metadata* layer does get forward secrecy from `ek` rotation (§9.1); message
-   content does not.
+   long-term enc keys (`ECDH(sender_enc, recipient_enc)`), so a stolen seed
+   decrypts past messages still held on a server. This is the deliberate
+   "lite messenger" trade-off: adding per-message forward secrecy would require
+   a full ratchet protocol (X3DH / Double Ratchet), which brings interactive
+   key-exchange round-trips, state synchronization across devices, and
+   substantial protocol complexity — all at odds with the one-way,
+   high-latency, DNS-tunneled transport. The *session / metadata* layer does get
+   forward secrecy from `ek` rotation (§9.1) — the `ek` private key is
+   destroyed after its grace window, so session keys derived before the last
+   rotation are irrecoverable. Message content does not get this property.
+   Accepting this means: if you lose your seed, anyone with the seed + the
+   server's stored ciphertext can read your history. The mitigation is that
+   messages expire (72 h TTL by default, §13) and the server stores only
+   opaque ciphertext envelopes.
 3. **Authenticated delivery (✓✓).** ✓✓ was once a bare server-maintained counter
    a malicious relay could fabricate or suppress. It now carries an E2E pair-MAC
    **receipt** (§12): the server can no longer forge a ✓✓, only withhold one
@@ -686,13 +713,19 @@ The protocol is pre-release, so incompatible improvements are still in scope
    and is a candidate for a later version.
 5. **Server metadata exposure — accepted cost.** The relay sees the routing graph
    (who messages whom on it), message sizes, and timing — never content. This is
-   the unavoidable cost of store-and-forward through a third party; we document it
-   rather than mitigate it. (Sealed-sender, cover traffic, or pseudonymous
-   mailboxes stay theoretically possible but out of scope.)
+   the unavoidable cost of store-and-forward through a third party. There is no
+   sealed-sender mechanism: the server must know `(src, dst)` to route and to
+   enforce per-pair limits. Timing correlation is likewise inherent in a
+   real-time relay — a message sent at time T arrives at approximately time T.
+   Cover traffic or pseudonymous mailboxes are theoretically possible but out of
+   scope. We document the exposure rather than claim to mitigate it.
 6. **`peer_handle` = 4 bytes.** `INBOX_FETCH` / `ACK` / `SEND_STATUS` name the
    peer by the first 4 bytes of its address (the full 12 would not fit a cell
-   alongside seq+block). A prefix collision can only ever match another of *your
-   own* contacts; the server returns `not_found` and the client retries. Accepted.
+   alongside seq+block at the default budget). A prefix collision can only ever
+   match another of *your own* contacts (the server resolves the handle within
+   the caller's known pairs); on a collision it returns `not_found` and the
+   client falls back. With 100 contacts the birthday collision probability is
+   ≈ 0.0001%; a user would need ~80 000 contacts for a 50% chance. Accepted.
 7. **Address = 96 bits (12 bytes).** The largest that fits the single-cell control
    ops (`SEND_START` = op+addr+len = exactly 15 plaintext bytes at the default
    budget). Hijacking a specific address is a second-preimage = 2⁹⁶ *with an
@@ -736,12 +769,21 @@ The protocol is pre-release, so incompatible improvements are still in scope
   withhold it but cannot fabricate one (§12).
 - **Receive-side replay:** a per-pair acked high-water drops an old envelope a
   malicious relay re-serves, even after local history is cleared (§12).
+- **Response nonce integrity:** the server caches sealed response bytes per
+  `(session, counter)` and replays the cache on retransmits, preventing AES-CTR
+  nonce reuse when server state changed between retransmissions (§10).
 - **Session forward secrecy:** `ek` rotates; the old private half is destroyed
   after a grace window, bounding an `ek` compromise to one rotation (§9.1).
 - **Handshake-flood bound:** the injectable `0xE5` sentinel can force a
   re-handshake, but the client rate-limits handshakes to cap the amplification.
+- **X25519 low-order rejection:** the implementation uses Go's `crypto/ecdh`
+  package, which rejects X25519 low-order points (the identity element, points
+  of order 2, 4, 8) at key parsing time (`NewPublicKey`). A malicious peer or
+  server sending a low-order `ek` or `enc_pub` gets an error, not a zero secret.
 - **Fail-closed everywhere:** unverifiable `ChatInfo`, an unknown session, or a
   bad seal all stop the operation rather than degrading.
+- **Upload size validation:** `SEND_START` validates `total_len` against
+  `MaxMsgBytes` before allocating a reassembler, bounding memory use per upload.
 - **Compression:** inbound bodies are size-capped before inflation to bound a
   decompression-bomb to memory.
 

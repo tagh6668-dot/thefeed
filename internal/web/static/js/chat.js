@@ -1117,14 +1117,13 @@ function chatCellSizeSheet() {
       '<div class="chat-sheet-hint">' + esc(chatT('chat_query_size_hint')) + '</div>';
     opts.forEach(function (p) {
       var on = cur && cur.mode === p.key;
-      // In auto mode show each preset's recent cost: queries per message (and
-      // errors when present) — lower is better, which is how auto ranks them.
       var score = '';
       if (cur.mode === 'auto' && p.key !== 'auto') {
         var sc = byBudget[presets[p.key]];
         if (sc && sc.used > 0) {
           var label = Math.round(sc.queries) + chatT('chat_size_q');
           if (sc.errors >= 0.5) label += ' · ' + Math.round(sc.errors) + chatT('chat_size_err');
+          label += ' · ' + chatT('chat_size_score') + sc.cost.toFixed(1);
           score = '<span class="chat-score">' + esc(label) + '</span>';
         }
       }
@@ -1139,18 +1138,20 @@ function chatCellSizeSheet() {
 }
 
 // chatBudgetScores averages the per-server auto stats into one budget ->
-// {queries, errors, used} map for display.
+// {queries, errors, cost, used} map for display.
 function chatBudgetScores(scores) {
-  var acc = {}; // budget -> {q, e, n, used}
+  var acc = {}; // budget -> {q, e, c, n, used}
   Object.keys(scores || {}).forEach(function (k) {
     (scores[k] || []).forEach(function (a) {
       if (!a.used) return;
-      var x = acc[a.budget] || (acc[a.budget] = { q: 0, e: 0, n: 0, used: 0 });
-      x.q += a.queries; x.e += a.errors; x.n++; x.used += a.used;
+      var x = acc[a.budget] || (acc[a.budget] = { q: 0, e: 0, c: 0, n: 0, used: 0 });
+      x.q += a.queries; x.e += a.errors; x.c += (a.cost || 0); x.n++; x.used += a.used;
     });
   });
   var out = {};
-  Object.keys(acc).forEach(function (b) { out[b] = { queries: acc[b].q / acc[b].n, errors: acc[b].e / acc[b].n, used: acc[b].used }; });
+  Object.keys(acc).forEach(function (b) {
+    out[b] = { queries: acc[b].q / acc[b].n, errors: acc[b].e / acc[b].n, cost: acc[b].c / acc[b].n, used: acc[b].used };
+  });
   return out;
 }
 

@@ -31,8 +31,8 @@ func TestChatBudgetScorerExploitsCheapest(t *testing.T) {
 		}
 		s.record(i, q, 0, true, now)
 	}
-	if s.arms[wide].cost >= s.arms[compact].cost {
-		t.Fatalf("cheap arm not lowest cost: wide=%.1f compact=%.1f", s.arms[wide].cost, s.arms[compact].cost)
+	if s.arms[wide].Cost >= s.arms[compact].Cost {
+		t.Fatalf("cheap arm not lowest cost: wide=%.1f compact=%.1f", s.arms[wide].Cost, s.arms[compact].Cost)
 	}
 	now = now.Add(time.Second)
 	if got := s.pick(now, 0.99); got != wide {
@@ -85,7 +85,7 @@ func TestChatBudgetScorerCorrectsFast(t *testing.T) {
 		s.record(wide, 6, 0, true, now)      // wide cheap+clean
 		s.record(standard, 12, 2, true, now) // standard heavier
 	}
-	if s.arms[wide].cost >= s.arms[standard].cost {
+	if s.arms[wide].Cost >= s.arms[standard].Cost {
 		t.Fatalf("wide should be cheaper before the flip")
 	}
 	flipped := -1
@@ -93,13 +93,13 @@ func TestChatBudgetScorerCorrectsFast(t *testing.T) {
 		now = now.Add(time.Second)
 		s.record(wide, 30, 10, true, now)    // wide now losing many queries
 		s.record(standard, 12, 0, true, now) // standard clean
-		if s.arms[standard].cost < s.arms[wide].cost {
+		if s.arms[standard].Cost < s.arms[wide].Cost {
 			flipped = n
 			break
 		}
 	}
 	if flipped < 0 {
-		t.Fatalf("never corrected: wide=%.1f standard=%.1f", s.arms[wide].cost, s.arms[standard].cost)
+		t.Fatalf("never corrected: wide=%.1f standard=%.1f", s.arms[wide].Cost, s.arms[standard].Cost)
 	}
 	if flipped > 5 {
 		t.Fatalf("correction too slow (%d sends)", flipped+1)
@@ -115,8 +115,8 @@ func TestChatBudgetScorerFailurePenalty(t *testing.T) {
 	standard := budgetIdx(s, chatBudgetPresets["standard"])
 	s.record(wide, 8, 4, false, now)     // failed send
 	s.record(standard, 40, 5, true, now) // heavy but it worked
-	if s.arms[standard].cost >= s.arms[wide].cost {
-		t.Fatalf("failed mode (%.1f) should rank worse than heavy success (%.1f)", s.arms[wide].cost, s.arms[standard].cost)
+	if s.arms[standard].Cost >= s.arms[wide].Cost {
+		t.Fatalf("failed mode (%.1f) should rank worse than heavy success (%.1f)", s.arms[wide].Cost, s.arms[standard].Cost)
 	}
 }
 

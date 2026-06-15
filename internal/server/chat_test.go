@@ -383,6 +383,55 @@ func TestChatResumesPartialUpload(t *testing.T) {
 // SEND_START for a DIFFERENT message (here, a different total length) must NOT
 // resume onto the in-progress upload's chunks — it starts fresh, so messages
 // can never be mixed.
+// TestChatResponseCacheRetransmit verifies that retransmitting the same request
+// (same counter, same sealed cell) returns the identical sealed response bytes,
+// even if server state changed between the two calls.
+func TestChatResponseCacheRetransmit(t *testing.T) {
+	svc, qk, ekPub := newChatSvc(t)
+	a := newSimClient(t)
+	b := newSimClient(t)
+	refA, ksA := registerHandshake(t, svc, qk, ekPub, a)
+	refB, ksB := registerHandshake(t, svc, qk, ekPub, b)
+
+	// B: send INBOX_STATUS at counter 0, get sealed response bytes.
+	ctr0 := uint32(0)
+	plain := protocol.BuildChatStatusPlain()
+	pad := protocol.ChatCellPlainSize + protocol.ChatCellJitter(svc.queryKey, refB, ctr0)
+	payload, err := protocol.SealChatCellPayloadN(ksB, refB, ctr0, plain, pad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp1 := svc.HandleCell(refB, ctr0, payload, simDomain, time.Now())
+
+	// A: send a message to B — this changes B's inbox state.
+	contentKey, _ := protocol.ChatContentKey(a.enc, b.enc.PublicKey().Bytes(), a.addr, b.addr, 1)
+	kssA, _ := protocol.ChatServerSharedKey(a.enc, ekPub, a.enc.PublicKey().Bytes(), ekPub)
+	env, _ := protocol.EncodeChatMessage(contentKey, kssA, a.addr, b.addr, 1, "hi")
+	ctrA := uint32(0)
+	chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatSendStartPlain(b.addr, uint16(len(env))))
+	for i, ch := range protocol.SplitChunks(env, protocol.ChatDataChunkSize) {
+		d, _ := protocol.BuildChatDataPlain(uint8(i), ch)
+		chatOp(t, svc, refA, ksA, &ctrA, d)
+	}
+	chatOp(t, svc, refA, ksA, &ctrA, protocol.BuildChatFinPlain(crc32.ChecksumIEEE(env)))
+
+	// B: retransmit the exact same cell (same counter=0, same sealed bytes).
+	// Server state changed (inbox now has 1 message), but the cached response
+	// must be replayed, not re-sealed with different plaintext.
+	resp2 := svc.HandleCell(refB, ctr0, payload, simDomain, time.Now())
+
+	if string(resp1) != string(resp2) {
+		t.Fatalf("retransmit produced different sealed response:\n  resp1=%x\n  resp2=%x", resp1, resp2)
+	}
+
+	// Sanity: a fresh counter returns the updated inbox.
+	ctrB := uint32(1)
+	st, body := chatOp(t, svc, refB, ksB, &ctrB, protocol.BuildChatStatusPlain())
+	if st != protocol.ChatStatusOK || body[6] != 1 {
+		t.Fatalf("fresh counter should see 1 message, got count=%d", body[6])
+	}
+}
+
 func TestChatSendStartResetsDifferentMessage(t *testing.T) {
 	svc, qk, ekPub := newChatSvc(t)
 	a := newSimClient(t)
