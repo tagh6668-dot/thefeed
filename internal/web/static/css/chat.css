@@ -727,8 +727,20 @@
   line-height: 1.5
 }
 
-.chat-safety-sep.open .chat-safety-explain {
+.chat-safety-sep.open .chat-safety-explain,
+.chat-info-safety-wrap.open .chat-safety-explain {
   display: block
+}
+
+.chat-info-safety-wrap {
+  flex-wrap: wrap;
+  cursor: pointer
+}
+
+.chat-info-safety-wrap .chat-safety-explain {
+  flex-basis: 100%;
+  max-width: 100%;
+  margin: 2px 0 0
 }
 
 /* actionable banner: the peer moved to a server we're not sending through */

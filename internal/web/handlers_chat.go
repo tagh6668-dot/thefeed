@@ -82,6 +82,9 @@ type chatThreadFile struct {
 	// message-list scan can't catch that). Acks are contiguous (FetchInbox holds
 	// at a gap), so nothing legitimate is ever below the mark.
 	AckedIn map[string]uint32 `json:"ackedIn,omitempty"`
+	// Emojis caches the safety-code emojis so the messages endpoint can
+	// return them without a DNS round trip.
+	Emojis []string `json:"emojis,omitempty"`
 }
 
 // chatThreadsFile is chat/threads.json.
@@ -1276,6 +1279,7 @@ func (s *Server) handleChatSeed(w http.ResponseWriter, r *http.Request) {
 			if changed {
 				for _, th := range h.threads {
 					th.AckedIn = nil
+					th.Emojis = nil
 				}
 				h.saveThreadsLocked()
 			}
@@ -1459,6 +1463,9 @@ func (s *Server) handleChatMessages(w http.ResponseWriter, r *http.Request) {
 		"accepted":    chatStatusMap(th.Accepted),
 		"delivered":   chatStatusMap(th.Delivered),
 		"serverSetAt": th.ServerSetAt,
+	}
+	if len(th.Emojis) > 0 {
+		resp["emojis"] = th.Emojis
 	}
 	h.mu.Unlock()
 	writeJSON(w, resp)
@@ -1767,8 +1774,13 @@ func (s *Server) handleChatPeerStatus(w http.ResponseWriter, r *http.Request) {
 	if rec, err := chatc.FetchPeerKey(ctx, peer); err == nil {
 		h.mu.Lock()
 		myPub := h.identity.Identity.Public().(ed25519.PublicKey)
+		emojis := chatSafetyEmojis(myPub, rec.IdentityPub)
+		if th := h.threads[addr]; th != nil && len(th.Emojis) == 0 {
+			th.Emojis = emojis
+			h.saveThreadsLocked()
+		}
 		h.mu.Unlock()
-		out["emojis"] = chatSafetyEmojis(myPub, rec.IdentityPub)
+		out["emojis"] = emojis
 	}
 	writeJSON(w, out)
 }

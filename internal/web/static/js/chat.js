@@ -528,7 +528,8 @@ function chatMaxMap(a, b) {
 function chatMergeStatus(a, b) {
   return {
     accepted: chatMaxMap(a && a.accepted, b && b.accepted),
-    delivered: chatMaxMap(a && a.delivered, b && b.delivered)
+    delivered: chatMaxMap(a && a.delivered, b && b.delivered),
+    emojis: (a && a.emojis) || (b && b.emojis)
   };
 }
 
@@ -1207,7 +1208,7 @@ async function chatRenderThread() {
   // with the live probe, taking the max per server. Merging — not "probe ||
   // persisted" — is what keeps a sent message's ✓ from regressing to 🕓 when a
   // stale probe (e.g. taken on another server mid-switch) lacks that seq.
-  var st = chatMergeStatus({ accepted: data.accepted, delivered: data.delivered },
+  var st = chatMergeStatus({ accepted: data.accepted, delivered: data.delivered, emojis: data.emojis },
     chatState.peerStatus[addr]);
   var nm = data.name || chatName(addr);
   var threadServer = data.server || chatState.pendingServer[addr] || '';
@@ -1565,11 +1566,12 @@ function chatContactInfo() {
   h += '<div class="chat-info-field"><div class="chat-info-label">' + esc(chatT('chat_account_id')) + '</div>' +
     '<div class="chat-info-value chat-info-id" dir="ltr">' + esc(addr) + '</div>' +
     '<button class="chat-btn-soft" onclick="chatCopy(\'' + escAttr(addr) + '\')">' + esc(chatT('chat_copy')) + '</button></div>';
-  // Safety code, next to the address.
+  // Safety code, next to the address — tap to expand the explainer.
   if (st.emojis) {
-    h += '<div class="chat-info-field" title="' + escAttr(chatT('chat_safety_explain')) + '">' +
+    h += '<div class="chat-info-field chat-info-safety-wrap" onclick="this.classList.toggle(\'open\')">' +
       '<div class="chat-info-label">' + esc(chatT('chat_safety_code')) + '</div>' +
-      '<div class="chat-info-value chat-info-safety">' + esc(st.emojis.join(' ')) + '</div></div>';
+      '<div class="chat-info-value chat-info-safety">' + esc(st.emojis.join(' ')) + '</div>' +
+      '<div class="chat-safety-explain" dir="auto">' + esc(chatT('chat_safety_explain')) + '</div></div>';
   }
   h += '<div class="chat-info-field"><div class="chat-info-label">' + esc(chatT('chat_info_server')) + '</div>' +
     '<div class="chat-info-value" dir="auto"><bdi>' + esc(chatServerLabel(chatState.curServer)) + '</bdi></div>' +
@@ -1672,6 +1674,20 @@ async function chatFetchPeerStatus(addr, server) {
       chatState.peerStatus[addr] = d;
       if (d.quota) chatState.quota = d.quota; // live "N sends left this hour"
       if (chatState.view === 'thread' && chatState.peer === addr) {
+        // Safety emojis arrived for the first time: inject directly into the
+        // DOM so the user sees them immediately without a full re-render
+        // (which the focus/scroll guard might defer).
+        if (d.emojis && !(prev && prev.emojis) && !document.querySelector('.chat-safety-sep')) {
+          var mb0 = document.getElementById('chatMsgsBody');
+          if (mb0) {
+            var sep = document.createElement('div');
+            sep.className = 'chat-sysmsg chat-safety-sep';
+            sep.onclick = function () { chatToggleSafety(sep); };
+            sep.innerHTML = '<span dir="auto">' + esc(d.emojis.join(' ')) + ' · ' + esc(chatT('chat_safety_code')) + '</span>' +
+              '<div class="chat-safety-explain" dir="auto">' + esc(chatT('chat_safety_explain')) + '</div>';
+            mb0.insertBefore(sep, mb0.firstChild);
+          }
+        }
         var ci = document.getElementById('chatInput');
         var mb = document.getElementById('chatMsgsBody');
         var scrolledUp = mb && (mb.scrollHeight - mb.scrollTop - mb.clientHeight > 40);
