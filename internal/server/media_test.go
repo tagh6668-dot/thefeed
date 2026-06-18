@@ -328,6 +328,7 @@ func TestMediaCacheMetadataRoundTrip(t *testing.T) {
 }
 
 func TestMediaCacheAudioTranscode(t *testing.T) {
+	t.Setenv("THEFEED_OPUS_TRANSCODE", "1")
 	// 1. Test fallback with invalid/garbage bytes
 	cache := newTestCache(0, time.Hour)
 	garbage := []byte("not-real-audio-data-at-all")

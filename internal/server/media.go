@@ -142,7 +142,7 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 	if tag == "" {
 		tag = protocol.MediaFile
 	}
-	if tag == protocol.MediaAudio {
+	if tag == protocol.MediaAudio && os.Getenv("THEFEED_OPUS_TRANSCODE") == "1" {
 		if transcoded, err := c.transcodeToOpus(content); err == nil {
 			content = transcoded
 			mimeType = "audio/ogg"
