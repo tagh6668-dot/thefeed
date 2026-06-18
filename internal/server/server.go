@@ -531,8 +531,8 @@ func loadLimitsFromFile(path string, isPrivate bool) (map[string]ChannelLimits, 
 		} else {
 			name = strings.TrimPrefix(parts[0], "@")
 			name = strings.TrimPrefix(name, "x/")
+			name = strings.ToLower(name)
 		}
-		name = strings.ToLower(name)
 
 		var mediaSize, audioSize int64 = -1, -1
 		for i := 1; i < len(parts); i++ {
