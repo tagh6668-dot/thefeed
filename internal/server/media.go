@@ -691,10 +691,10 @@ func (c *MediaCache) transcodeToOpus(content []byte) ([]byte, error) {
 	defer cancel()
 
 	// Try libopus first (higher quality), fall back to native opus encoder.
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inPath, "-vn", "-c:a", "libopus", "-b:a", "16k", "-ac", "1", outPath)
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inPath, "-vn", "-c:a", "libopus", "-b:a", "16k", "-ac", "1", "-ar", "16000", "-vbr", "on", outPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inPath, "-vn", "-c:a", "opus", "-b:a", "16k", "-ac", "1", outPath)
+		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inPath, "-vn", "-c:a", "opus", "-b:a", "16k", "-ac", "1", "-ar", "16000", "-vbr", "on", outPath)
 		outputFallback, errFallback := cmdFallback.CombinedOutput()
 		if errFallback != nil {
 			os.Remove(inPath)
