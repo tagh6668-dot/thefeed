@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"hash/crc32"
 	"os"
@@ -473,4 +474,55 @@ func TestMediaAudioMaxSize(t *testing.T) {
 		t.Errorf("expected error for audio exceeding MaxAudioBytes, got nil")
 	}
 }
+
+func TestMediaCacheOverrides(t *testing.T) {
+	cache := NewMediaCache(MediaCacheConfig{
+		MaxFileBytes:    100,
+		MaxAudioBytes:   200,
+		TTL:             time.Hour,
+		DNSRelayEnabled: true,
+	})
+
+	// 1. Check default context limits (none)
+	ctx := context.Background()
+	if _, _, ok := GetContextLimits(ctx); ok {
+		t.Error("expected ok=false for empty context")
+	}
+
+	// 2. Check context limit propagation
+	ctx = WithContextLimits(ctx, 50, 60)
+	maxF, maxA, ok := GetContextLimits(ctx)
+	if !ok || maxF != 50 || maxA != 60 {
+		t.Errorf("expected limits (50, 60), got (%d, %d), ok=%v", maxF, maxA, ok)
+	}
+
+	// 3. Check GetMaxBytesFromContext override calculation
+	overrideMax, ok := GetMaxBytesFromContext(ctx, protocol.MediaImage, "image/jpeg", cache)
+	if !ok || overrideMax != 50 {
+		t.Errorf("expected max bytes 50 for image, got %d, ok=%v", overrideMax, ok)
+	}
+	overrideMax, ok = GetMaxBytesFromContext(ctx, protocol.MediaAudio, "audio/mpeg", cache)
+	if !ok || overrideMax != 60 {
+		t.Errorf("expected max bytes 60 for audio, got %d, ok=%v", overrideMax, ok)
+	}
+
+	// 4. Test StoreWithOptions respecting overrides
+	var storeOpts MediaCacheStoreOptions
+	fLimit, aLimit := int64(300), int64(400)
+	storeOpts.MaxFileBytesOverride = &fLimit
+	storeOpts.MaxAudioBytesOverride = &aLimit
+
+	// Without override, image of size 150 would be rejected by cache (global limit 100)
+	_, err := cache.StoreWithOptions("k-overlimit-no-override", protocol.MediaImage, make([]byte, 150), "image/jpeg", "", MediaCacheStoreOptions{})
+	if err == nil {
+		t.Error("expected error for image exceeding global limit without override")
+	}
+
+	// With override (300), image of size 150 should succeed
+	_, err = cache.StoreWithOptions("k-overlimit-override", protocol.MediaImage, make([]byte, 150), "image/jpeg", "", storeOpts)
+	if err != nil {
+		t.Errorf("expected success for image with override limit 300, got error: %v", err)
+	}
+}
+
 

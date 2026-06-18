@@ -81,6 +81,9 @@ func (tr *TelegramReader) downloadTelegramPhoto(ctx context.Context, api *tg.Cli
 	// objects no enabled relay would accept. Files that fit GitHub but not
 	// DNS still get fetched.
 	maxBytes := cache.MaxAcceptableBytesFor(protocol.MediaImage, "image/jpeg")
+	if overrideMax, ok := GetMaxBytesFromContext(ctx, protocol.MediaImage, "image/jpeg", cache); ok {
+		maxBytes = overrideMax
+	}
 	if maxBytes > 0 && bestBytes > maxBytes {
 		return protocol.MediaMeta{
 			Tag:    protocol.MediaImage,
@@ -106,7 +109,12 @@ func (tr *TelegramReader) downloadTelegramPhoto(ctx context.Context, api *tg.Cli
 		return protocol.MediaMeta{}, false
 	}
 
-	meta, err := cache.Store(cacheKey, protocol.MediaImage, bytes, "image/jpeg", "")
+	var storeOpts MediaCacheStoreOptions
+	if maxFile, maxAudio, ok := GetContextLimits(ctx); ok {
+		storeOpts.MaxFileBytesOverride = &maxFile
+		storeOpts.MaxAudioBytesOverride = &maxAudio
+	}
+	meta, err := cache.StoreWithOptions(cacheKey, protocol.MediaImage, bytes, "image/jpeg", "", storeOpts)
 	if err != nil {
 		// ErrTooLarge is reported as non-downloadable; any other store error
 		// is just dropped to legacy.
@@ -131,6 +139,9 @@ func (tr *TelegramReader) downloadTelegramDocument(ctx context.Context, api *tg.
 	}
 
 	maxBytes := cache.MaxAcceptableBytesFor(tag, doc.MimeType)
+	if overrideMax, ok := GetMaxBytesFromContext(ctx, tag, doc.MimeType, cache); ok {
+		maxBytes = overrideMax
+	}
 	if maxBytes > 0 && doc.Size > maxBytes {
 		return protocol.MediaMeta{
 			Tag:    tag,
@@ -154,7 +165,12 @@ func (tr *TelegramReader) downloadTelegramDocument(ctx context.Context, api *tg.
 		return protocol.MediaMeta{}, false
 	}
 
-	meta, err := cache.Store(cacheKey, tag, bytes, doc.MimeType, filename)
+	var storeOpts MediaCacheStoreOptions
+	if maxFile, maxAudio, ok := GetContextLimits(ctx); ok {
+		storeOpts.MaxFileBytesOverride = &maxFile
+		storeOpts.MaxAudioBytesOverride = &maxAudio
+	}
+	meta, err := cache.StoreWithOptions(cacheKey, tag, bytes, doc.MimeType, filename, storeOpts)
 	if err != nil {
 		if errors.Is(err, ErrTooLarge) {
 			return meta, true

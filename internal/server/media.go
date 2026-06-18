@@ -134,7 +134,9 @@ func (c *MediaCache) Store(cacheKey, tag string, content []byte, mimeType, filen
 // upload. SkipGitHub keeps the DNS allocation but skips the upload —
 // used when many small siblings share one bundled GitHub upload.
 type MediaCacheStoreOptions struct {
-	SkipGitHub bool
+	SkipGitHub            bool
+	MaxFileBytesOverride  *int64
+	MaxAudioBytesOverride *int64
 }
 
 // StoreWithOptions is Store with selective relay control.
@@ -155,7 +157,43 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 		}
 	}
 	size := int64(len(content))
-	if max := c.MaxAcceptableBytesFor(tag, mimeType); max > 0 && size > max {
+
+	dnsLimit := c.maxFileBytes
+	if opts.MaxFileBytesOverride != nil && *opts.MaxFileBytesOverride != -1 {
+		dnsLimit = *opts.MaxFileBytesOverride
+	}
+	audioLimit := c.maxAudioBytes
+	if opts.MaxAudioBytesOverride != nil && *opts.MaxAudioBytesOverride != -1 {
+		audioLimit = *opts.MaxAudioBytesOverride
+	}
+
+	dns := dnsLimit
+	if audioLimit > 0 && isAudioOrVoice(tag, mimeType) {
+		dns = audioLimit
+	}
+
+	var ghMax int64
+	c.mu.RLock()
+	gh := c.gh
+	c.mu.RUnlock()
+	if gh != nil {
+		ghMax = gh.MaxBytes()
+	}
+
+	var max int64
+	if (dns == 0 && c.dnsEnabled) || (gh != nil && ghMax == 0) {
+		max = 0
+	} else if !c.dnsEnabled {
+		max = ghMax
+	} else if gh == nil {
+		max = dns
+	} else if ghMax > dns {
+		max = ghMax
+	} else {
+		max = dns
+	}
+
+	if max > 0 && size > max {
 		atomic.AddUint64(&c.storeRejected, 1)
 		return protocol.MediaMeta{
 			Tag:    tag,
@@ -163,9 +201,9 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 			Relays: nil,
 		}, ErrTooLarge
 	}
-	dnsLimit := c.maxFileBytes
-	if c.maxAudioBytes > 0 && isAudioOrVoice(tag, mimeType) {
-		dnsLimit = c.maxAudioBytes
+
+	if audioLimit > 0 && isAudioOrVoice(tag, mimeType) {
+		dnsLimit = audioLimit
 	}
 	dnsFits := dnsLimit == 0 || size <= dnsLimit
 

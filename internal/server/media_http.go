@@ -91,6 +91,9 @@ func downloadHTTPMedia(ctx context.Context, cache *MediaCache, tag, rawURL strin
 	}
 
 	maxBytes := cache.MaxAcceptableBytesFor(tag, ctype)
+	if overrideMax, ok := GetMaxBytesFromContext(ctx, tag, ctype, cache); ok {
+		maxBytes = overrideMax
+	}
 	if maxBytes > 0 && resp.ContentLength > 0 && resp.ContentLength > maxBytes {
 		size := resp.ContentLength
 		return protocol.MediaMeta{
@@ -121,7 +124,12 @@ func downloadHTTPMedia(ctx context.Context, cache *MediaCache, tag, rawURL strin
 		}, true
 	}
 
-	meta, err := cache.Store(cacheKey, tag, bytes, resp.Header.Get("Content-Type"), urlBaseName(parsed))
+	var storeOpts MediaCacheStoreOptions
+	if maxFile, maxAudio, ok := GetContextLimits(ctx); ok {
+		storeOpts.MaxFileBytesOverride = &maxFile
+		storeOpts.MaxAudioBytesOverride = &maxAudio
+	}
+	meta, err := cache.StoreWithOptions(cacheKey, tag, bytes, resp.Header.Get("Content-Type"), urlBaseName(parsed), storeOpts)
 	if err != nil {
 		if errors.Is(err, ErrTooLarge) {
 			return meta, true
