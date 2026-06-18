@@ -661,41 +661,54 @@ func (c *MediaCache) transcodeToOpus(content []byte) ([]byte, error) {
 		return nil, fmt.Errorf("ffmpeg not found: %w", err)
 	}
 
+	// Write original audio to a temp file.
 	inTemp, err := os.CreateTemp("", "feed_audio_in_*")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create input temp file: %w", err)
 	}
-	defer os.Remove(inTemp.Name())
-	defer inTemp.Close()
+	inPath := inTemp.Name()
 
 	if _, err := inTemp.Write(content); err != nil {
+		inTemp.Close()
+		os.Remove(inPath)
 		return nil, fmt.Errorf("failed to write input temp file: %w", err)
 	}
-	_ = inTemp.Sync()
 	inTemp.Close()
+	// content slice is no longer needed by this function — the caller
+	// will replace it with the transcoded bytes, allowing GC to reclaim
+	// the original audio memory.
 
+	// Prepare output temp file path.
 	outTemp, err := os.CreateTemp("", "feed_audio_out_*.opus")
 	if err != nil {
+		os.Remove(inPath)
 		return nil, fmt.Errorf("failed to create output temp file: %w", err)
 	}
-	outTempPath := outTemp.Name()
+	outPath := outTemp.Name()
 	outTemp.Close()
-	defer os.Remove(outTempPath)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-vn", "-c:a", "libopus", "-b:a", "16k", "-ac", "1", outTempPath)
+	// Try libopus first (higher quality), fall back to native opus encoder.
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inPath, "-vn", "-c:a", "libopus", "-b:a", "16k", "-ac", "1", outPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-vn", "-c:a", "opus", "-b:a", "16k", "-ac", "1", outTempPath)
+		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inPath, "-vn", "-c:a", "opus", "-b:a", "16k", "-ac", "1", outPath)
 		outputFallback, errFallback := cmdFallback.CombinedOutput()
 		if errFallback != nil {
+			os.Remove(inPath)
+			os.Remove(outPath)
 			return nil, fmt.Errorf("ffmpeg transcoding failed: %v (libopus output: %s) (opus output: %s)", errFallback, string(output), string(outputFallback))
 		}
 	}
 
-	opusBytes, err := os.ReadFile(outTempPath)
+	// Eagerly remove input file — frees disk space immediately.
+	os.Remove(inPath)
+
+	opusBytes, err := os.ReadFile(outPath)
+	// Eagerly remove output file — frees disk space immediately.
+	os.Remove(outPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read output temp file: %w", err)
 	}
