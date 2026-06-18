@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"hash/crc32"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -321,5 +324,79 @@ func TestMediaCacheMetadataRoundTrip(t *testing.T) {
 	}
 	if caption != "look at this" {
 		t.Fatalf("caption = %q", caption)
+	}
+}
+
+func TestMediaCacheAudioTranscode(t *testing.T) {
+	// 1. Test fallback with invalid/garbage bytes
+	cache := newTestCache(0, time.Hour)
+	garbage := []byte("not-real-audio-data-at-all")
+	meta, err := cache.Store("garbage-audio", protocol.MediaAudio, garbage, "audio/mp3", "test.mp3")
+	if err != nil {
+		t.Fatalf("Store garbage audio: %v", err)
+	}
+	// It should have fallen back to original bytes and filename
+	if meta.Filename != "test.mp3" {
+		t.Errorf("expected fallback filename 'test.mp3', got %q", meta.Filename)
+	}
+	if meta.Size != int64(len(garbage)) {
+		t.Errorf("expected fallback size %d, got %d", len(garbage), meta.Size)
+	}
+
+	// 2. Test successful transcoding with a real valid audio file (if ffmpeg is available)
+	_, err = exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("skipping transcode test; ffmpeg not found in PATH")
+	}
+
+	// Generate a tiny mp3 file using ffmpeg
+	tmpMP3, err := os.CreateTemp("", "test_sine_*.mp3")
+	if err != nil {
+		t.Fatalf("failed to create temp mp3: %v", err)
+	}
+	tmpMP3Path := tmpMP3.Name()
+	tmpMP3.Close()
+	defer os.Remove(tmpMP3Path)
+
+	cmd := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1", "-acodec", "libmp3lame", tmpMP3Path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		// If libmp3lame is not available, try generating wav instead
+		t.Logf("mp3 generation failed, trying wav: %v (output: %s)", err, string(out))
+		tmpWav := strings.TrimSuffix(tmpMP3Path, ".mp3") + ".wav"
+		cmdWav := exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=1000:duration=1", tmpWav)
+		if outWav, errWav := cmdWav.CombinedOutput(); errWav != nil {
+			t.Skipf("skipping transcode test; cannot generate source audio: %v (output: %s)", errWav, string(outWav))
+		}
+		tmpMP3Path = tmpWav
+		defer os.Remove(tmpWav)
+	}
+
+	audioBytes, err := os.ReadFile(tmpMP3Path)
+	if err != nil {
+		t.Fatalf("failed to read generated audio: %v", err)
+	}
+
+	// Store the real audio
+	origFilename := filepath.Base(tmpMP3Path)
+	metaAudio, err := cache.Store("real-audio", protocol.MediaAudio, audioBytes, "audio/mpeg", origFilename)
+	if err != nil {
+		t.Fatalf("Store real audio: %v", err)
+	}
+
+	// It should have transcoded to opus
+	expectedFilename := changeExtensionToOpus(origFilename)
+	if metaAudio.Filename != expectedFilename {
+		t.Errorf("expected transcoded filename %q, got %q", expectedFilename, metaAudio.Filename)
+	}
+	if metaAudio.Size == int64(len(audioBytes)) {
+		t.Errorf("expected different size after transcoding, but got same size %d", metaAudio.Size)
+	}
+	// Verify that the retrieved data is not equal to original but exists
+	block, err := cache.GetBlock(metaAudio.Channel, 0)
+	if err != nil {
+		t.Fatalf("failed to get block: %v", err)
+	}
+	if len(block) == 0 {
+		t.Fatalf("retrieved block is empty")
 	}
 }

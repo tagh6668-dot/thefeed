@@ -9,6 +9,10 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -137,6 +141,15 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 	}
 	if tag == "" {
 		tag = protocol.MediaFile
+	}
+	if tag == protocol.MediaAudio {
+		if transcoded, err := c.transcodeToOpus(content); err == nil {
+			content = transcoded
+			mimeType = "audio/ogg"
+			filename = changeExtensionToOpus(filename)
+		} else {
+			c.logf("media: ffmpeg transcoding failed, using original: %v", err)
+		}
 	}
 	size := int64(len(content))
 	if max := c.MaxAcceptableBytes(); max > 0 && size > max {
@@ -640,4 +653,67 @@ func DecompressMediaBytes(r io.Reader, compression protocol.MediaCompression) (i
 		return flate.NewReader(r), nil
 	}
 	return nil, fmt.Errorf("unsupported media compression: %d", compression)
+}
+
+func (c *MediaCache) transcodeToOpus(content []byte) ([]byte, error) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		return nil, fmt.Errorf("ffmpeg not found: %w", err)
+	}
+
+	inTemp, err := os.CreateTemp("", "feed_audio_in_*")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create input temp file: %w", err)
+	}
+	defer os.Remove(inTemp.Name())
+	defer inTemp.Close()
+
+	if _, err := inTemp.Write(content); err != nil {
+		return nil, fmt.Errorf("failed to write input temp file: %w", err)
+	}
+	_ = inTemp.Sync()
+	inTemp.Close()
+
+	outTemp, err := os.CreateTemp("", "feed_audio_out_*.opus")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output temp file: %w", err)
+	}
+	outTempPath := outTemp.Name()
+	outTemp.Close()
+	defer os.Remove(outTempPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-c:a", "libopus", "-b:a", "64k", outTempPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-c:a", "opus", "-b:a", "64k", outTempPath)
+		outputFallback, errFallback := cmdFallback.CombinedOutput()
+		if errFallback != nil {
+			return nil, fmt.Errorf("ffmpeg transcoding failed: %v (libopus output: %s) (opus output: %s)", errFallback, string(output), string(outputFallback))
+		}
+	}
+
+	opusBytes, err := os.ReadFile(outTempPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read output temp file: %w", err)
+	}
+
+	if len(opusBytes) == 0 {
+		return nil, fmt.Errorf("transcoded file is empty")
+	}
+
+	return opusBytes, nil
+}
+
+func changeExtensionToOpus(filename string) string {
+	if filename == "" {
+		return "audio.opus"
+	}
+	ext := filepath.Ext(filename)
+	if ext == "" {
+		return filename + ".opus"
+	}
+	return strings.TrimSuffix(filename, ext) + ".opus"
 }
