@@ -685,10 +685,10 @@ func (c *MediaCache) transcodeToOpus(content []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-c:a", "libopus", "-b:a", "64k", outTempPath)
+	cmd := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-vn", "-c:a", "libopus", "-b:a", "16k", "-ac", "1", outTempPath)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-c:a", "opus", "-b:a", "64k", outTempPath)
+		cmdFallback := exec.CommandContext(ctx, ffmpegPath, "-y", "-i", inTemp.Name(), "-vn", "-c:a", "opus", "-b:a", "16k", "-ac", "1", outTempPath)
 		outputFallback, errFallback := cmdFallback.CombinedOutput()
 		if errFallback != nil {
 			return nil, fmt.Errorf("ffmpeg transcoding failed: %v (libopus output: %s) (opus output: %s)", errFallback, string(output), string(outputFallback))
