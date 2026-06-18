@@ -401,3 +401,76 @@ func TestMediaCacheAudioTranscode(t *testing.T) {
 		t.Fatalf("retrieved block is empty")
 	}
 }
+
+func TestMediaAudioMaxSize(t *testing.T) {
+	// 1. Fallback behavior (MaxAudioBytes = 0)
+	cacheFallback := NewMediaCache(MediaCacheConfig{
+		MaxFileBytes:    100,
+		MaxAudioBytes:   0,
+		TTL:             time.Hour,
+		DNSRelayEnabled: true,
+	})
+
+	// Non-audio file within limit
+	_, err := cacheFallback.Store("img-small", protocol.MediaImage, make([]byte, 50), "image/jpeg", "test.jpg")
+	if err != nil {
+		t.Errorf("expected success for small image, got error: %v", err)
+	}
+
+	// Non-audio file exceeding limit
+	_, err = cacheFallback.Store("img-large", protocol.MediaImage, make([]byte, 150), "image/jpeg", "test.jpg")
+	if err == nil {
+		t.Errorf("expected error for large image exceeding MaxFileBytes, got nil")
+	}
+
+	// Audio file within limit
+	_, err = cacheFallback.Store("audio-small", protocol.MediaAudio, make([]byte, 50), "audio/mpeg", "test.mp3")
+	if err != nil {
+		t.Errorf("expected success for small audio, got error: %v", err)
+	}
+
+	// Audio file exceeding limit
+	_, err = cacheFallback.Store("audio-large", protocol.MediaAudio, make([]byte, 150), "audio/mpeg", "test.mp3")
+	if err == nil {
+		t.Errorf("expected error for large audio exceeding MaxFileBytes under fallback, got nil")
+	}
+
+	// 2. Specific audio size limit behavior (MaxAudioBytes = 200, MaxFileBytes = 100)
+	cacheCustom := NewMediaCache(MediaCacheConfig{
+		MaxFileBytes:    100,
+		MaxAudioBytes:   200,
+		TTL:             time.Hour,
+		DNSRelayEnabled: true,
+	})
+
+	// Non-audio file within MaxFileBytes (100)
+	_, err = cacheCustom.Store("img-custom-ok", protocol.MediaImage, make([]byte, 80), "image/jpeg", "test.jpg")
+	if err != nil {
+		t.Errorf("expected success for image under MaxFileBytes, got error: %v", err)
+	}
+
+	// Non-audio file exceeding MaxFileBytes (100) but under MaxAudioBytes (200)
+	_, err = cacheCustom.Store("img-custom-too-large", protocol.MediaImage, make([]byte, 150), "image/jpeg", "test.jpg")
+	if err == nil {
+		t.Errorf("expected error for image exceeding MaxFileBytes, got nil")
+	}
+
+	// Audio file exceeding MaxFileBytes (100) but under MaxAudioBytes (200)
+	_, err = cacheCustom.Store("audio-custom-ok", protocol.MediaAudio, make([]byte, 150), "audio/mpeg", "test.mp3")
+	if err != nil {
+		t.Errorf("expected success for audio exceeding MaxFileBytes but under MaxAudioBytes, got error: %v", err)
+	}
+
+	// Audio file by MIME type exceeding MaxFileBytes (100) but under MaxAudioBytes (200)
+	_, err = cacheCustom.Store("audio-mime-ok", protocol.MediaFile, make([]byte, 150), "audio/ogg", "test.ogg")
+	if err != nil {
+		t.Errorf("expected success for file with audio MIME type exceeding MaxFileBytes but under MaxAudioBytes, got error: %v", err)
+	}
+
+	// Audio file exceeding MaxAudioBytes (200)
+	_, err = cacheCustom.Store("audio-custom-too-large", protocol.MediaAudio, make([]byte, 250), "audio/mpeg", "test.mp3")
+	if err == nil {
+		t.Errorf("expected error for audio exceeding MaxAudioBytes, got nil")
+	}
+}
+

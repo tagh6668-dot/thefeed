@@ -35,6 +35,7 @@ type Config struct {
 	// but the wire-format DNS flag is unset for clients.
 	DNSMediaEnabled     bool
 	DNSMediaMaxSize     int64         // per-file cap for the DNS relay (0 = no cap)
+	DNSAudioMaxSize     int64         // per-file cap for audio/voice files in the DNS relay (0 = fallback)
 	DNSMediaCacheTTL    int           // DNS-relay TTL in minutes
 	DNSMediaCompression string        // DNS-relay compression: none|gzip|deflate
 	FetchInterval       time.Duration // 0 = default 10m; floor enforced by main
@@ -247,6 +248,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		mediaCache := NewMediaCache(MediaCacheConfig{
 			MaxFileBytes:    s.cfg.DNSMediaMaxSize,
+			MaxAudioBytes:   s.cfg.DNSAudioMaxSize,
 			TTL:             ttl,
 			Compression:     compression,
 			Logf:            logfMedia,

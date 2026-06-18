@@ -29,10 +29,11 @@ import (
 // The cache is safe for concurrent use. Hot-path operations (Store, GetBlock)
 // are O(log n) at worst and typically O(1) with the help of two side maps.
 type MediaCache struct {
-	maxFileBytes int64
-	ttl          time.Duration
-	compression  protocol.MediaCompression
-	dnsEnabled   bool // when false, RelayDNS stays unset on the wire
+	maxFileBytes  int64
+	maxAudioBytes int64
+	ttl           time.Duration
+	compression   protocol.MediaCompression
+	dnsEnabled    bool // when false, RelayDNS stays unset on the wire
 
 	logf func(format string, args ...interface{})
 
@@ -74,6 +75,7 @@ type mediaEntry struct {
 // MediaCacheConfig configures a new MediaCache.
 type MediaCacheConfig struct {
 	MaxFileBytes    int64
+	MaxAudioBytes   int64
 	TTL             time.Duration
 	Compression     protocol.MediaCompression
 	Logf            func(format string, args ...interface{})
@@ -97,11 +99,12 @@ func NewMediaCache(cfg MediaCacheConfig) *MediaCache {
 		logf = func(string, ...interface{}) {}
 	}
 	return &MediaCache{
-		maxFileBytes: cfg.MaxFileBytes,
-		ttl:          cfg.TTL,
-		compression:  cfg.Compression,
-		dnsEnabled:   cfg.DNSRelayEnabled,
-		logf:         logf,
+		maxFileBytes:  cfg.MaxFileBytes,
+		maxAudioBytes: cfg.MaxAudioBytes,
+		ttl:           cfg.TTL,
+		compression:   cfg.Compression,
+		dnsEnabled:    cfg.DNSRelayEnabled,
+		logf:          logf,
 		byKey:        make(map[string]*mediaEntry),
 		byChannel:    make(map[uint16]*mediaEntry),
 		byHash:       make(map[uint32]*mediaEntry),
@@ -152,7 +155,7 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 		}
 	}
 	size := int64(len(content))
-	if max := c.MaxAcceptableBytes(); max > 0 && size > max {
+	if max := c.MaxAcceptableBytesFor(tag, mimeType); max > 0 && size > max {
 		atomic.AddUint64(&c.storeRejected, 1)
 		return protocol.MediaMeta{
 			Tag:    tag,
@@ -160,7 +163,11 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 			Relays: nil,
 		}, ErrTooLarge
 	}
-	dnsFits := c.maxFileBytes == 0 || size <= c.maxFileBytes
+	dnsLimit := c.maxFileBytes
+	if c.maxAudioBytes > 0 && isAudioOrVoice(tag, mimeType) {
+		dnsLimit = c.maxAudioBytes
+	}
+	dnsFits := dnsLimit == 0 || size <= dnsLimit
 
 	now := time.Now()
 	hash := crc32.ChecksumIEEE(content)
@@ -551,10 +558,14 @@ func (c *MediaCache) TouchRelayEntries() {
 	}
 }
 
-// MaxAcceptableBytes returns the largest file size any enabled relay would
-// accept. Callers use it as the "should we even fetch this?" gate so that
-// files which fit GitHub but not DNS still get pulled. 0 means "no cap".
-func (c *MediaCache) MaxAcceptableBytes() int64 {
+// isAudioOrVoice returns true if the given tag or mimeType indicates an audio or voice file.
+func isAudioOrVoice(tag, mimeType string) bool {
+	return tag == protocol.MediaAudio || strings.HasPrefix(strings.ToLower(mimeType), "audio/")
+}
+
+// MaxAcceptableBytesFor returns the largest file size any enabled relay would
+// accept for a specific tag and mimeType. 0 means "no cap".
+func (c *MediaCache) MaxAcceptableBytesFor(tag, mimeType string) int64 {
 	if c == nil {
 		return 0
 	}
@@ -562,6 +573,9 @@ func (c *MediaCache) MaxAcceptableBytes() int64 {
 	gh := c.gh
 	c.mu.RUnlock()
 	dns := c.maxFileBytes
+	if c.maxAudioBytes > 0 && isAudioOrVoice(tag, mimeType) {
+		dns = c.maxAudioBytes
+	}
 	var ghMax int64
 	if gh != nil {
 		ghMax = gh.MaxBytes()
@@ -580,6 +594,13 @@ func (c *MediaCache) MaxAcceptableBytes() int64 {
 		return ghMax
 	}
 	return dns
+}
+
+// MaxAcceptableBytes returns the largest file size any enabled relay would
+// accept. Callers use it as the "should we even fetch this?" gate so that
+// files which fit GitHub but not DNS still get pulled. 0 means "no cap".
+func (c *MediaCache) MaxAcceptableBytes() int64 {
+	return c.MaxAcceptableBytesFor("", "")
 }
 
 // splitMediaBlocks compresses the content (when compression != none),

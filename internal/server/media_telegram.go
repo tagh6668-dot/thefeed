@@ -80,7 +80,8 @@ func (tr *TelegramReader) downloadTelegramPhoto(ctx context.Context, api *tg.Cli
 	// Honour the configured max-size early so we don't even open the RPC for
 	// objects no enabled relay would accept. Files that fit GitHub but not
 	// DNS still get fetched.
-	if maxBytes := cache.MaxAcceptableBytes(); maxBytes > 0 && bestBytes > maxBytes {
+	maxBytes := cache.MaxAcceptableBytesFor(protocol.MediaImage, "image/jpeg")
+	if maxBytes > 0 && bestBytes > maxBytes {
 		return protocol.MediaMeta{
 			Tag:    protocol.MediaImage,
 			Size:   bestBytes,
@@ -94,7 +95,7 @@ func (tr *TelegramReader) downloadTelegramPhoto(ctx context.Context, api *tg.Cli
 		FileReference: photo.FileReference,
 		ThumbSize:     bestType,
 	}
-	bytes, err := tr.downloadTelegramFile(ctx, api, loc, bestBytes)
+	bytes, err := tr.downloadTelegramFile(ctx, api, loc, bestBytes, maxBytes)
 	if err != nil {
 		// Transient fetch error (network, FILE_REFERENCE_EXPIRED, etc.).
 		// We don't mark the message as non-downloadable in that case —
@@ -129,7 +130,8 @@ func (tr *TelegramReader) downloadTelegramDocument(ctx context.Context, api *tg.
 		return protocol.MediaMeta{}, false
 	}
 
-	if maxBytes := cache.MaxAcceptableBytes(); maxBytes > 0 && doc.Size > maxBytes {
+	maxBytes := cache.MaxAcceptableBytesFor(tag, doc.MimeType)
+	if maxBytes > 0 && doc.Size > maxBytes {
 		return protocol.MediaMeta{
 			Tag:    tag,
 			Size:   doc.Size,
@@ -143,7 +145,7 @@ func (tr *TelegramReader) downloadTelegramDocument(ctx context.Context, api *tg.
 		FileReference: doc.FileReference,
 		ThumbSize:     "",
 	}
-	bytes, err := tr.downloadTelegramFile(ctx, api, loc, doc.Size)
+	bytes, err := tr.downloadTelegramFile(ctx, api, loc, doc.Size, maxBytes)
 	if err != nil {
 		// See note in downloadTelegramPhoto: transient fetch errors should
 		// not be surfaced as "non-downloadable", they should fall through
@@ -167,12 +169,7 @@ func (tr *TelegramReader) downloadTelegramDocument(ctx context.Context, api *tg.
 // when expectedSize <= 0) from the given Telegram file location. It enforces
 // the configured max-size cap defensively so a file that lies about its size
 // still can't blow past the limit on the wire.
-func (tr *TelegramReader) downloadTelegramFile(ctx context.Context, api *tg.Client, loc tg.InputFileLocationClass, expectedSize int64) ([]byte, error) {
-	cache := tr.feed.MediaCache()
-	maxBytes := int64(0)
-	if cache != nil {
-		maxBytes = cache.MaxAcceptableBytes()
-	}
+func (tr *TelegramReader) downloadTelegramFile(ctx context.Context, api *tg.Client, loc tg.InputFileLocationClass, expectedSize int64, maxBytes int64) ([]byte, error) {
 
 	var (
 		out    []byte

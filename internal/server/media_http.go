@@ -90,7 +90,7 @@ func downloadHTTPMedia(ctx context.Context, cache *MediaCache, tag, rawURL strin
 		return protocol.MediaMeta{}, false
 	}
 
-	maxBytes := cache.MaxAcceptableBytes()
+	maxBytes := cache.MaxAcceptableBytesFor(tag, ctype)
 	if maxBytes > 0 && resp.ContentLength > 0 && resp.ContentLength > maxBytes {
 		size := resp.ContentLength
 		return protocol.MediaMeta{
