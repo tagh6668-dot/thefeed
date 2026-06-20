@@ -107,6 +107,101 @@ func TestHandleSavedFromChatSnapshot(t *testing.T) {
 	}
 }
 
+func TestResetThenUploadWorks(t *testing.T) {
+	dir := t.TempDir()
+	sc, _ := loadSavedCrypto(dir)
+	sm, _ := newMediaDiskCache(dir+"/saved-media", 0)
+	sm.crypto = sc
+	s := &Server{dataDir: dir, savedCrypto: sc, savedMedia: sm}
+
+	// Upload a file first.
+	content := []byte("test-data-1234")
+	body, ct := multipartBody(t, "file", "a.bin", "application/octet-stream", content)
+	req := httptest.NewRequest("POST", "/api/saved/upload", body)
+	req.Header.Set("Content-Type", ct)
+	w := httptest.NewRecorder()
+	s.handleSavedUpload(w, req)
+	if w.Code != 200 {
+		t.Fatalf("initial upload status = %d", w.Code)
+	}
+	if sm.Size() == 0 {
+		t.Fatal("media size should be >0 after upload")
+	}
+
+	// Reset (simulates the forgotten-passphrase escape hatch).
+	rw := httptest.NewRecorder()
+	s.handleSavedLockReset(rw, httptest.NewRequest("POST", "/api/saved/lock/reset", nil))
+	if rw.Code != 200 {
+		t.Fatalf("reset status = %d", rw.Code)
+	}
+	if sm.Size() != 0 {
+		t.Fatalf("media size after reset = %d, want 0", sm.Size())
+	}
+	if s.savedCount() != 0 {
+		t.Fatalf("saved count after reset = %d, want 0", s.savedCount())
+	}
+
+	// Upload again — this must succeed (directory was recreated).
+	content2 := []byte("new-file-after-reset")
+	body2, ct2 := multipartBody(t, "file", "b.png", "image/png", content2)
+	req2 := httptest.NewRequest("POST", "/api/saved/upload", body2)
+	req2.Header.Set("Content-Type", ct2)
+	w2 := httptest.NewRecorder()
+	s.handleSavedUpload(w2, req2)
+	if w2.Code != 200 {
+		t.Fatalf("post-reset upload status = %d (%s)", w2.Code, w2.Body.String())
+	}
+	if s.savedCount() != 1 {
+		t.Fatalf("saved count after post-reset upload = %d, want 1", s.savedCount())
+	}
+	if sm.Size() == 0 {
+		t.Fatal("media size should be >0 after post-reset upload")
+	}
+}
+
+func TestDeviceKeyLostShowsLocked(t *testing.T) {
+	dir := t.TempDir()
+	sc, _ := loadSavedCrypto(dir)
+	s := &Server{dataDir: dir, savedCrypto: sc}
+
+	// Save something.
+	req := httptest.NewRequest("POST", "/api/saved/note", strings.NewReader(`{"text":"important"}`))
+	s.handleSavedNote(httptest.NewRecorder(), req)
+
+	// Corrupt the device key (truncate to 0 bytes).
+	_ = writeFileAtomic(sc.deviceKeyPath(), []byte{}, 0o600)
+
+	// Reload — should be locked.
+	s.savedCrypto, _ = loadSavedCrypto(dir)
+	if !s.savedCrypto.locked {
+		t.Fatal("store should be locked with corrupt device key")
+	}
+	if s.savedCrypto.mode != "device" {
+		t.Fatalf("mode should be device, got %s", s.savedCrypto.mode)
+	}
+
+	// List should return 423.
+	w := httptest.NewRecorder()
+	s.handleSavedList(w, httptest.NewRequest("GET", "/api/saved", nil))
+	if w.Code != http.StatusLocked {
+		t.Fatalf("locked list = %d, want 423", w.Code)
+	}
+
+	// Lock state endpoint should report mode=device, locked=true.
+	sw := httptest.NewRecorder()
+	s.handleSavedLock(sw, httptest.NewRequest("GET", "/api/saved/lock", nil))
+	var state struct {
+		Mode   string `json:"mode"`
+		Locked bool   `json:"locked"`
+	}
+	if err := json.Unmarshal(sw.Body.Bytes(), &state); err != nil {
+		t.Fatal(err)
+	}
+	if state.Mode != "device" || !state.Locked {
+		t.Fatalf("lock state: %+v", state)
+	}
+}
+
 func TestHandleSavedNoteRejectsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	sc, _ := loadSavedCrypto(dir)

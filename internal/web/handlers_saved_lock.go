@@ -148,6 +148,7 @@ func (s *Server) handleSavedLockReset(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.savedMedia != nil {
 		s.savedMedia.setCrypto(s.savedCrypto)
+		s.savedMedia.resetSize()
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }

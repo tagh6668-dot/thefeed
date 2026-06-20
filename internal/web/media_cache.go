@@ -108,6 +108,13 @@ func (c *mediaDiskCache) Size() int64 {
 	return c.curBytes
 }
 
+// resetSize zeroes the cached byte total (e.g. after an external wipe).
+func (c *mediaDiskCache) resetSize() {
+	c.mu.Lock()
+	c.curBytes = 0
+	c.mu.Unlock()
+}
+
 // scanSizeLocked computes curBytes from the directory listing.
 func (c *mediaDiskCache) scanSizeLocked() {
 	entries, err := os.ReadDir(c.dir)

@@ -252,6 +252,7 @@ func (sc *savedCrypto) resetSaved(dataDir string) error {
 	_ = os.Remove(sc.deviceKeyPath())
 	_ = os.Remove(filepath.Join(dataDir, "saved.json"))
 	_ = os.RemoveAll(filepath.Join(dataDir, "saved-media"))
+	_ = os.MkdirAll(filepath.Join(dataDir, "saved-media"), 0o700)
 	sc.locked = false
 	sc.mode = "device"
 	var zero [32]byte

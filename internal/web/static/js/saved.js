@@ -126,22 +126,35 @@ function renderSavedView() {
   // Mark #messages as a non-scrolling flex container for the saved view layout
   el.classList.add('saved-mode');
 
-  // Passphrase-locked: show an unlock gate instead of the timeline.
+  // Locked: show an unlock gate instead of the timeline.
+  // Device-key-lost (mode!=passphrase) shows a different message with no password field.
   if (savedLocked) {
-    el.innerHTML = '<div class="sm-saved-root"><div class="sm-gate">'
+    var isDeviceKeyLost = _savedLockMode !== 'passphrase';
+    var gateTitle = isDeviceKeyLost
+      ? esc(t('saved_device_key_lost') || 'Device encryption key lost')
+      : esc(t('saved_locked') || 'Saved Messages is locked');
+    var gateSub = isDeviceKeyLost
+      ? esc(t('saved_device_key_lost_sub') || 'The local key that protected your saved messages is unreadable. Data cannot be recovered.')
+      : esc(t('saved_locked_sub') || 'Content is sealed with AES-GCM and lives only on this device.');
+    var gateHtml = '<div class="sm-saved-root"><div class="sm-gate">'
       + '<div class="sm-gate-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1" fill="currentColor"/></svg></div>'
-      + '<div class="sm-gate-title">' + esc(t('saved_locked') || 'Saved Messages is locked') + '</div>'
-      + '<div class="sm-gate-sub">' + esc(t('saved_locked_sub') || 'Content is sealed with AES-GCM and lives only on this device.') + '</div>'
-      + '<div class="sm-gate-enc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>AES-GCM \xb7 Argon2id</div>'
-      + '<div class="sm-pw-field">'
-      + '<input class="sm-pw-input" type="password" id="savedUnlockInput" placeholder="' + escAttr(t('enter_passphrase') || 'Enter passphrase') + '" onkeydown="if(event.key===\'Enter\')unlockSavedView()">'
-      + '<button class="sm-pw-eye" onclick="savedModalToggleUnlockEye()" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></button>'
-      + '</div>'
-      + '<button class="sm-unlock-btn" onclick="unlockSavedView()">' + esc(t('unlock') || 'Unlock') + '</button>'
-      + '<button class="sm-reset-link" onclick="resetSavedView()">' + esc(t('reset_saved') || 'Reset Saved Messages') + '</button>'
+      + '<div class="sm-gate-title">' + gateTitle + '</div>'
+      + '<div class="sm-gate-sub">' + gateSub + '</div>'
+      + '<div class="sm-gate-enc"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>AES-GCM \xb7 Argon2id</div>';
+    if (!isDeviceKeyLost) {
+      gateHtml += '<div class="sm-pw-field">'
+        + '<input class="sm-pw-input" type="password" id="savedUnlockInput" placeholder="' + escAttr(t('enter_passphrase') || 'Enter passphrase') + '" onkeydown="if(event.key===\'Enter\')unlockSavedView()">'
+        + '<button class="sm-pw-eye" onclick="savedModalToggleUnlockEye()" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg></button>'
+        + '</div>'
+        + '<button class="sm-unlock-btn" onclick="unlockSavedView()">' + esc(t('unlock') || 'Unlock') + '</button>';
+    }
+    gateHtml += '<button class="sm-reset-link" onclick="resetSavedView()">' + esc(t('reset_saved') || 'Reset Saved Messages') + '</button>'
       + '</div></div>';
-    var inp = document.getElementById('savedUnlockInput');
-    if (inp) inp.focus();
+    el.innerHTML = gateHtml;
+    if (!isDeviceKeyLost) {
+      var inp = document.getElementById('savedUnlockInput');
+      if (inp) inp.focus();
+    }
     return;
   }
 
