@@ -1067,6 +1067,12 @@ function attachPinchZoom(el, busyCb) {
   el.style.touchAction = 'none';
   el.style.transformOrigin = 'center center';
   el.style.transition = 'transform 0.1s ease-out';
+  // iOS 13+ ignores user-scalable=no; prevent native pinch-zoom on
+  // the overlay so our custom zoom isn't fought by the browser's.
+  var overlay = el.parentNode;
+  var preventGesture = function (e) { e.preventDefault(); };
+  overlay.addEventListener('gesturestart', preventGesture, { passive: false });
+  overlay.addEventListener('gesturechange', preventGesture, { passive: false });
 
   function apply() {
     el.style.transform = 'translate(' + translateX + 'px, ' + translateY + 'px) scale(' + scale + ')';
@@ -1085,6 +1091,7 @@ function attachPinchZoom(el, busyCb) {
   }
   el.addEventListener('touchstart', function (e) {
     if (e.touches.length === 2) {
+      e.preventDefault();
       pinchStartDist = distance(e.touches[0], e.touches[1]);
       startScale = scale;
       if (busyCb) busyCb(true);
@@ -1093,7 +1100,7 @@ function attachPinchZoom(el, busyCb) {
       startTY = e.touches[0].clientY - translateY;
       if (busyCb) busyCb(true);
     }
-  }, { passive: true });
+  }, { passive: false });
   el.addEventListener('touchmove', function (e) {
     if (e.touches.length === 2 && pinchStartDist > 0) {
       e.preventDefault();
@@ -1431,7 +1438,7 @@ function renderMessages(msgs, gaps) {
       + (hasMediaCard ? ' has-media' : '')
       + (isOutgoing ? ' msg-outgoing' : '');
     var youTag = isOutgoing ? '<div class="media-tag you-tag">[YOU]</div>' : '';
-    html += '<div class="' + msgClasses + '" dir="auto">' + youTag + mediaHtml + textHtml + '<div class="msg-meta"><button class="msg-copy-btn" onclick="copyMsg(' + i + ')">' + t('copy') + '</button><span>#' + id + '</span><span>' + timeStr + '</span></div></div>';
+    html += '<div class="' + msgClasses + '" dir="auto">' + youTag + mediaHtml + textHtml + '<div class="msg-meta"><button class="msg-save-btn" aria-label="' + (t('forward_to_saved') || 'Save') + '" onclick="msgSaveToggle(' + id + ', this)">' + icon('bookmark') + '</button><button class="msg-copy-btn" onclick="copyMsg(' + i + ')">' + t('copy') + '</button><span>#' + id + '</span><span>' + timeStr + '</span></div></div>';
   }
   el.innerHTML = html;
   try { mediaTryRestoreVisibleCards(); } catch (e) { }
@@ -1459,7 +1466,9 @@ function renderMessages(msgs, gaps) {
       newMsgScrollDone = true;
       setTimeout(function () {
         var sep = document.getElementById('newMsgSep');
-        if (sep) sep.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Instant, not smooth: smooth-scroll animation janks the Android WebView
+        // compositor; an instant jump to the separator is reliable.
+        if (sep) sep.scrollIntoView({ block: 'start' });
       }, 100);
     } else if (wasAtBottom) {
       // Same separator, but the user is parked at the bottom — keep them

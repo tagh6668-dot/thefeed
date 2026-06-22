@@ -593,7 +593,7 @@ async function saveProfile() {
 
 async function deleteEditingProfile() {
   if (!editingProfileId) return;
-  if (!confirm(t('delete') + '?')) return;
+  if (!(await showConfirmDialog(t('delete') + '?', t('delete'), t('cancel')))) return;
   try {
     // skipCheck: deleting a profile must not trigger a full resolver rescan —
     // resolvers are shared and server-agnostic, so the active list is reused

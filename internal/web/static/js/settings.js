@@ -32,13 +32,17 @@ function openSettings() {
 }
 
 function switchSettingsTab(tab) {
-  var tabs = ['display', 'connection', 'about'];
+  var tabs = ['display', 'connection', 'storage', 'backup', 'about'];
   tabs.forEach(function (name) {
     var btn = document.getElementById('settingsTabBtn' + name.charAt(0).toUpperCase() + name.slice(1));
     var panel = document.getElementById('settingsPanel' + name.charAt(0).toUpperCase() + name.slice(1));
-    if (btn) btn.classList.toggle('active', name === tab);
+    if (btn) {
+      btn.classList.toggle('active', name === tab);
+      if (name === tab) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    }
     if (panel) panel.style.display = name === tab ? '' : 'none';
   });
+  if (tab === 'storage') loadCacheStats();
 }
 
 function toggleHelp(id) {
@@ -191,13 +195,13 @@ function setAppPassword() {
   } catch (e) { }
 }
 
-function removeAppPassword() {
+async function removeAppPassword() {
   if (typeof Android === 'undefined') return;
   var pw = document.getElementById('appPasswordCurrent').value;
   var errEl = document.getElementById('passwordRemoveError');
   errEl.style.display = 'none';
   if (!pw) { errEl.textContent = t('password_empty'); errEl.style.display = ''; return }
-  if (!confirm(t('password_remove_confirm'))) return;
+  if (!(await showConfirmDialog(t('password_remove_confirm')))) return;
   try {
     var ok = Android.removePassword(pw);
     if (ok) {
@@ -450,6 +454,97 @@ async function checkLatestVersion() {
     }
   }
 }
+// ===== STORAGE / CACHE BUDGET =====
+
+function fmtBytes(n) {
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+}
+
+var _storageLabelMap = {
+  'media': 'storage_media',
+  'telemirror': 'storage_telemirror',
+  'saved-media': 'storage_saved_media',
+  'messages': 'storage_messages',
+};
+var _storageIconMap = {
+  'media': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></svg>',
+  'telemirror': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></svg>',
+  'saved-media': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><path d="m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z"/></svg>',
+  'messages': '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:22px;height:22px"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22z"/></svg>',
+};
+var _storageColorMap = {
+  'media': '#3b82f6',
+  'telemirror': '#8b5cf6',
+  'saved-media': '#f59e0b',
+  'messages': '#10b981',
+};
+
+function loadCacheStats() {
+  fetch('/api/cache/stats').then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+    if (!d) return;
+    var el = document.getElementById('storageTotalEl');
+    if (el) el.textContent = fmtBytes(d.total || 0);
+    var inp = document.getElementById('storageBudgetInput');
+    if (inp) inp.value = d.budgetMB || 1024;
+    var list = document.getElementById('storageCacheList');
+    if (!list) return;
+    var total = d.total || 1;
+    var html = '';
+    (d.caches || []).forEach(function (c) {
+      var canDelete = c.id !== 'saved-media';
+      var label = _storageLabelMap[c.id] ? t(_storageLabelMap[c.id]) : c.label;
+      var ico = _storageIconMap[c.id] || '';
+      var clr = _storageColorMap[c.id] || 'var(--text-dim)';
+      var pct = total > 0 ? Math.max(1, Math.round((c.bytes / total) * 100)) : 0;
+      if (c.bytes === 0) pct = 0;
+      html += '<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">'
+        + '<div style="width:40px;height:40px;border-radius:10px;background:' + clr + '18;color:' + clr + ';display:flex;align-items:center;justify-content:center;flex-shrink:0">' + ico + '</div>'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:14px;color:var(--text);margin-bottom:3px">' + esc(label) + '</div>'
+        + '<div style="height:4px;border-radius:2px;background:var(--border);overflow:hidden"><div style="height:100%;width:' + pct + '%;background:' + clr + ';border-radius:2px"></div></div>'
+        + '</div>'
+        + '<div style="display:flex;align-items:center;gap:6px;flex-shrink:0">'
+        + '<span dir="ltr" style="font-size:13px;color:var(--text-dim)">' + fmtBytes(c.bytes) + '</span>'
+        + (canDelete ? '<button class="btn btn-flat btn-sm" onclick="clearOneCache(\'' + escAttr(c.id) + '\')" style="color:var(--danger,#e74c3c);padding:4px 6px;font-size:11px;line-height:0">'
+          + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:16px;height:16px"><polyline points="3,6 5,6 21,6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg></button>' : '')
+        + '</div></div>';
+    });
+    list.innerHTML = html;
+  }).catch(function () { });
+}
+
+function clearOneCache(which) {
+  fetch('/api/cache/clear-one', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ which: which })
+  }).then(function (r) {
+    if (r.ok) {
+      showToast(t('cache_cleared') || 'Cleared');
+      loadCacheStats();
+    }
+  }).catch(function () { });
+}
+
+function saveCacheBudget() {
+  var inp = document.getElementById('storageBudgetInput');
+  var mb = parseInt(inp && inp.value, 10);
+  if (!mb || mb < 50) { showToast(t('storage_budget_min') || 'Minimum 50 MB'); return; }
+  fetch('/api/cache/budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mb: mb })
+  }).then(function (r) {
+    if (r.ok) {
+      showToast(t('saved') || 'Saved');
+      loadCacheStats();
+    }
+  }).catch(function () { });
+}
+
 function toggleResolverBankInfo() {
   var panel = document.getElementById('resolverBankInfoPanel');
   var btn = document.getElementById('resolverBankInfoBtn');
@@ -458,5 +553,167 @@ function toggleResolverBankInfo() {
   if (open) panel.removeAttribute('hidden');
   else panel.setAttribute('hidden', '');
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+// ── Backup & Restore ──
+
+function doBackupExport() {
+  var pw = document.getElementById('bkExportPw').value;
+  if (!pw) { showToast(t('backup_password_required') || 'Enter a password'); return; }
+  var sections = [];
+  if (document.getElementById('bkProfiles').checked) sections.push('profiles');
+  if (document.getElementById('bkChat').checked) sections.push('chat');
+  if (document.getElementById('bkSaved').checked) sections.push('saved');
+  if (document.getElementById('bkMedia').checked) sections.push('savedMedia');
+  if (document.getElementById('bkBgImage').checked) sections.push('bgImage');
+  if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
+
+  var btn = document.getElementById('bkExportBtn');
+  btn.disabled = true;
+  var origText = btn.textContent;
+  btn.textContent = '...';
+
+  fetch('/api/backup/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: pw, sections: sections })
+  }).then(function (r) {
+    if (r.status === 423) throw new Error(t('backup_saved_locked') || 'Unlock saved messages first');
+    if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    return r.blob();
+  }).then(function (blob) {
+    triggerDownload(blob, 'thefeed-backup.tfbak');
+    if (!(window.Android && window.Android.saveMedia)) {
+      showToast(t('backup_exported') || 'Backup exported');
+    }
+  }).catch(function (e) {
+    showToast(e.message || 'Export failed');
+  }).finally(function () {
+    btn.disabled = false;
+    btn.textContent = origText;
+    document.getElementById('bkExportPw').value = '';
+  });
+}
+
+function doBackupPreview() {
+  var fileEl = document.getElementById('bkImportFile');
+  var pw = document.getElementById('bkImportPw').value;
+  if (!fileEl.files.length) { showToast(t('backup_select_file') || 'Select a backup file'); return; }
+  if (!pw) { showToast(t('backup_password_required') || 'Enter a password'); return; }
+
+  var fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('password', pw);
+
+  fetch('/api/backup/preview', { method: 'POST', body: fd })
+    .then(function (r) {
+      if (r.status === 401) throw new Error(t('backup_wrong_password') || 'Wrong password');
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    })
+    .then(function (d) { renderBackupPreview(d); })
+    .catch(function (e) { showToast(e.message || 'Preview failed'); });
+}
+
+function renderBackupPreview(d) {
+  var el = document.getElementById('bkPreviewResult');
+  if (!el) return;
+  var inputs = document.getElementById('bkImportInputs');
+  if (inputs) inputs.style.display = 'none';
+
+  var html = '<div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">';
+
+  if (d.createdAt) {
+    var dt = new Date(d.createdAt * 1000);
+    html += '<div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">' + esc(dt.toLocaleString()) + '</div>';
+  }
+
+  var items = [];
+  if (d.profiles) {
+    items.push({ id: 'profiles', label: t('backup_profiles') || 'Profiles & Settings',
+      detail: d.profiles.count + ' — ' + (d.profiles.names || []).join(', ') });
+  }
+  if (d.chat) {
+    var parts = [];
+    if (d.chat.identity) parts.push(t('backup_identity') || 'Identity');
+    if (d.chat.contacts) parts.push(d.chat.contacts + ' ' + (t('backup_contacts') || 'contacts'));
+    if (d.chat.threads) parts.push(d.chat.threads + ' ' + (t('backup_threads') || 'threads'));
+    if (d.chat.messages) parts.push(d.chat.messages + ' ' + (t('backup_msgs') || 'messages'));
+    items.push({ id: 'chat', label: t('backup_chat') || 'Chat', detail: parts.join(', ') });
+  }
+  if (d.saved) {
+    items.push({ id: 'saved', label: t('backup_saved') || 'Saved Messages',
+      detail: d.saved.count + ' ' + (t('backup_items') || 'items') });
+  }
+  if (d.savedMedia) {
+    items.push({ id: 'savedMedia', label: t('backup_media') || 'Saved Media',
+      detail: d.savedMedia.count + ' ' + (t('backup_files') || 'files') + ' (' + fmtBytes(d.savedMedia.bytes) + ')' });
+  }
+  if (d.bgImage) {
+    items.push({ id: 'bgImage', label: t('backup_bg') || 'Background Image', detail: fmtBytes(d.bgImage.bytes) });
+  }
+
+  items.forEach(function (it) {
+    html += '<label style="display:flex;align-items:flex-start;gap:8px;padding:6px 0;font-size:13px;color:var(--text);border-bottom:1px solid var(--border)">'
+      + '<input type="checkbox" class="bk-restore-section" value="' + it.id + '" checked style="margin-top:2px">'
+      + '<span style="flex:1;min-width:0"><span style="display:block">' + esc(it.label) + '</span>'
+      + '<span style="display:block;font-size:11px;color:var(--text-dim);word-break:break-word">' + esc(it.detail) + '</span></span>'
+      + '</label>';
+  });
+
+  html += '</div>';
+  html += '<div style="display:flex;gap:8px;margin-top:10px">'
+    + '<button class="btn btn-outline" onclick="hideBackupPreview()" style="flex:1">'
+    + (t('cancel') || 'Cancel') + '</button>'
+    + '<button class="btn btn-primary" id="bkRestoreBtn" onclick="doBackupRestore()" style="flex:1">'
+    + (t('backup_restore_btn') || 'Restore') + '</button>'
+    + '</div>';
+
+  el.innerHTML = html;
+  el.style.display = '';
+}
+
+function hideBackupPreview() {
+  var el = document.getElementById('bkPreviewResult');
+  if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  var inputs = document.getElementById('bkImportInputs');
+  if (inputs) inputs.style.display = '';
+}
+
+async function doBackupRestore() {
+  var fileEl = document.getElementById('bkImportFile');
+  var pw = document.getElementById('bkImportPw').value;
+  if (!fileEl.files.length || !pw) return;
+
+  var checks = document.querySelectorAll('.bk-restore-section:checked');
+  var sections = [];
+  for (var i = 0; i < checks.length; i++) sections.push(checks[i].value);
+  if (!sections.length) { showToast(t('backup_select_section') || 'Select at least one section'); return; }
+
+  if (!(await showConfirmDialog(t('backup_restore_confirm') || 'This will overwrite current data. Continue?'))) return;
+
+  var btn = document.getElementById('bkRestoreBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+
+  var fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('password', pw);
+  fd.append('sections', JSON.stringify(sections));
+
+  fetch('/api/backup/restore', { method: 'POST', body: fd })
+    .then(function (r) {
+      if (r.status === 401) throw new Error(t('backup_wrong_password') || 'Wrong password');
+      if (r.status === 423) throw new Error(t('backup_saved_locked') || 'Unlock saved messages first');
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+      return r.json();
+    })
+    .then(function () {
+      showToast(t('backup_restored') || 'Backup restored');
+      setTimeout(function () { location.reload(); }, 1000);
+    })
+    .catch(function (e) {
+      showToast(e.message || 'Restore failed');
+      if (btn) { btn.disabled = false; btn.textContent = t('backup_restore_btn') || 'Restore'; }
+    });
 }
 

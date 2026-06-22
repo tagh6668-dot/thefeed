@@ -128,9 +128,10 @@ function scrollToMsg(id) {
       els[i].scrollIntoView({ behavior: 'smooth', block: 'center' });
       els[i].style.outline = '2px solid var(--accent)';
       setTimeout(function (el) { el.style.outline = '' }, 1500, els[i]);
-      return;
+      return true;
     }
   }
+  return false;
 }
 function isPersian(text) { return text && (text.match(/[\u0600-\u06FF]/g) || []).length > text.length * 0.25 }
 

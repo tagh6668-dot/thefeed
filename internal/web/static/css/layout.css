@@ -409,10 +409,12 @@
       padding: 8px 14px;
       border-top: 1px solid var(--border);
       display: flex;
+      flex-wrap: nowrap;
       align-items: center;
       justify-content: center;
       gap: 10px;
       font-size: 10px;
+      white-space: nowrap;
       color: var(--text-dim)
     }
 

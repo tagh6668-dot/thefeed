@@ -27,15 +27,22 @@ import (
 const (
 	chatDirName = "chat"
 	// chatPollInterval is the idle background poll cadence (no UI watching).
-	chatPollInterval = 3 * time.Minute
+	chatPollInterval = 90 * time.Second
 	// chatPollActiveInterval is the faster cadence used while a UI is open, so
 	// incoming messages surface quickly even when the user is on the feed and
 	// the messenger view is closed.
 	chatPollActiveInterval = 30 * time.Second
 	chatPollFirstWait      = 45 * time.Second
-	// chatEnableRegisterAttempts: eager register+poll retries on server enable, so
-	// a flaky network still registers promptly (not only via the background loop).
-	chatEnableRegisterAttempts = 6
+	// chatEnableRegisterAttempts: register+poll retries on enable (background loop).
+	chatEnableRegisterAttempts = 20
+	// chatAvailCacheTTL: report a confirmed-reachable server available without
+	// re-probing for this long.
+	chatAvailCacheTTL = 5 * time.Minute
+	// chatEnableProbeTimeout bounds the synchronous register on enable.
+	chatEnableProbeTimeout = 30 * time.Second
+	// chatEnableSyncAttempts: register tries within the synchronous window before
+	// reporting failure (background then continues to chatEnableRegisterAttempts).
+	chatEnableSyncAttempts = 5
 )
 
 // chatIdentityFile is chat/identity.json.
@@ -192,6 +199,7 @@ type perServerChat struct {
 	f            *client.Fetcher   // its fetcher, so resolvers can be re-synced live
 	backoffUntil time.Time         // skip polling until this time (guarded by chatHub.mu)
 	lastReason   string            // i18n key of the last probe failure (guarded by chatHub.mu)
+	lastOKAt     time.Time         // last confirmed-reachable time; positive availability cache (guarded by chatHub.mu)
 	scorer       *chatBudgetScorer // adaptive cell-budget selection (guarded by chatHub.mu)
 }
 
@@ -421,7 +429,7 @@ func (h *chatHub) rebuildServersLocked() {
 	if err != nil {
 		return
 	}
-	resolvers := h.s.chatResolvers()
+	sharedResolvers := h.s.chatResolvers()
 	for _, p := range pl.Profiles {
 		if strings.TrimSpace(p.Config.ServerKey) == "" {
 			continue
@@ -429,6 +437,12 @@ func (h *chatHub) rebuildServersLocked() {
 		key := chatServerKey(p.Config.Domain)
 		if key == "" || h.servers[key] != nil {
 			continue
+		}
+		// Use shared resolvers first; fall back to this profile's own
+		// resolvers so chat works even if the active config has none.
+		resolvers := sharedResolvers
+		if len(resolvers) == 0 {
+			resolvers = p.Config.Resolvers
 		}
 		f, ferr := h.s.buildChatFetcher(p.Config, resolvers, h.ctx)
 		if ferr != nil {
@@ -593,6 +607,24 @@ func (h *chatHub) probeBackoff(ps *perServerChat, now time.Time) (bool, string) 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return now.Before(ps.backoffUntil), ps.lastReason
+}
+
+// markReachable records a confirmed-reachable probe/register: clears the
+// failure backoff and stamps the positive availability cache.
+func (h *chatHub) markReachable(ps *perServerChat) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	ps.backoffUntil = time.Time{}
+	ps.lastReason = ""
+	ps.lastOKAt = time.Now()
+}
+
+// cachedAvailable reports whether ps was confirmed reachable within the cache
+// TTL, so it can be reported available without a fresh (slow) probe.
+func (h *chatHub) cachedAvailable(ps *perServerChat, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !ps.lastOKAt.IsZero() && now.Sub(ps.lastOKAt) < chatAvailCacheTTL
 }
 
 // shouldSkipProbe reports whether the availability handler should skip a live
@@ -913,10 +945,60 @@ func (s *Server) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// chatServerResult is one server's availability row, shared by the aggregate,
+// list, and per-server probe handlers.
+type chatServerResult struct {
+	Key       string `json:"key"`
+	Name      string `json:"name,omitempty"`
+	Domain    string `json:"domain"`
+	Available bool   `json:"available"`
+	Enabled   bool   `json:"enabled"`
+	Cached    bool   `json:"cached,omitempty"` // reported from the positive cache, not a fresh probe
+	Reason    string `json:"reason,omitempty"`
+}
+
+// chatLimitsMap renders a server's advertised limits for the UI.
+func chatLimitsMap(l protocol.ChatLimits) map[string]any {
+	return map[string]any{
+		"maxMsgBytes": l.MaxMsgBytes,
+		"sendPerHour": l.SendPerHour,
+		"inboxCap":    l.InboxCap,
+		"ttlHours":    l.TTLHours,
+	}
+}
+
+// probeOneServer does a fresh DNS capability probe of one server, updating its
+// failure backoff or positive cache. Returns the row plus the server's
+// advertised limits when reachable (nil otherwise).
+func (h *chatHub) probeOneServer(ctx context.Context, ps *perServerChat, enabled bool) (chatServerResult, map[string]any) {
+	res := chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled}
+	cctx, c := context.WithTimeout(ctx, 45*time.Second)
+	defer c()
+	// Cheap pre-check: the signed feed metadata's ChatAvailable bit (one query)
+	// tells us a server has no messenger, so we skip the ChatInfo probe whose
+	// retries-on-absence are the slow path. Only an explicit "no chat"
+	// short-circuits; unknown/unreachable falls through to the real probe.
+	if advertises, known := ps.client.ServerAdvertisesChat(cctx); known && !advertises {
+		res.Reason = "chat_err_disabled"
+		h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(client.ErrChatDisabled)), res.Reason)
+		return res, nil
+	}
+	info, err := ps.client.EnsureInfo(cctx)
+	if err != nil {
+		res.Reason = chatStatusKey(err)
+		h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(err)), res.Reason)
+		return res, nil
+	}
+	res.Available = true
+	h.markReachable(ps)
+	return res, chatLimitsMap(info.Limits)
+}
+
 // handleChatAvailability probes EVERY chat server (each profile that pins a
 // server key) in parallel and reports per-server availability plus the
 // aggregate. The frontend uses the list to pick a server when starting a new
-// chat and to gate composing.
+// chat and to gate composing. Servers confirmed reachable within the cache TTL
+// are reported available without re-probing (unless ?retry=1 forces a sweep).
 func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) {
 	h := s.chat
 	h.mu.Lock()
@@ -946,25 +1028,21 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
 
-	type sres struct {
-		Key       string `json:"key"`
-		Name      string `json:"name,omitempty"`
-		Domain    string `json:"domain"`
-		Available bool   `json:"available"`
-		Enabled   bool   `json:"enabled"`
-		Reason    string `json:"reason,omitempty"`
-	}
-	out := make([]sres, len(servers))
+	forced := r.URL.Query().Get("retry") == "1"
+	out := make([]chatServerResult, len(servers))
 	var (
-		wg          sync.WaitGroup
-		mu          sync.Mutex
-		anyUsable   bool // enabled AND reachable
-		limits      map[string]any
-		firstReason string
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		limits map[string]any
 	)
 	now := time.Now()
 	for i, ps := range servers {
 		enabled := h.serverEnabled(ps.serverKey)
+		// Positive cache: skip the probe for a recently-reachable server (unless forced).
+		if !forced && h.cachedAvailable(ps, now) {
+			out[i] = chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled, Available: true, Cached: true}
+			continue
+		}
 		// A DISABLED server that recently failed (old/incompatible/dead) is
 		// reported from cache instead of re-probed. Re-probing such servers on
 		// every availability call — and this handler runs on every foreground
@@ -973,68 +1051,114 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 		// how a couple of stale extra configs broke chat. Enabled servers are
 		// always probed: the user opted in and wants prompt recovery.
 		if skip, reason := h.shouldSkipProbe(ps, enabled, now); skip {
-			out[i] = sres{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Reason: reason}
+			out[i] = chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled, Reason: reason}
 			continue
 		}
 		wg.Add(1)
 		go func(i int, ps *perServerChat, enabled bool) {
 			defer wg.Done()
-			cctx, c := context.WithTimeout(ctx, 45*time.Second)
-			defer c()
-			res := sres{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled}
-			// Cheap pre-check: the signed feed metadata's ChatAvailable bit (one
-			// query) tells us a server has no messenger, so we skip the ChatInfo
-			// probe whose retries-on-absence are the slow path. Only an explicit
-			// "no chat" short-circuits; an unknown/unreachable result falls through
-			// to the authoritative probe.
-			if advertises, known := ps.client.ServerAdvertisesChat(cctx); known && !advertises {
-				res.Reason = "chat_err_disabled"
-				h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(client.ErrChatDisabled)), res.Reason)
-				out[i] = res
-				return
-			}
-			info, err := ps.client.EnsureInfo(cctx)
-			if err != nil {
-				res.Reason = chatStatusKey(err)
-				h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(err)), res.Reason)
-			} else {
-				res.Available = true
-				h.setBackoff(ps, time.Time{}) // reachable → clear any backoff
+			res, lim := h.probeOneServer(ctx, ps, enabled)
+			out[i] = res
+			if lim != nil {
 				mu.Lock()
-				if res.Enabled {
-					anyUsable = true
-				}
 				if limits == nil {
-					limits = map[string]any{
-						"maxMsgBytes": info.Limits.MaxMsgBytes,
-						"sendPerHour": info.Limits.SendPerHour,
-						"inboxCap":    info.Limits.InboxCap,
-						"ttlHours":    info.Limits.TTLHours,
-					}
+					limits = lim
 				}
 				mu.Unlock()
 			}
-			out[i] = res
 		}(i, ps, enabled)
 	}
 	wg.Wait()
 
-	for _, r := range out {
-		if firstReason == "" && r.Reason != "" {
-			firstReason = r.Reason
+	anyUsable, firstReason := false, ""
+	for _, rr := range out {
+		if rr.Available && rr.Enabled {
+			anyUsable = true // can actually chat now: enabled AND reachable
+		}
+		if firstReason == "" && rr.Reason != "" {
+			firstReason = rr.Reason
 		}
 	}
 
 	resp["servers"] = out
-	// "available" means the user can actually chat now: at least one enabled,
-	// reachable server. Reachable-but-not-enabled servers appear in the list so
-	// the user can turn them on.
 	resp["available"] = anyUsable
 	if limits != nil {
 		resp["limits"] = limits
 	}
 	if !anyUsable && firstReason != "" {
 		resp["reason"] = firstReason
+	}
+	writeJSON(w, resp)
+}
+
+// handleChatServers lists every chat server WITHOUT probing — instant, so the
+// UI renders the server sheet immediately and then probes each row via
+// /api/chat/probe. Cached state (recently reachable, or a recent failure
+// reason) is included so re-opening the sheet doesn't re-probe.
+func (s *Server) handleChatServers(w http.ResponseWriter, r *http.Request) {
+	h := s.chat
+	h.mu.Lock()
+	hasID := h.identity != nil
+	h.mu.Unlock()
+	if !hasID {
+		writeJSON(w, map[string]any{"needsCreate": true})
+		return
+	}
+	servers := h.snapshotServers()
+	now := time.Now()
+	out := make([]chatServerResult, len(servers))
+	for i, ps := range servers {
+		row := chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: h.serverEnabled(ps.serverKey)}
+		if h.cachedAvailable(ps, now) {
+			row.Available, row.Cached = true, true
+		} else if backed, reason := h.probeBackoff(ps, now); backed {
+			row.Reason = reason
+		}
+		out[i] = row
+	}
+	writeJSON(w, map[string]any{"servers": out})
+}
+
+// handleChatProbeServer probes ONE server (?server=KEY). The UI fires these in
+// parallel — one per row — can cancel any individually, and updates each row as
+// it resolves, so a slow/dead server never blocks the others. Served from the
+// positive cache unless ?retry=1 forces a fresh probe.
+func (s *Server) handleChatProbeServer(w http.ResponseWriter, r *http.Request) {
+	h := s.chat
+	h.mu.Lock()
+	hasID := h.identity != nil
+	h.mu.Unlock()
+	if !hasID {
+		writeJSON(w, map[string]any{"needsCreate": true})
+		return
+	}
+	key := chatServerKey(r.URL.Query().Get("server"))
+	if key == "" {
+		http.Error(w, "invalid server", 400)
+		return
+	}
+	h.mu.Lock()
+	ps := h.servers[key]
+	h.mu.Unlock()
+	if ps == nil {
+		http.Error(w, "unknown server", 404)
+		return
+	}
+	h.syncResolvers()
+	enabled := h.serverEnabled(key)
+	now := time.Now()
+	if r.URL.Query().Get("retry") != "1" && h.cachedAvailable(ps, now) {
+		writeJSON(w, map[string]any{"server": chatServerResult{
+			Key: key, Name: ps.name, Domain: ps.domain, Enabled: enabled, Available: true, Cached: true,
+		}})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
+	defer cancel()
+	res, lim := h.probeOneServer(ctx, ps, enabled)
+	resp := map[string]any{"server": res}
+	if lim != nil {
+		resp["limits"] = lim
 	}
 	writeJSON(w, resp)
 }
@@ -1095,8 +1219,10 @@ func (s *Server) handleChatEnable(w http.ResponseWriter, r *http.Request) {
 		ctx := h.ctx
 		h.mu.Unlock()
 
-		// Register on the newly-enabled server (and pull mail) now, retrying a
-		// flaky network. pollServer opens a session, which auto-registers.
+		// Register on the newly-enabled server (and pull mail). The first attempt is
+		// synchronous so the toggle returns an authoritative verdict; on failure a
+		// background loop keeps retrying.
+		out := map[string]any{"ok": true}
 		if req.On && ps != nil && ctx != nil {
 			h.mu.Lock()
 			la := ""
@@ -1104,34 +1230,73 @@ func (s *Server) handleChatEnable(w http.ResponseWriter, r *http.Request) {
 				la = client.ChatAddressString(h.identity.Addr)
 			}
 			h.mu.Unlock()
-			go func() {
-				var lastErr error
-				for attempt := 0; attempt < chatEnableRegisterAttempts; attempt++ {
-					n, err := h.pollServer(ctx, ps, nil, la)
-					if err == nil {
-						h.setBackoff(ps, time.Time{}) // reachable → clear backoff
-						if n > 0 {
-							h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
-						}
-						return
-					}
-					lastErr = err
-					h.s.addLog("[chat] enable " + key + ": " + err.Error())
-					backoff := time.Duration(attempt+1) * 1500 * time.Millisecond
-					if backoff > 5*time.Second {
-						backoff = 5 * time.Second
-					}
+
+			// Retry within the bounded window: one DNS round-trip is too flaky to
+			// trust as the verdict.
+			sctx, scancel := context.WithTimeout(r.Context(), chatEnableProbeTimeout)
+			var n int
+			var err error
+			for attempt := 0; attempt < chatEnableSyncAttempts; attempt++ {
+				if attempt > 0 {
 					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(backoff):
+					case <-sctx.Done():
+					case <-time.After(1200 * time.Millisecond):
+					}
+					if sctx.Err() != nil {
+						break
 					}
 				}
-				// Eager attempt exhausted — hand off to the background poll loop.
-				h.setBackoff(ps, time.Now().Add(chatServerBackoff(lastErr)))
-			}()
+				if n, err = h.pollServer(sctx, ps, nil, la); err == nil {
+					break
+				}
+				h.s.addLog("[chat] enable " + key + ": " + err.Error())
+			}
+			scancel()
+			if err == nil {
+				h.markReachable(ps)
+				out["available"] = true
+				if n > 0 {
+					h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
+				}
+			} else {
+				out["available"] = false
+				out["reason"] = chatStatusKey(err)
+				// Keep retrying in the background so a flaky network still registers.
+				go func() {
+					lastErr := err
+					for attempt := 1; attempt < chatEnableRegisterAttempts; attempt++ {
+						backoff := time.Duration(attempt) * 1500 * time.Millisecond
+						if backoff > 5*time.Second {
+							backoff = 5 * time.Second
+						}
+						select {
+						case <-ctx.Done():
+							return
+						case <-time.After(backoff):
+						}
+						// Stop if the user turned this server off meanwhile —
+						// pollServer auto-registers and must never publish the
+						// identity to a server the user opted out of.
+						if !h.serverEnabled(key) {
+							return
+						}
+						n, perr := h.pollServer(ctx, ps, nil, la)
+						if perr == nil {
+							h.markReachable(ps)
+							if n > 0 {
+								h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
+							}
+							return
+						}
+						lastErr = perr
+						h.s.addLog("[chat] enable " + key + ": " + perr.Error())
+					}
+					// Eager attempts exhausted — hand off to the background poll loop.
+					h.setBackoff(ps, time.Now().Add(chatServerBackoff(lastErr)))
+				}()
+			}
 		}
-		writeJSON(w, map[string]any{"ok": true})
+		writeJSON(w, out)
 
 	default:
 		http.Error(w, "unknown action", 400)

@@ -1,5 +1,6 @@
 // ===== STATE =====
 var selectedChannel = 0, channels = [], eventSource = null, autoRefreshTimer = null, telegramLoggedIn = false, logVisible = false;
+var _selectGen = 0;
 // previousMsgIDs is kept for the "no_new_messages" toast on refresh.
 // previousContentHashes drives the channel-list NEW badge — robust across
 // both Telegram (monotonic IDs) and X accounts (CRC32-hashed snowflake
@@ -128,8 +129,19 @@ function openChat() {
 }
 function openSidebar() {
   chatIsOpen = false;
+  _selectGen++;
   document.getElementById('app').classList.remove('chat-open');
 }
+// feedBack: the content pane's back button. Remove chat-open directly — the feed
+// shares window.history with the messenger and telemirror (each with their own
+// push/popstate handling), so routing back through history.back() can land on a
+// foreign state and never clear chat-open, leaving the user stuck in a channel.
+// Direct removal always returns to the list.
+function feedBack() {
+  if (viewingSaved) closeSavedMessages();
+  else openSidebar();
+}
+window.feedBack = feedBack;
 window.addEventListener('popstate', function () {
   if (mobileQuery.matches && document.getElementById('app').classList.contains('chat-open')) {
     openSidebar();
@@ -414,6 +426,51 @@ function showInputDialog(opts) {
     // also gets the soft keyboard up.
     setTimeout(function () { try { field.focus(); field.select(); } catch (e) { } }, 30);
   });
+}
+
+// triggerDownload saves a blob to the user's device. On iOS WKWebView the
+// <a download> attribute is ignored, so we use the Web Share API instead.
+function triggerDownload(blob, filename) {
+  // Ensure the filename has an extension — iOS share sheet and Android
+  // bridge use it literally, unlike <a download> which infers from MIME.
+  if (filename && filename.indexOf('.') === -1 && blob.type) {
+    var ext = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+      'image/webp': '.webp', 'video/mp4': '.mp4', 'audio/mpeg': '.mp3',
+      'audio/ogg': '.ogg', 'application/pdf': '.pdf' }[blob.type];
+    if (!ext) {
+      var sub = blob.type.split('/')[1];
+      if (sub) ext = '.' + sub.replace(/\+.*$/, '');
+    }
+    if (ext) filename += ext;
+  }
+  // Android bridge: reliable save to Downloads with a toast showing the path.
+  var bridge = (typeof window !== 'undefined' && window.Android) ? window.Android : null;
+  if (bridge && typeof bridge.saveMedia === 'function') {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var b64 = (reader.result || '').split(',')[1] || '';
+      try { bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename); }
+      catch (e) { showToast('Save failed'); }
+    };
+    reader.readAsDataURL(blob);
+    return;
+  }
+  // iOS WKWebView: <a download> is ignored, use Web Share API instead.
+  if (navigator.share && navigator.canShare) {
+    try {
+      var file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+      if (navigator.canShare({ files: [file] })) {
+        navigator.share({ files: [file] }).catch(function () {});
+        return;
+      }
+    } catch (e) {}
+  }
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
 }
 
 // showInfoDialog is the one-button cousin of showConfirmDialog: a small

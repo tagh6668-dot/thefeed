@@ -37,7 +37,7 @@ func parseChannelInfo(doc *html.Node) *Channel {
 		}
 	}
 	if descEl := findFirstByClass(doc, "tgme_channel_info_description"); descEl != nil {
-		ch.Description = rewriteTranslateLinksInHTML(innerHTML(descEl))
+		ch.Description = sanitizePostHTML(innerHTML(descEl))
 	}
 	// Telegram wraps the avatar in `tgme_page_photo_image`. Look for
 	// that specifically — Google Translate's proxy may inject other
@@ -92,7 +92,7 @@ func parseSinglePost(wrap *html.Node) *Post {
 	// quoted snippet) which appears BEFORE the body in the DOM, so
 	// findFirstByClass would grab the wrong one.
 	if textEl := findMessageBodyText(msg); textEl != nil {
-		p.Text = rewriteTranslateLinksInHTML(innerHTML(textEl))
+		p.Text = sanitizePostHTML(innerHTML(textEl))
 	}
 
 	p.Reply = parseReply(msg)
@@ -263,7 +263,7 @@ func parseReply(msg *html.Node) *Reply {
 		r.Author = textOf(a)
 	}
 	if t := findFirstByClass(rNode, "tgme_widget_message_text"); t != nil {
-		r.Text = rewriteTranslateLinksInHTML(innerHTML(t))
+		r.Text = sanitizePostHTML(innerHTML(t))
 	}
 	if r.Author == "" && r.Text == "" {
 		return nil
@@ -444,6 +444,13 @@ func rewriteTranslateLink(raw string) string {
 	if raw == "" {
 		return raw
 	}
+	// Structured URL fields (media / reply / forward) flow through here; never
+	// surface a javascript:/vbscript:/data: scheme as a clickable URL. Inline
+	// post links are already dropped upstream in sanitizeAndRewriteTree, but
+	// those fields aren't, so guard here too.
+	if isDangerousURL(raw) {
+		return ""
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return raw
@@ -475,11 +482,16 @@ func rewriteTranslateLink(raw string) string {
 	return u.String()
 }
 
-// rewriteTranslateLinksInHTML rewrites <a href> in an HTML fragment.
-// <img src> is intentionally left alone (we serve images via the proxy).
-func rewriteTranslateLinksInHTML(htmlStr string) string {
-	if htmlStr == "" || !containsAnyTranslateMarker(htmlStr) {
-		return htmlStr
+// sanitizePostHTML scrubs an untrusted HTML fragment from a channel post and
+// rewrites Google Translate proxy hrefs back to their originals. The source
+// markup is fully attacker-controlled (a channel can put anything in a post),
+// so we ALWAYS parse fragments containing markup and drop script vectors:
+// inline event handlers (onclick, onerror, …) and javascript:/vbscript:/data:
+// hrefs that would otherwise execute in the client WebView. <img src> is left
+// alone (we serve images via the proxy).
+func sanitizePostHTML(htmlStr string) string {
+	if htmlStr == "" || !strings.Contains(htmlStr, "<") {
+		return htmlStr // plain text: no markup to sanitize
 	}
 	// Sentinel div so we can locate the fragment in the parsed tree
 	// (html.Parse injects <html><head><body>…).
@@ -487,7 +499,7 @@ func rewriteTranslateLinksInHTML(htmlStr string) string {
 	if err != nil {
 		return htmlStr
 	}
-	rewriteHrefsInTree(doc)
+	sanitizeAndRewriteTree(doc)
 	root := findFirstByID(doc, "tm-rewrite-root")
 	if root == nil {
 		return htmlStr
@@ -501,24 +513,44 @@ func rewriteTranslateLinksInHTML(htmlStr string) string {
 	return b.String()
 }
 
-// containsAnyTranslateMarker is a cheap pre-check that catches both
-// the inline-proxy and wrapper forms.
-func containsAnyTranslateMarker(s string) bool {
-	return strings.Contains(s, translateHostSuffix) ||
-		strings.Contains(s, "translate.google.com/")
-}
-
-func rewriteHrefsInTree(n *html.Node) {
-	if n.Type == html.ElementNode && n.Data == "a" {
-		for i, a := range n.Attr {
-			if a.Key == "href" {
-				n.Attr[i].Val = rewriteTranslateLink(a.Val)
+func sanitizeAndRewriteTree(n *html.Node) {
+	if n.Type == html.ElementNode {
+		kept := n.Attr[:0]
+		for _, a := range n.Attr {
+			key := strings.ToLower(a.Key)
+			// Drop inline event handlers (onclick, onerror, onload, …).
+			if strings.HasPrefix(key, "on") {
+				continue
 			}
+			if key == "href" {
+				if isDangerousURL(a.Val) {
+					continue // drop javascript:/vbscript:/data: links entirely
+				}
+				a.Val = rewriteTranslateLink(a.Val)
+			}
+			kept = append(kept, a)
 		}
+		n.Attr = kept
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
-		rewriteHrefsInTree(c)
+		sanitizeAndRewriteTree(c)
 	}
+}
+
+// isDangerousURL reports whether a URL uses a scheme that executes script or
+// inlines content. Whitespace/control chars are stripped first, since browsers
+// ignore them when resolving the scheme (e.g. "java\tscript:" still runs).
+func isDangerousURL(raw string) bool {
+	s := strings.Map(func(r rune) rune {
+		if r <= 0x20 {
+			return -1
+		}
+		return r
+	}, raw)
+	s = strings.ToLower(s)
+	return strings.HasPrefix(s, "javascript:") ||
+		strings.HasPrefix(s, "vbscript:") ||
+		strings.HasPrefix(s, "data:")
 }
 
 func findFirstByID(root *html.Node, id string) *html.Node {

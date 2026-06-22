@@ -10,6 +10,10 @@ func TestSanitizeMime(t *testing.T) {
 		"text/html":                "application/octet-stream", // blocked
 		"application/xhtml+xml":    "application/octet-stream", // blocked
 		"image/svg+xml":            "application/octet-stream", // blocked (XSS via SVG)
+		"text/javascript":          "application/octet-stream", // blocked
+		"application/javascript":   "application/octet-stream", // blocked
+		"text/ecmascript":          "application/octet-stream", // blocked
+		"application/ecmascript":   "application/octet-stream", // blocked
 		"image/jpeg<script>":       "application/octet-stream", // bad chars
 		"weird":                    "application/octet-stream", // no slash
 		"/leading":                 "application/octet-stream",

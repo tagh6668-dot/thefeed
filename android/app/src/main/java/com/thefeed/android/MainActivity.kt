@@ -48,8 +48,10 @@ class MainActivity : ComponentActivity() {
     private var fileChooserCallback: ValueCallback<Array<Uri>>? = null
     private var lockScreenVisible = false
 
+    // OpenDocument shows the full system file manager (not just the Photo Picker)
+    // so users can pick any file type, not just images/video.
     private val fileChooserLauncher = registerForActivityResult(
-        ActivityResultContracts.GetContent()
+        ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         fileChooserCallback?.onReceiveValue(if (uri != null) arrayOf(uri) else emptyArray())
         fileChooserCallback = null
@@ -306,8 +308,14 @@ class MainActivity : ComponentActivity() {
             ): Boolean {
                 fileChooserCallback?.onReceiveValue(emptyArray())
                 fileChooserCallback = filePathCallback
-                val accept = fileChooserParams?.acceptTypes?.firstOrNull() ?: "image/*"
-                fileChooserLauncher.launch(accept)
+                // acceptTypes returns [""] (not an empty array) when no accept attribute
+                // is set on the input — filter blanks so we never pass an empty MIME
+                // type to OpenDocument, which would crash on Android.
+                val types = fileChooserParams?.acceptTypes
+                    ?.filter { it.isNotBlank() }
+                    ?.toTypedArray()
+                    ?.takeIf { it.isNotEmpty() } ?: arrayOf("*/*")
+                fileChooserLauncher.launch(types)
                 return true
             }
 

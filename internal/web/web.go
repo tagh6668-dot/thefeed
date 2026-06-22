@@ -133,6 +133,10 @@ type ProfileList struct {
 	Scatter   int     `json:"scatter,omitempty"`   // resolvers per block
 	Timeout   float64 `json:"timeout,omitempty"`   // DNS query timeout (s)
 
+	// CacheBudgetMB is the disk-cache byte budget in megabytes (0 = default 1024).
+	// Applies to media-cache and telemirror images combined. saved-media is exempt.
+	CacheBudgetMB int `json:"cacheBudgetMB,omitempty"`
+
 	// ResolverCacheShare gates the shared-resolver-cache feature. Pointer
 	// (not plain bool) so we can tell "user never set it" (nil → default
 	// on) apart from "user explicitly disabled" (false). New installs and
@@ -285,6 +289,14 @@ type Server struct {
 	// fetch. Entries expire after 7 days.
 	mediaCache *mediaDiskCache
 
+	// savedMedia is a never-reaped disk store (ttl=0) for media bytes that
+	// belong to saved messages, so they survive mediaCache TTL reaping.
+	savedMedia *mediaDiskCache
+
+	// savedCrypto seals the Saved store (saved.json) and saved-media blobs at
+	// rest. nil only in legacy unit tests that construct Server{} directly.
+	savedCrypto *savedCrypto
+
 	// rescanReplaceList: set by handleRescan, consumed (and cleared)
 	// by the next SetOnScanDone callback so an explicit user rescan
 	// overwrites the selected list instead of just topping it up.
@@ -293,6 +305,13 @@ type Server struct {
 
 	// profilesMu serialises read-modify-write cycles on profiles.json.
 	profilesMu sync.Mutex
+	// savedMu serialises read-modify-write cycles on the Saved store and guards
+	// the s.savedCrypto pointer + its mutable fields. RWMutex so the lock-state
+	// reads on the hot path (handleSavedList etc.) don't serialise behind a slow
+	// Argon2 setPassphrase. NEVER take the read lock while already holding the
+	// write lock (Go RWMutex isn't reentrant) — the store helpers below hold the
+	// write lock, so guard at handler entry, before calling them.
+	savedMu sync.RWMutex
 
 	// Optional, removable backup feed (Telegram-via-Translate proxy).
 	telemirror *telemirrorHub
@@ -378,6 +397,24 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 		go s.runMediaCacheSweep()
 	}
 
+	// Saved store at-rest encryption: load or initialise the keyring (device
+	// mode on first run). If this fails the Saved feature degrades to plaintext
+	// rather than blocking startup.
+	if sc, scErr := loadSavedCrypto(dataDir); scErr == nil {
+		s.savedCrypto = sc
+	}
+
+	// saved-media never expires (ttl=0): saved messages keep their bytes.
+	if savedMedia, smErr := newMediaDiskCache(filepath.Join(dataDir, "saved-media"), 0); smErr == nil {
+		savedMedia.crypto = s.savedCrypto
+		s.savedMedia = savedMedia
+	}
+
+	// Apply cache budget from saved preferences.
+	if pl, plErr := s.loadProfiles(); plErr == nil && pl != nil {
+		s.applyCacheBudget(pl.CacheBudgetMB)
+	}
+
 	// Migrate per-profile resolvers into the shared bank on first run.
 	s.migrateResolverBank()
 
@@ -446,6 +483,9 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/update/github", s.handleGitHubUpdateCheck)
 	mux.HandleFunc("/api/update/download", s.handleUpdateDownload)
 	mux.HandleFunc("/api/cache/clear", s.handleClearCache)
+	mux.HandleFunc("/api/cache/stats", s.handleCacheStats)
+	mux.HandleFunc("/api/cache/clear-one", s.handleCacheClearOne)
+	mux.HandleFunc("/api/cache/budget", s.handleCacheBudget)
 	mux.HandleFunc("/api/bg-image", s.handleBgImage)
 	mux.HandleFunc("/api/resolvers/apply-saved", s.handleApplySavedResolvers)
 	mux.HandleFunc("/api/resolvers/active", s.handleActiveResolvers)
@@ -470,6 +510,21 @@ func (s *Server) serve(ln net.Listener) error {
 	// contract.
 	mux.HandleFunc("/api/media/get", s.handleMediaGet)
 	mux.HandleFunc("/api/media/progress", s.handleMediaProgress)
+	mux.HandleFunc("/api/saved", s.handleSaved)
+	mux.HandleFunc("/api/saved/note", s.handleSavedNote)
+	mux.HandleFunc("/api/saved/upload", s.handleSavedUpload)
+	mux.HandleFunc("/api/saved/from-chat", s.handleSavedFromChat)
+	mux.HandleFunc("/api/saved/lock", s.handleSavedLock)
+	mux.HandleFunc("/api/saved/lock/remove", s.handleSavedLockRemove)
+	mux.HandleFunc("/api/saved/lock/reset", s.handleSavedLockReset)
+	mux.HandleFunc("/api/saved/unlock", s.handleSavedUnlock)
+	mux.HandleFunc("/api/saved/pin", s.handleSavedPin)
+	mux.HandleFunc("/api/saved/count", s.handleSavedCount)
+	mux.HandleFunc("/api/saved/seen", s.handleSavedSeen)
+	mux.HandleFunc("/api/saved/media", s.handleSavedMedia)
+	mux.HandleFunc("/api/saved/media/persist", s.handleSavedMediaPersist)
+	mux.HandleFunc("/api/saved/media/persist-tm", s.handleSavedMediaPersistTm)
+	mux.HandleFunc("/api/saved/media/upload-blob", s.handleSavedMediaUploadBlob)
 	// Optional telemirror feature — see internal/telemirror/.
 	mux.HandleFunc("/api/telemirror/channels", s.telemirror.handleChannels)
 	mux.HandleFunc("/api/telemirror/channel/", s.telemirror.handleChannel)
@@ -479,6 +534,8 @@ func (s *Server) serve(ln net.Listener) error {
 	// Chat messenger endpoints — see handlers_chat.go.
 	mux.HandleFunc("/api/chat/info", s.handleChatInfo)
 	mux.HandleFunc("/api/chat/availability", s.handleChatAvailability)
+	mux.HandleFunc("/api/chat/servers", s.handleChatServers)
+	mux.HandleFunc("/api/chat/probe", s.handleChatProbeServer)
 	mux.HandleFunc("/api/chat/enable", s.handleChatEnable)
 	mux.HandleFunc("/api/chat/seed", s.handleChatSeed)
 	mux.HandleFunc("/api/chat/contacts", s.handleChatContacts)
@@ -490,6 +547,10 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/chat/poll", s.handleChatPoll)
 	mux.HandleFunc("/api/chat/peer-status", s.handleChatPeerStatus)
 	mux.HandleFunc("/api/chat/settings", s.handleChatSettings)
+	// Backup / restore endpoints.
+	mux.HandleFunc("/api/backup/export", s.handleBackupExport)
+	mux.HandleFunc("/api/backup/preview", s.handleBackupPreview)
+	mux.HandleFunc("/api/backup/restore", s.handleBackupRestore)
 	// Profile-pics cache + control endpoints.
 	mux.HandleFunc("/api/profile-pics/", s.profilePics.handleProfilePic)
 	mux.HandleFunc("/api/profile-pics", s.handleProfilePicsList)

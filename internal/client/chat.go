@@ -182,8 +182,9 @@ type ChatClient struct {
 const (
 	chatInfoMaxAge      = 1 * time.Hour
 	chatControlAttempts = 6
-	chatProbeAttempts   = 3
-	chatCellAttempts    = 3
+	// chatProbeAttempts: ChatInfo fetch retries; high to ride out a flaky network.
+	chatProbeAttempts = 10
+	chatCellAttempts  = 3
 	chatMaxUploadRounds = 20
 	chatMaxFinRounds    = 6
 	chatMaxRestarts     = 3

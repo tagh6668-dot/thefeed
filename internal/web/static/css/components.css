@@ -5,16 +5,20 @@
       border-top: 1px solid var(--border)
     }
 
-    /* Settings tab strip — static three-tab layout. */
+    /* Settings tab strip — scrollable when tabs overflow on small screens. */
     .settings-tabs {
       display: flex;
       gap: 4px;
       border-bottom: 1px solid var(--border);
       margin: 8px 0 14px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
     }
+    .settings-tabs::-webkit-scrollbar { display: none; }
 
     .settings-tab {
-      flex: 1;
+      flex: 0 0 auto;
       padding: 8px 10px;
       background: transparent;
       border: 0;
@@ -22,6 +26,7 @@
       font-size: var(--text-sm);
       cursor: pointer;
       border-bottom: 2px solid transparent;
+      white-space: nowrap;
     }
 
     .settings-tab.active {
@@ -696,7 +701,8 @@
       margin-bottom: 12px
     }
 
-    .form-group label {
+    .form-group label,
+    .form-group .group-label {
       display: block;
       margin-bottom: 4px;
       font-size: var(--text-xs);

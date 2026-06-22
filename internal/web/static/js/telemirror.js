@@ -2,6 +2,7 @@
   var tmChannels = [];
   var tmActive = '';
   var tmPostText = {};    // pid -> plaintext (avoids huge data-text attrs)
+  var tmPostMedia = {};   // pid -> media array (for persisting images on save)
   var tmLastFetchedAt = {}; // username (lower) -> last successful fetch ms
 
   try {
@@ -40,7 +41,11 @@
   // Scroll the active channel view to the latest (bottom) post.
   window.tmScrollToBottom = function () {
     var el = document.getElementById('tmContent');
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    var posts = el.querySelectorAll('.tm-post');
+    var last = posts[posts.length - 1];
+    if (last) { last.scrollIntoView({ block: 'end' }); }
+    else { el.scrollTop = el.scrollHeight; }
   };
 
   // Bind once on first open: toggle the scroll-down button when the
@@ -66,12 +71,19 @@
     var origLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = tmI18n('loading', 'Loading...'); }
 
-    // Anchor by scrollHeight delta. Prepending content makes the
-    // scrollHeight grow by P; we keep the same viewport content visible
-    // by setting scrollTop = oldScrollTop + (newScrollHeight - oldScrollHeight).
+    // Anchor on the post the user is currently viewing (the oldest one shown,
+    // nearest the button) by its real on-screen offset — a scrollHeight delta is
+    // unreliable under content-visibility, which gives off-screen posts estimated
+    // heights. After prepending, put that same post back at the same offset; the
+    // newly-loaded older posts sit above it.
     var scroller = document.getElementById('tmContent');
-    var oldHeight = scroller ? scroller.scrollHeight : 0;
-    var oldTop = scroller ? scroller.scrollTop : 0;
+    var cur = window._tmCurrentPosts || [];
+    var anchorId = (cur[0] && cur[0].id || '').split('/').pop();
+    var anchorOffset = 0;
+    if (scroller && anchorId) {
+      var a0 = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
+      if (a0) anchorOffset = a0.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+    }
 
     fetch('/api/telemirror/older/' + encodeURIComponent(tmActive) + '?before=' + encodeURIComponent(beforeId))
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
@@ -88,32 +100,14 @@
           if (id) seen[id] = true;
           out.push(merged[i]);
         }
-        tmRenderPosts({ channel: window._tmCurrentChannel, posts: out });
-        if (!scroller) return;
-        // Restore on next frame so layout has flushed. Re-correct as
-        // each prepended image loads, but only as long as the user
-        // hasn't scrolled away from where we put them — otherwise we'd
-        // keep yanking their scroll back for several seconds.
-        var lastFixedTop = -1;
-        var stopAdjusting = false;
-        var fix = function () {
-          if (stopAdjusting) return;
-          if (lastFixedTop !== -1 && Math.abs(scroller.scrollTop - lastFixedTop) > 6) {
-            stopAdjusting = true;
-            return;
-          }
-          scroller.scrollTop = oldTop + (scroller.scrollHeight - oldHeight);
-          lastFixedTop = scroller.scrollTop;
-        };
+        tmRenderPosts({ channel: window._tmCurrentChannel, posts: out, keepScroll: true });
+        if (!scroller || !anchorId) return;
         requestAnimationFrame(function () {
-          fix();
-          var imgs = scroller.querySelectorAll('img');
-          for (var k = 0; k < imgs.length; k++) {
-            if (!imgs[k].complete) {
-              imgs[k].addEventListener('load', fix, { once: true });
-              imgs[k].addEventListener('error', fix, { once: true });
-            }
-          }
+          var el = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
+          if (!el) return;
+          el.scrollIntoView();
+          var nowOffset = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+          scroller.scrollTop += (nowOffset - anchorOffset);
         });
       })
       .catch(function () {
@@ -237,6 +231,11 @@
       e.preventDefault();
       zoomAt(Math.exp(-e.deltaY * 0.0022), e.clientX, e.clientY);
     }, { passive: false });
+    // iOS 13+ ignores user-scalable=no; block native pinch-zoom on
+    // the lightbox so our custom zoom works cleanly.
+    var pg = function (e) { e.preventDefault(); };
+    box.addEventListener('gesturestart', pg, { passive: false });
+    box.addEventListener('gesturechange', pg, { passive: false });
   }
 
   // Telegram wraps every emoji in <i class="emoji" style="background-image:url(...)"><b>X</b></i>
@@ -271,7 +270,7 @@
       // Always request the stable server URL. Server returns 404 if no
       // avatar is cached — onerror then falls back to the initial.
       var src = '/api/telemirror/avatar/' + encodeURIComponent(key);
-      inner = '<img src="' + tmEscAttr(src) + '" loading="lazy" alt=""'
+      inner = '<img src="' + tmEscAttr(src) + '" loading="lazy" decoding="async" alt=""'
         + ' onerror="tmAvatarLoadFailed(this, \'' + tmEscAttr(key) + '\')">'
         + initial;
     }
@@ -416,6 +415,13 @@
   function tmRenderChannels() {
     var box = document.getElementById('tmChannelsList');
     var html = '';
+    // Saved Messages shortcut — navigate to Saved from inside the Telemirror
+    // modal without having to close it first.
+    html += '<div class="tm-channel-item tm-saved-shortcut" onclick="tmCloseThenSaved()">'
+      + '<div class="tm-saved-shortcut-icon">' + window.icon('bookmark') + '</div>'
+      + '<div class="tm-channel-item-meta"><div class="tm-channel-item-name">'
+      + tmEsc(tmI18n('saved_messages', 'Saved Messages'))
+      + '</div></div></div>';
     for (var i = 0; i < tmChannels.length; i++) {
       var c = tmChannels[i];
       var active = (c.username.toLowerCase() === tmActive.toLowerCase()) ? ' active' : '';
@@ -605,6 +611,7 @@
     // copy button doesn't have to embed huge multiline strings into a
     // data-text attribute (which broke rendering on long Persian posts).
     tmPostText = {};
+    tmPostMedia = {};
 
     for (var i = 0; i < posts.length; i++) {
       var p = posts[i];
@@ -612,11 +619,14 @@
       var plain = tmPostPlainText(p);
       var pid = 'tmp_' + i;
       if (plain) tmPostText[pid] = plain;
+      if (p.media && p.media.length) tmPostMedia[pid] = p.media;
 
       // p.id looks like "channel/12345" — show only the numeric part.
       var msgNum = (p.id || '').split('/').pop();
 
-      html += '<div class="tm-post" data-pid="' + pid + '" data-msgid="' + tmEscAttr(msgNum || '') + '">';
+      // data-post-id carries the stable Telegram locator ("channel/msgNum") so a
+      // post saved to Saved Messages can later jump back to this exact post.
+      html += '<div class="tm-post" data-pid="' + pid + '" data-msgid="' + tmEscAttr(msgNum || '') + '" data-post-id="' + tmEscAttr(p.id || '') + '">';
 
       // Head: author + msg id + edited + copy button. Time at the bottom.
       html += '<div class="tm-post-head">';
@@ -627,6 +637,13 @@
         html += '<button class="tm-post-copy"'
           + ' onclick="tmCopyPost(this)">'
           + tmEsc(tmI18n('copy', 'Copy'))
+          + '</button>';
+        // Save-to-Saved-Messages button (forwards the post into Saved).
+        html += '<button class="tm-post-save"'
+          + ' title="' + tmEscAttr(tmI18n('forward_to_saved', 'Save to Saved Messages')) + '"'
+          + ' aria-label="' + tmEscAttr(tmI18n('forward_to_saved', 'Save to Saved Messages')) + '"'
+          + ' onclick="tmSavePostClick(this)">'
+          + window.icon('bookmark')
           + '</button>';
       }
       html += '</div>';
@@ -692,10 +709,32 @@
     }
     content.innerHTML = html;
     tmNeuterLinks(content);
-    // Jump to the bottom (newest message), like Telegram does on load.
-    requestAnimationFrame(function () {
-      content.scrollTop = content.scrollHeight;
-    });
+    // Jump to the newest (bottom) post. content-visibility gives off-screen
+    // posts estimated heights, so scrollHeight is unreliable — scrollIntoView on
+    // the last post force-renders it and lands accurately. Re-assert once to
+    // absorb the height growth as the newest posts' images load, unless the user
+    // has already scrolled. Skipped for "load older", which keeps its own anchor.
+    if (!data.keepScroll) {
+      requestAnimationFrame(function () {
+        var p = content.querySelectorAll('.tm-post');
+        var last = p[p.length - 1];
+        if (!last) { content.scrollTop = content.scrollHeight; return; }
+        last.scrollIntoView({ block: 'end' });
+        // Re-assert: content-visibility resolves heights lazily; on slower
+        // Android WebViews the first scrollIntoView may land before the
+        // browser finishes estimating. Two retries absorb that growth.
+        var retries = [150, 500];
+        var pinned = content.scrollTop;
+        retries.forEach(function (ms) {
+          setTimeout(function () {
+            if (Math.abs(content.scrollTop - pinned) < 4) {
+              last.scrollIntoView({ block: 'end' });
+              pinned = content.scrollTop;
+            }
+          }, ms);
+        });
+      });
+    }
   }
 
   // Format a timestamp for display. Persian users see Jalali calendar
@@ -739,7 +778,11 @@
       .replace(/<\/(p|div|li)>/gi, '\n');
     var tmp = document.createElement('div');
     tmp.innerHTML = s;
-    return (tmp.textContent || tmp.innerText || '').trim();
+    var raw = (tmp.textContent || tmp.innerText || '');
+    // Collapse HTML-source indentation: trim leading spaces per line,
+    // collapse 3+ consecutive newlines to 2.
+    raw = raw.replace(/^[ \t]+/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+    return raw;
   }
 
   // Render one media tile based on its type.
@@ -748,7 +791,7 @@
     if (m.type === 'photo' && m.thumb) {
       var fname = 'photo-' + (postIdx + 1) + '-' + (mediaIdx + 1) + '.jpg';
       return '<div class="tm-photo">'
-        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" alt=""'
+        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" decoding="async" alt=""'
         + ' referrerpolicy="no-referrer"'
         + ' onclick="tmOpenLightbox(\'' + tmEscAttr(m.thumb) + '\')"'
         + ' style="cursor:zoom-in"'
@@ -786,7 +829,7 @@
     }
     if (m.type === 'sticker' && m.thumb) {
       return '<div class="tm-sticker">'
-        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" alt=""'
+        + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" decoding="async" alt=""'
         + ' referrerpolicy="no-referrer"'
         + ' onerror="this.parentNode.classList.add(\'tm-photo-failed\')">'
         + '</div>';
@@ -838,14 +881,7 @@
     }
 
     doFetch().then(function (blob) {
-      var objectUrl = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = objectUrl;
-      a.download = fname;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(objectUrl); a.remove(); }, 100);
+      triggerDownload(blob, fname);
     }).catch(function () { window.location.href = url; });
     return false;
   };
@@ -887,6 +923,115 @@
     } else {
       tmCopyFallback(text, done);
     }
+  };
+
+  // tmSavePostClick — inline-onclick shim for the .tm-post-save button: resolves
+  // the post's pid + locator from the DOM and forwards to tmSavePost. Passing a
+  // null channel makes tmSavePost fall back to the active channel (tmActive).
+  window.tmSavePostClick = function (btn) {
+    var post = btn.closest ? btn.closest('.tm-post') : null;
+    if (!post) return;
+    window.tmSavePost(post.getAttribute('data-pid'), null, btn, post.getAttribute('data-post-id'));
+  };
+
+  // tmSavePost — forward a Telemirror post into Saved Messages as a read-only
+  // kind:"chat" snapshot. tmSource ("channel/msgNum") lets Saved jump back here.
+  window.tmSavePost = async function (pid, channelUsername, btn, tmSource) {
+    var text = pid && tmPostText[pid];
+    if (!text && !pid) return;
+    try {
+      if (btn) { btn.disabled = true; }
+      var media = [];
+      var postMedia = (pid && tmPostMedia[pid]) || [];
+      for (var mi = 0; mi < postMedia.length; mi++) {
+        if (postMedia[mi].type === 'photo' && postMedia[mi].thumb) {
+          try {
+            var imgUrl = postMedia[mi].thumb;
+            var pd = null;
+            // Browser-side: fetch image directly and upload blob.
+            try {
+              var imgResp = await fetch(imgUrl, { referrerPolicy: 'no-referrer' });
+              if (imgResp.ok) {
+                var blob = await imgResp.blob();
+                if (blob.size > 0) {
+                  var up = await fetch('/api/saved/media/upload-blob', {
+                    method: 'POST',
+                    headers: { 'Content-Type': blob.type || 'image/jpeg' },
+                    body: blob
+                  });
+                  if (up.ok) pd = await up.json();
+                }
+              }
+            } catch (e) { /* CORS or network — try server-side */ }
+            // Fallback: ask the server to fetch it.
+            if (!pd) {
+              var pr = await fetch('/api/saved/media/persist-tm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: imgUrl })
+              });
+              if (pr.ok) pd = await pr.json();
+            }
+            if (pd && pd.size) {
+              var fn = 'photo-' + (mi + 1) + '.jpg';
+              media.push({ tag: '[IMAGE]', size: pd.size, crc: pd.crc, persisted: true, fname: fn });
+            }
+          } catch (e) { /* skip this image */ }
+        }
+      }
+      var payload = {
+        text: text || '',
+        contactName: channelUsername || tmActive,
+        tmSource: tmSource || '',
+        media: media
+      };
+      var r = await fetch('/api/saved/from-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (r.status === 423) {
+        tmToast(tmI18n('saved_locked', 'Saved Messages is locked'));
+        if (btn) btn.disabled = false;
+        return;
+      }
+      if (!r.ok) {
+        tmToast(tmI18n('saved_save_failed', 'Could not save'));
+        if (btn) btn.disabled = false;
+        return;
+      }
+      tmToast(tmI18n('saved_toast', 'Forwarded to Saved'));
+      if (btn) {
+        btn.classList.add('tm-post-save-done');
+        // Don't re-enable — visually indicate "already saved"
+      }
+      if (typeof updateSavedBadge === 'function') updateSavedBadge();
+    } catch (e) {
+      tmToast(tmI18n('saved_save_failed', 'Could not save'));
+      if (btn) btn.disabled = false;
+    }
+  };
+
+  // tmCloseThenSaved — close the Telemirror modal and open Saved Messages.
+  // Open Saved FIRST (its overlay hides the transition so home never flashes),
+  // then close the modal. closeTelemirror() unwinds history with history.go(),
+  // whose popstate(s) core.js turns into openSidebar() (clearing .chat-open on
+  // mobile, which would collapse Saved back to home). The number of popstates
+  // isn't predictable, so self-heal: for a short window, re-assert .chat-open
+  // whenever a stray unwind popstate clears it while Saved is active.
+  window.tmCloseThenSaved = function () {
+    if (typeof openSavedMessages === 'function') openSavedMessages();
+    window.closeTelemirror();
+    var app = document.getElementById('app');
+    if (!app) return;
+    var start = (window.performance && performance.now) ? performance.now() : Date.now();
+    (function guardChatOpen() {
+      if (window.viewingSaved && !app.classList.contains('chat-open')) {
+        app.classList.add('chat-open');
+      }
+      var now = (window.performance && performance.now) ? performance.now() : Date.now();
+      if (now - start < 500) requestAnimationFrame(guardChatOpen);
+    })();
   };
   function tmCopyFallback(text, done) {
     var ta = document.createElement('textarea');
@@ -962,14 +1107,21 @@
     }
   });
 
-  // Strip href from all <a> tags inside rendered posts so the browser/OS
-  // never navigates or shows "Open in Telegram?". The real URL is kept in
-  // data-href; the delegated click handler reads it.
+  // Strip href from all <a> tags inside rendered posts so the browser/OS never
+  // navigates or shows "Open in Telegram?". The real URL is kept in data-href;
+  // the delegated click handler reads it. Also drop any inline on* handler the
+  // ANCHOR carries (some channels ship onclick="return confirm(...)"); scope it
+  // to anchors only — stripping on* from every element also killed the frontend's
+  // own <img onclick="tmOpenLightbox()">, so images stopped opening. The backend
+  // sanitises channel HTML server-side; this only covers posts cached before that.
   function tmNeuterLinks(container) {
     var links = container.querySelectorAll('a[href]');
     for (var i = 0; i < links.length; i++) {
       var a = links[i];
       if (a.classList.contains('tm-photo-dl')) continue;
+      for (var k = a.attributes.length - 1; k >= 0; k--) {
+        if (/^on/i.test(a.attributes[k].name)) a.removeAttribute(a.attributes[k].name);
+      }
       a.setAttribute('data-href', a.href);
       a.removeAttribute('href');
       a.removeAttribute('target');

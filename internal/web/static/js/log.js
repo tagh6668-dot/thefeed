@@ -127,8 +127,17 @@ function updateResolverScanDisplay(line) {
     var initItem = document.getElementById('prog-init'); if (initItem) initItem.remove();
     var hintEl = document.getElementById('no-ch-hint'); if (hintEl) hintEl.innerHTML = t('no_channels_hint') + ' <button onclick="jumpToLog()" style="background:none;border:none;cursor:pointer;font-size:13px;vertical-align:middle;padding:0 2px">' + icon('log') + '</button> ' + t('no_channels_hint2');
     setTimeout(function () { if (item.parentNode) item.parentNode.removeChild(item) }, 2000);
-    // Scan is done — load channels in case the SSE 'update' event was dropped.
-    setTimeout(function () { loadChannels().then(function () { if (channels.length > 0 && selectedChannel === 0) selectChannel(1) }) }, 3000);
+    // Scan is done — reload the list in case the SSE 'update' event was dropped.
+    // Don't auto-open a channel: a programmatic open racing a user Back caused
+    // the hang. If nothing is open yet (first-run loading pane), land on the list.
+    setTimeout(function () {
+      loadChannels().then(function () {
+        if (mobileQuery.matches && selectedChannel === 0 &&
+          document.getElementById('app').classList.contains('chat-open')) {
+          feedBack();
+        }
+      });
+    }, 3000);
     refreshResolversBadge();
   }
 }
@@ -241,7 +250,7 @@ async function doRefresh(quiet) {
     if (selectedChannel > 0) url += '?channel=' + selectedChannel;
     if (quiet) url += (url.includes('?') ? '&' : '?') + 'quiet=1';
     await fetch(url, { method: 'POST' });
-    if (!quiet && selectedChannel > 0) setTimeout(function () { loadChannels(); loadMessages(selectedChannel) }, 3000);
+    if (!quiet && selectedChannel > 0) setTimeout(function () { loadChannels(); if (_chatPanelVisible()) loadMessages(selectedChannel) }, 3000);
   } catch (e) { }
 }
 

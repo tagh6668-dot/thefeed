@@ -175,7 +175,15 @@
     * {
       margin: 0;
       padding: 0;
-      box-sizing: border-box
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent
+    }
+
+    /* Touch devices: clear :hover immediately so tap highlight doesn't stick */
+    @media (hover: none) {
+      button, a, [onclick] {
+        transition-duration: 0ms !important;
+      }
     }
 
     /* iOS Safari / WKWebView "automatic text inflation" inflates body text

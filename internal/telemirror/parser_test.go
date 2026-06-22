@@ -295,6 +295,10 @@ func TestRewriteTranslateLink(t *testing.T) {
 			"https://translate.google.com/website?u=https://t-me.translate.goog/networkti",
 			"https://t.me/networkti",
 		},
+		// Dangerous schemes collapse to empty (structured fields flow here).
+		{"javascript:alert(1)", ""},
+		{"  JavaScript:alert(1)", ""},
+		{"data:text/html,<script>alert(1)</script>", ""},
 	}
 	for _, c := range cases {
 		if got := rewriteTranslateLink(c.in); got != c.want {
@@ -303,11 +307,11 @@ func TestRewriteTranslateLink(t *testing.T) {
 	}
 }
 
-func TestRewriteTranslateLinksInHTML(t *testing.T) {
+func TestSanitizePostHTML(t *testing.T) {
 	in := `Check <a href="https://t-me.translate.goog/sample/123">this post</a> ` +
 		`and <a href="https://example-com.translate.goog/?_x_tr_sl=auto">this site</a>. ` +
 		`<img src="https://cdn-translate.goog/img.jpg"> stays.`
-	got := rewriteTranslateLinksInHTML(in)
+	got := sanitizePostHTML(in)
 	if !strings.Contains(got, `href="https://t.me/sample/123"`) {
 		t.Errorf("translate.goog href not rewritten: %q", got)
 	}
@@ -317,11 +321,36 @@ func TestRewriteTranslateLinksInHTML(t *testing.T) {
 	if !strings.Contains(got, `src="https://cdn-translate.goog/img.jpg"`) {
 		t.Errorf("img src should NOT be rewritten (we serve images via the proxy): %q", got)
 	}
-	// Sanity check: untouched HTML round-trips without the rewriter
-	// damaging it.
+	// Plain HTML round-trips without the sanitizer damaging it.
 	plain := "no proxy links here, just <b>text</b>"
-	if got := rewriteTranslateLinksInHTML(plain); got != plain {
+	if got := sanitizePostHTML(plain); got != plain {
 		t.Errorf("plain html mutated: %q", got)
+	}
+}
+
+// Channel posts are fully attacker-controlled HTML; script vectors must be
+// stripped before the client splices them into the DOM. Mirrors a real-world
+// case where a channel ships links with onclick="return confirm(...)".
+func TestSanitizePostHTMLStripsScripts(t *testing.T) {
+	in := `ok <a href="https://t.me/x" target="_blank" rel="noopener" ` +
+		`onclick="return confirm('Open this link?')">link</a> ` +
+		`<a href="javascript:alert(1)">x</a> ` +
+		`<img src="https://e.com/a.jpg" onerror="alert(2)">`
+	got := sanitizePostHTML(in)
+	if strings.Contains(strings.ToLower(got), "onclick") {
+		t.Errorf("onclick handler survived: %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "onerror") {
+		t.Errorf("onerror handler survived: %q", got)
+	}
+	if strings.Contains(strings.ToLower(got), "javascript:") {
+		t.Errorf("javascript: href survived: %q", got)
+	}
+	if !strings.Contains(got, `href="https://t.me/x"`) {
+		t.Errorf("safe href was dropped: %q", got)
+	}
+	if !strings.Contains(got, `src="https://e.com/a.jpg"`) {
+		t.Errorf("img src should remain (served via proxy): %q", got)
 	}
 }
 

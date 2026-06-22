@@ -100,11 +100,8 @@ function connectSSE() {
     } else if (data && typeof data === 'object' && data.channel) {
       delete refreshingChannels[data.channel]; var fb2 = document.getElementById('prog-fetch-ch-' + data.channel); if (fb2) fb2.remove();
       if (data.channel === manualRefreshChannel) manualRefreshChannel = 0;
-      // Re-render only when the chat panel is actually visible.
-      // On mobile the panel slides on/off via a CSS transform; if
-      // the user backs out while a fetch is in flight, rendering
-      // mid-transition stalls the slide and the layout sticks at
-      // ~90% chat / 10% sidebar (back button looks frozen).
+      // Re-render only when the content pane is visible — skip work for a channel
+      // the user backed away from (and don't scroll a hidden pane).
       if (data.channel === selectedChannel && _chatPanelVisible()) await loadMessages(data.channel)
     } else if (snapChannel > 0 && snapChannel === selectedChannel) {
       delete refreshingChannels[snapChannel]; var fb3 = document.getElementById('prog-fetch-ch-' + snapChannel); if (fb3) fb3.remove();

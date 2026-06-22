@@ -162,27 +162,25 @@ function toggleResolverTabMenu(anchor) {
   // Defensive: drop any leftover outside-click listener from a
   // previous open before installing a new one.
   document.removeEventListener('click', _resolverTabMenuOutside);
-  // Use viewport coordinates from getBoundingClientRect — pairs
-  // with position: fixed in CSS. Anchor the menu's top edge just
-  // below the ⋮ button, and align horizontally so the menu hangs
-  // from the same side as the button (RTL puts it on the right).
+  // Position below the anchor. On mobile the menu lives inside a
+  // transformed ancestor which makes position:fixed relative to that
+  // ancestor — compensate by subtracting the ancestor's offset.
   var rect = anchor.getBoundingClientRect();
-  menu.style.top = (rect.bottom + 4) + 'px';
+  var parentRect = menu.offsetParent ? menu.offsetParent.getBoundingClientRect() : { top: 0, left: 0, right: window.innerWidth };
+  menu.style.top = (rect.bottom - parentRect.top + 4) + 'px';
   menu.style.bottom = 'auto';
   var isRtl = document.documentElement.dir === 'rtl';
-  // First make it visible at a temporary position so we can
-  // measure its width and clamp inside the viewport edges.
   menu.hidden = false;
   var menuW = menu.offsetWidth || 140;
+  var parentW = parentRect.right - parentRect.left;
   if (isRtl) {
-    var rightOffset = window.innerWidth - rect.right;
-    // Clamp so the menu doesn't go off-screen on either side.
-    rightOffset = Math.max(8, Math.min(rightOffset, window.innerWidth - menuW - 8));
+    var rightOffset = parentRect.right - rect.right;
+    rightOffset = Math.max(8, Math.min(rightOffset, parentW - menuW - 8));
     menu.style.right = rightOffset + 'px';
     menu.style.left = 'auto';
   } else {
-    var leftOffset = rect.left;
-    leftOffset = Math.max(8, Math.min(leftOffset, window.innerWidth - menuW - 8));
+    var leftOffset = rect.left - parentRect.left;
+    leftOffset = Math.max(8, Math.min(leftOffset, parentW - menuW - 8));
     menu.style.left = leftOffset + 'px';
     menu.style.right = 'auto';
   }
@@ -247,21 +245,25 @@ function openBankAddPicker(anchor, addr) {
       menu.appendChild(b);
     });
   }
-  // Position with viewport coords (matches resolver-tab-menu).
+  // Position below the anchor. On mobile the menu lives inside a
+  // transformed ancestor (.chat-area has transform: translateX) which
+  // makes position:fixed relative to that ancestor, not the viewport.
+  // Compensate by subtracting the ancestor's viewport offset.
   var rect = anchor.getBoundingClientRect();
-  menu.style.top = (rect.bottom + 4) + 'px';
+  var parentRect = menu.offsetParent ? menu.offsetParent.getBoundingClientRect() : { top: 0, left: 0, right: window.innerWidth };
+  menu.style.top = (rect.bottom - parentRect.top + 4) + 'px';
   menu.style.bottom = 'auto';
   menu.hidden = false;
   var menuW = menu.offsetWidth || 160;
   var isRtl = document.documentElement.dir === 'rtl';
   if (isRtl) {
-    var rightOffset = window.innerWidth - rect.right;
-    rightOffset = Math.max(8, Math.min(rightOffset, window.innerWidth - menuW - 8));
+    var rightOffset = parentRect.right - rect.right;
+    rightOffset = Math.max(8, Math.min(rightOffset, (parentRect.right - parentRect.left) - menuW - 8));
     menu.style.right = rightOffset + 'px';
     menu.style.left = 'auto';
   } else {
-    var leftOffset = rect.left;
-    leftOffset = Math.max(8, Math.min(leftOffset, window.innerWidth - menuW - 8));
+    var leftOffset = rect.left - parentRect.left;
+    leftOffset = Math.max(8, Math.min(leftOffset, (parentRect.right - parentRect.left) - menuW - 8));
     menu.style.left = leftOffset + 'px';
     menu.style.right = 'auto';
   }

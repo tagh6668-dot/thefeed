@@ -3,6 +3,7 @@ package telemirror
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,5 +166,104 @@ func TestImageCacheStaleEntryEvicted(t *testing.T) {
 	}
 	if _, err := os.Stat(c.metaPath(key)); !os.IsNotExist(err) {
 		t.Errorf("meta still on disk: err=%v", err)
+	}
+}
+
+func TestImageCacheSizeTracking(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	c := NewImageCache(dir)
+	if s := c.Size(); s != 0 {
+		t.Fatalf("empty Size = %d, want 0", s)
+	}
+	c.PutByKey("a", "image/jpeg", make([]byte, 500))
+	s1 := c.Size()
+	if s1 <= 0 {
+		t.Fatalf("after put Size = %d, want >0", s1)
+	}
+	c.PutByKey("b", "image/png", make([]byte, 500))
+	s2 := c.Size()
+	if s2 <= s1 {
+		t.Fatalf("after second put Size = %d, want > %d", s2, s1)
+	}
+	c.Clear()
+	if s := c.Size(); s != 0 {
+		t.Fatalf("after Clear Size = %d, want 0", s)
+	}
+}
+
+func TestImageCacheBudgetEvictsOldest(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	c := NewImageCache(dir)
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 5; i++ {
+		key := fmt.Sprintf("img%d", i)
+		c.PutByKey(key, "image/jpeg", make([]byte, 200))
+		mtime := base.Add(time.Duration(i) * time.Minute)
+		os.Chtimes(c.bodyPath(key), mtime, mtime)
+		os.Chtimes(c.metaPath(key), mtime, mtime)
+	}
+	total := c.Size()
+	// Budget for 3 entries: enforce to 90% = 2.7 entries → keep 2.
+	perEntry := total / 5
+	c.SetMaxBytes(perEntry * 3)
+
+	after := c.Size()
+	if after > perEntry*3 {
+		t.Fatalf("after SetMaxBytes: Size=%d > budget=%d", after, perEntry*3)
+	}
+	// Oldest (img0, img1, img2) should be evicted; img3, img4 survive.
+	if _, _, ok := c.GetByKey("img0"); ok {
+		t.Fatal("img0 (oldest) should be evicted")
+	}
+	if _, _, ok := c.GetByKey("img4"); !ok {
+		t.Fatal("img4 (newest) should survive")
+	}
+}
+
+func TestImageCacheBudgetOnPut(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	c := NewImageCache(dir)
+	base := time.Now().Add(-time.Hour)
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("img%d", i)
+		c.PutByKey(key, "image/jpeg", make([]byte, 200))
+		mtime := base.Add(time.Duration(i) * time.Minute)
+		os.Chtimes(c.bodyPath(key), mtime, mtime)
+		os.Chtimes(c.metaPath(key), mtime, mtime)
+	}
+	perEntry := c.Size() / 3
+	// Budget for all 3 + half an entry. Adding a 4th triggers eviction.
+	c.SetMaxBytes(perEntry*3 + perEntry/2)
+
+	c.PutByKey("img3", "image/jpeg", make([]byte, 200))
+	// img0 (oldest) should be evicted.
+	if _, _, ok := c.GetByKey("img0"); ok {
+		t.Fatal("img0 should be evicted after Put")
+	}
+	if _, _, ok := c.GetByKey("img3"); !ok {
+		t.Fatal("img3 (new) should exist")
+	}
+}
+
+func TestImageCacheUnlimitedDefault(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	c := NewImageCache(dir)
+	for i := 0; i < 20; i++ {
+		c.PutByKey(fmt.Sprintf("img%d", i), "image/jpeg", make([]byte, 100))
+	}
+	for i := 0; i < 20; i++ {
+		if _, _, ok := c.GetByKey(fmt.Sprintf("img%d", i)); !ok {
+			t.Fatalf("entry %d missing in unlimited mode", i)
+		}
+	}
+}
+
+func TestImageCacheScanSizeOnFreshInstance(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	c1 := NewImageCache(dir)
+	c1.PutByKey("x", "image/jpeg", make([]byte, 300))
+	c2 := NewImageCache(dir)
+	if s := c2.Size(); s <= 0 {
+		t.Fatalf("fresh cache over existing dir: Size = %d, want >0", s)
 	}
 }

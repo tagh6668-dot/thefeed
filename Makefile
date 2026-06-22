@@ -177,9 +177,33 @@ android-bind: ios-deps
 
 # Two gradle passes: first produces 4 per-ABI APKs (arm, arm64, x86,
 # x86_64); second produces a universal APK containing 3 ABIs (no x86).
+#
+# The Android Gradle Plugin's JdkImageTransform shells out to `jlink`, which
+# fails on JDK 24+ (e.g. "Error while executing process .../jlink"). AGP
+# supports JDK 17/21, so we resolve a compatible JDK for the gradle passes
+# regardless of the system default JAVA_HOME (which may be much newer). We
+# also default ANDROID_HOME to the standard macOS SDK path if it's unset.
 android-apk: android-bind
-	@cd android && if [ ! -x ./gradlew ]; then gradle wrapper --gradle-version 8.10.2; fi && ./gradlew --no-daemon assembleRelease
-	@cd android && ./gradlew --no-daemon -PuniversalBuild=true assembleRelease
+	@set -e; \
+	JH="$$JAVA_HOME"; \
+	for c in "$$JH" "/opt/homebrew/opt/openjdk@21" "/opt/homebrew/opt/openjdk@17" \
+	         "/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+	         "$$(/usr/libexec/java_home -v 21 2>/dev/null)" \
+	         "$$(/usr/libexec/java_home -v 17 2>/dev/null)"; do \
+	  [ -x "$$c/bin/javac" ] || continue; \
+	  v=$$("$$c/bin/javac" -version 2>&1 | sed -E 's/javac ([0-9]+).*/\1/'); \
+	  if [ "$$v" = "17" ] || [ "$$v" = "21" ]; then JH="$$c"; break; fi; \
+	done; \
+	case "$$($$JH/bin/javac -version 2>&1)" in javac\ 1[71]*|javac\ 21*) ;; \
+	  *) echo "No JDK 17/21 found for the Android build (AGP can't use JDK 24+). Install one, e.g.: brew install openjdk@21"; exit 1;; esac; \
+	export JAVA_HOME="$$JH"; \
+	: "$${ANDROID_HOME:=$$HOME/Library/Android/sdk}"; export ANDROID_HOME; \
+	export ANDROID_SDK_ROOT="$$ANDROID_HOME"; \
+	echo "Android build using JAVA_HOME=$$JAVA_HOME ANDROID_HOME=$$ANDROID_HOME"; \
+	cd android; \
+	if [ ! -x ./gradlew ]; then gradle wrapper --gradle-version 8.10.2; fi; \
+	./gradlew --no-daemon assembleRelease; \
+	./gradlew --no-daemon -PuniversalBuild=true assembleRelease
 
 android-clean:
 	rm -f $(ANDROID_AAR)

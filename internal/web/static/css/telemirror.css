@@ -169,15 +169,18 @@
         display: inline-flex
       }
 
+      /* Instant drawer, NO slide transition and NO blurred shadow. The transform
+         transition was janky on Android WebView; will-change blanked the post
+         images; and the big 24px-blur box-shadow took ~1s to rasterize on open
+         (the "tap → 1s → drawer appears" lag). The backdrop darkening plus the
+         panel's own border separate it from the content cheaply. */
       .tm-sidebar {
         position: absolute;
         top: 0;
         bottom: 0;
         width: 86%;
         max-width: 340px;
-        z-index: 2;
-        transition: transform .22s ease;
-        box-shadow: 0 0 0 rgba(0, 0, 0, .0)
+        z-index: 2
       }
 
       /* LTR: slide in from the left. */
@@ -188,8 +191,7 @@
       }
 
       html[dir="ltr"] .tm-sidebar.open {
-        transform: translateX(0);
-        box-shadow: 4px 0 24px rgba(0, 0, 0, .32)
+        transform: translateX(0)
       }
 
       /* RTL: slide in from the right (where the channel list belongs). */
@@ -200,8 +202,7 @@
       }
 
       html[dir="rtl"] .tm-sidebar.open {
-        transform: translateX(0);
-        box-shadow: -4px 0 24px rgba(0, 0, 0, .32)
+        transform: translateX(0)
       }
 
       .tm-backdrop {
@@ -210,7 +211,6 @@
         inset: 0;
         background: rgba(0, 0, 0, 0);
         pointer-events: none;
-        transition: background .22s ease;
         z-index: 1
       }
 
@@ -387,6 +387,11 @@
     }
 
     .tm-post {
+      /* Skip layout/paint of off-screen posts (keeps opening the feed fast).
+         Scroll-to-newest uses scrollIntoView on the last post, not scrollHeight,
+         since these estimated heights make scrollHeight unreliable. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 400px;
       max-width: 720px;
       width: 100%;
       margin: 0 auto;
@@ -400,6 +405,18 @@
 
     .tm-post:hover {
       border-color: color-mix(in oklab, var(--accent) 35%, var(--border))
+    }
+
+    /* Brief highlight when "jump to post" lands on a saved Telemirror post. */
+    .tm-post-highlight {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 45%, transparent);
+      animation: tm-post-flash 2s ease
+    }
+
+    @keyframes tm-post-flash {
+      0%, 30% { background: color-mix(in oklab, var(--accent) 14%, var(--bg)) }
+      100% { background: var(--bg-elevated, var(--bg)) }
     }
 
     .tm-post-head {
@@ -676,8 +693,7 @@
       font-size: var(--text-lg);
       text-decoration: none;
       opacity: 0;
-      transition: opacity .15s, background .15s;
-      backdrop-filter: blur(2px)
+      transition: opacity .15s, background .15s
     }
 
     .tm-photo:hover .tm-photo-dl {
@@ -713,8 +729,10 @@
       width: 54px;
       height: 54px;
       border-radius: 50%;
-      background: rgba(0, 0, 0, .5);
-      backdrop-filter: blur(4px);
+      /* No backdrop-filter: it re-blurs on every repaint, which janks the
+         drawer slide + scroll on Android WebView. The solid fill + shadow keep
+         the play icon legible without it. */
+      background: rgba(0, 0, 0, .6);
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -799,6 +817,60 @@
       border-color: var(--accent);
       background: color-mix(in oklab, var(--accent) 10%, transparent)
     }
+
+    /* Save-to-Saved-Messages icon button (Fix 4a) — icon-only, beside copy. */
+    .tm-post-save {
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      cursor: pointer;
+      padding: 3px 5px;
+      border-radius: var(--radius-sm);
+      line-height: 0;
+      opacity: 0.55;
+      transition: opacity .15s, color .15s;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .tm-post-save .icon svg { width: 13px; height: 13px; }
+
+    .tm-post-save:hover {
+      opacity: 1;
+      color: var(--accent);
+    }
+
+    .tm-post-save-done,
+    .tm-post-save:disabled {
+      opacity: 1;
+      color: var(--accent);
+      cursor: default;
+    }
+
+    @media (hover: none) {
+      .tm-post-save { opacity: 0.7; }
+    }
+
+    /* Saved Messages shortcut entry in the channel list (Fix 4b). */
+    .tm-saved-shortcut {
+      border-bottom: 1px dashed var(--border);
+      margin-bottom: 6px;
+      padding-bottom: 12px;
+    }
+
+    .tm-saved-shortcut-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .tm-saved-shortcut-icon .icon svg { width: 20px; height: 20px; }
 
     /* Generic media tile (voice, audio, document, poll). */
     .tm-media-tile {

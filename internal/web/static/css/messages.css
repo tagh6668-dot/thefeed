@@ -327,14 +327,16 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      padding: 16px
+      padding: 16px;
+      touch-action: none
     }
 
     .media-lightbox-img {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
-      user-select: none
+      user-select: none;
+      touch-action: none
     }
 
     .media-lightbox-video {

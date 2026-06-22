@@ -340,7 +340,8 @@ func sanitizeMime(s string) string {
 		}
 	}
 	switch strings.ToLower(s) {
-	case "text/html", "application/xhtml+xml", "image/svg+xml":
+	case "text/html", "application/xhtml+xml", "image/svg+xml",
+		"text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript":
 		return "application/octet-stream"
 	}
 	return s
