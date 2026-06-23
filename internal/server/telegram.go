@@ -273,9 +273,13 @@ func (tr *TelegramReader) fetchAll(ctx context.Context, api *tg.Client) {
 	for i, username := range tr.channels {
 		chNum := tr.baseCh + i
 		ctx := ctx
+		limit := tr.msgLimit
 		if tr.limits != nil {
 			if lim, ok := tr.limits[strings.ToLower(username)]; ok {
 				ctx = WithContextLimits(ctx, lim.MediaSize, lim.AudioSize)
+				if lim.MsgLimit > 0 {
+					limit = lim.MsgLimit
+				}
 			}
 		}
 
@@ -297,7 +301,7 @@ func (tr *TelegramReader) fetchAll(ctx context.Context, api *tg.Client) {
 
 		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:  rp.peer,
-			Limit: tr.msgLimit,
+			Limit: limit,
 		})
 		if err != nil {
 			log.Printf("[telegram] fetch %s: get history failed: %v", username, err)
@@ -331,9 +335,13 @@ func (tr *TelegramReader) fetchAll(ctx context.Context, api *tg.Client) {
 	for i, hash := range tr.privates.ordered {
 		chNum := tr.baseCh + len(tr.channels) + i
 		ctx := ctx
+		limit := tr.msgLimit
 		if tr.limits != nil {
 			if lim, ok := tr.limits[hash]; ok {
 				ctx = WithContextLimits(ctx, lim.MediaSize, lim.AudioSize)
+				if lim.MsgLimit > 0 {
+					limit = lim.MsgLimit
+				}
 			}
 		}
 		rp, ok := tr.privates.get(hash)
@@ -360,7 +368,7 @@ func (tr *TelegramReader) fetchAll(ctx context.Context, api *tg.Client) {
 
 		hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:  rp.peer,
-			Limit: tr.msgLimit,
+			Limit: limit,
 		})
 		if err != nil {
 			log.Printf("[telegram] private %s (%s): get history failed: %v", rp.title, hash, err)
@@ -448,9 +456,18 @@ func (tr *TelegramReader) fetchChannel(ctx context.Context, api *tg.Client, user
 		return nil, err
 	}
 
+	limit := tr.msgLimit
+	if tr.limits != nil {
+		if lim, ok := tr.limits[strings.ToLower(username)]; ok {
+			if lim.MsgLimit > 0 {
+				limit = lim.MsgLimit
+			}
+		}
+	}
+
 	hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 		Peer:  rp.peer,
-		Limit: tr.msgLimit,
+		Limit: limit,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get history %s: %w", username, err)

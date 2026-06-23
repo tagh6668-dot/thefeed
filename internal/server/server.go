@@ -395,6 +395,7 @@ func (s *Server) Run(ctx context.Context) error {
 type ChannelLimits struct {
 	MediaSize int64 // bytes, -1 if not set
 	AudioSize int64 // bytes, -1 if not set
+	MsgLimit  int   // messages, -1 if not set
 }
 
 type contextLimitsKey struct{}
@@ -535,6 +536,7 @@ func loadLimitsFromFile(path string, isPrivate bool) (map[string]ChannelLimits, 
 		}
 
 		var mediaSize, audioSize int64 = -1, -1
+		var msgLimit int = -1
 		for i := 1; i < len(parts); i++ {
 			if parts[i] == "--dns-media-max-size" && i+1 < len(parts) {
 				val, err := strconv.ParseInt(parts[i+1], 10, 64)
@@ -548,12 +550,19 @@ func loadLimitsFromFile(path string, isPrivate bool) (map[string]ChannelLimits, 
 					audioSize = val * 1024
 				}
 				i++
+			} else if parts[i] == "--msg-limit" && i+1 < len(parts) {
+				val, err := strconv.Atoi(parts[i+1])
+				if err == nil {
+					msgLimit = val
+				}
+				i++
 			}
 		}
-		if mediaSize != -1 || audioSize != -1 {
+		if mediaSize != -1 || audioSize != -1 || msgLimit != -1 {
 			limits[name] = ChannelLimits{
 				MediaSize: mediaSize,
 				AudioSize: audioSize,
+				MsgLimit:  msgLimit,
 			}
 		}
 	}

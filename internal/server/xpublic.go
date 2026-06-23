@@ -192,9 +192,13 @@ func (xr *XPublicReader) fetchAll(ctx context.Context) {
 	for i, account := range xr.accounts {
 		chNum := baseCh + i
 		ctx := ctx
+		limit := xr.msgLimit
 		if xr.limits != nil {
 			if lim, ok := xr.limits[strings.ToLower(account)]; ok {
 				ctx = WithContextLimits(ctx, lim.MediaSize, lim.AudioSize)
+				if lim.MsgLimit > 0 {
+					limit = lim.MsgLimit
+				}
 			}
 		}
 
@@ -220,8 +224,8 @@ func (xr *XPublicReader) fetchAll(ctx context.Context) {
 		if ok && len(cached.msgs) > 0 {
 			msgs = mergeMessages(cached.msgs, msgs)
 		}
-		if xr.msgLimit > 0 && len(msgs) > xr.msgLimit {
-			msgs = msgs[:xr.msgLimit]
+		if limit > 0 && len(msgs) > limit {
+			msgs = msgs[:limit]
 		}
 
 		xr.mu.Lock()

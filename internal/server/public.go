@@ -136,9 +136,13 @@ func (pr *PublicReader) fetchAll(ctx context.Context) {
 	for i, username := range pr.channels {
 		chNum := pr.baseCh + i
 		ctx := ctx
+		limit := pr.msgLimit
 		if pr.limits != nil {
 			if lim, ok := pr.limits[strings.ToLower(username)]; ok {
 				ctx = WithContextLimits(ctx, lim.MediaSize, lim.AudioSize)
+				if lim.MsgLimit > 0 {
+					limit = lim.MsgLimit
+				}
 			}
 		}
 
@@ -161,8 +165,8 @@ func (pr *PublicReader) fetchAll(ctx context.Context) {
 		if ok && len(cached.msgs) > 0 {
 			msgs = mergeMessages(cached.msgs, msgs)
 		}
-		if pr.msgLimit > 0 && len(msgs) > pr.msgLimit {
-			msgs = msgs[:pr.msgLimit]
+		if limit > 0 && len(msgs) > limit {
+			msgs = msgs[:limit]
 		}
 
 		pr.mu.Lock()
