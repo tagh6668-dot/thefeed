@@ -70,11 +70,23 @@ function renderPollCard(pollBody) {
     var el = document.getElementById('messages');
     if (!el) return;
     el.addEventListener('click', function (e) {
-      var a = e.target.closest('a[href]');
+      var a = e.target.closest('a[href], a[data-mention]');
       if (!a) return;
       e.preventDefault();
       e.stopPropagation();
-      showLinkSheet(a.href);
+      var mention = a.getAttribute('data-mention');
+      if (mention) {
+        var chNum = findChannelByUsername(mention);
+        if (chNum) { selectChannel(chNum); return; }
+      }
+      // For t.me/username links, also check if it's a configured channel.
+      var href = a.href || a.getAttribute('href') || '';
+      var tme = href.match(/^https?:\/\/(?:t\.me|telegram\.me)\/([A-Za-z_][A-Za-z0-9_]{3,31})(?:\/(\d+))?(?:\?|$)/);
+      if (tme && !tme[2]) {
+        var chNum2 = findChannelByUsername(tme[1]);
+        if (chNum2) { selectChannel(chNum2); return; }
+      }
+      showLinkSheet(href);
     });
   }, { once: true });
 })();

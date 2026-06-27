@@ -15,32 +15,14 @@
       opacity: 1
     }
 
-    .tm-no-scroll {
-      overflow: hidden
-    }
-
-    .tm-modal {
-      position: fixed;
-      inset: 0;
-      z-index: 9000;
-      background: var(--bg);
-      display: none;
-      flex-direction: column;
-      color: var(--text);
-      padding-top: var(--safe-top);
-      padding-bottom: var(--safe-bottom);
-      padding-left: var(--safe-left);
-      padding-right: var(--safe-right)
-    }
-
-    .tm-modal.active {
-      display: flex
-    }
+    /* (.tm-no-scroll / .tm-modal removed — telemirror is reparented into the
+       shell, no standalone modal.) */
 
     .tm-topbar {
       display: flex;
       align-items: center;
-      gap: 12px;
+      /* Match the feed .chat-header avatar↔name spacing (10px). */
+      gap: 10px;
       padding: 10px 16px;
       min-height: 56px;
       border-bottom: 1px solid var(--border);
@@ -75,7 +57,7 @@
     .tm-topbar-info {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       flex: 1;
       min-width: 0
     }
@@ -113,7 +95,8 @@
       overflow: hidden;
       flex-shrink: 0;
       background: var(--accent);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .08), 0 1px 2px rgba(0, 0, 0, .15);
+      /* No ring/shadow — match the feed .ch-avatar exactly (the subtle ring made
+         the mirror avatars read as differently spaced). */
       position: relative
     }
 
@@ -136,12 +119,7 @@
       height: 100%
     }
 
-    .tm-body {
-      flex: 1;
-      min-height: 0;
-      display: flex;
-      position: relative
-    }
+    /* (.tm-body removed — reparented; #tmSidebar/#tmPane live in the shell.) */
 
     .tm-sidebar {
       width: 320px;
@@ -153,83 +131,28 @@
       min-height: 0
     }
 
-    /* Backdrop sits between the sidebar (z:2) and the content. In mobile
-       drawer mode it lights up when .tm-sidebar.open is set so tapping
-       outside the drawer dismisses it. */
-    .tm-backdrop {
-      display: none
-    }
-
-    /* Mobile drawer. The hamburger menu also shows up here, plus on
-       touch devices up to 1024px so phones in landscape and tablets
-       in portrait still get the drawer treatment. */
+    /* Mobile: show the topbar back arrow (also on coarse-pointer ≤1024px so
+       touch laptops/tablets get it). The old drawer rules are gone — #tmSidebar
+       is a real sidebar pane now (see nav.css), not a slide-in drawer. */
     @media (max-width: 768px),
     (pointer: coarse) and (max-width: 1024px) {
       .tm-menu {
         display: inline-flex
       }
-
-      /* Instant drawer, NO slide transition and NO blurred shadow. The transform
-         transition was janky on Android WebView; will-change blanked the post
-         images; and the big 24px-blur box-shadow took ~1s to rasterize on open
-         (the "tap → 1s → drawer appears" lag). The backdrop darkening plus the
-         panel's own border separate it from the content cheaply. */
-      .tm-sidebar {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        width: 86%;
-        max-width: 340px;
-        z-index: 2
-      }
-
-      /* LTR: slide in from the left. */
-      html[dir="ltr"] .tm-sidebar {
-        left: 0;
-        right: auto;
-        transform: translateX(-100%)
-      }
-
-      html[dir="ltr"] .tm-sidebar.open {
-        transform: translateX(0)
-      }
-
-      /* RTL: slide in from the right (where the channel list belongs). */
-      html[dir="rtl"] .tm-sidebar {
-        right: 0;
-        left: auto;
-        transform: translateX(100%)
-      }
-
-      html[dir="rtl"] .tm-sidebar.open {
-        transform: translateX(0)
-      }
-
-      .tm-backdrop {
-        display: block;
-        position: absolute;
-        inset: 0;
-        background: rgba(0, 0, 0, 0);
-        pointer-events: none;
-        z-index: 1
-      }
-
-      .tm-sidebar.open~.tm-backdrop {
-        background: rgba(0, 0, 0, .42);
-        pointer-events: auto
-      }
     }
 
     .tm-disclaimer {
-      padding: 12px 14px;
-      margin: 10px;
-      font-size: var(--text-2xs);
+      padding: 11px 13px;
+      margin: 8px;
+      font-size: var(--text-3xs, 10px);
       color: var(--text-dim);
-      line-height: 1.6;
+      line-height: 1.55;
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
-      border-inline-start: 3px solid var(--accent)
+      /* Physical left so the accent never lands on the same (right) side as the
+         dismiss ×, regardless of the text's RTL/LTR direction. */
+      border-left: 3px solid var(--accent)
     }
 
     .tm-add-row {
@@ -269,40 +192,53 @@
       padding: 6px
     }
 
+    /* Mirror channel rows mirror the feed .ch-item EXACTLY — same padding, no
+       1px border (that border offset the avatar 1px up/left vs the feed), same
+       hover/active background, same two-line name + @id, same fonts. */
     .tm-channel-item {
       display: flex;
       align-items: center;
       gap: 10px;
-      padding: 9px 10px;
+      padding: 10px 14px;
       cursor: pointer;
       border-radius: var(--radius-lg);
-      border: 1px solid transparent;
-      transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease);
+      transition: background var(--motion-fast) var(--ease);
       margin-bottom: 2px
     }
 
     .tm-channel-item:hover {
-      background: var(--bg);
-      border-color: var(--border)
+      background: var(--hover)
     }
 
     .tm-channel-item.active {
-      background: color-mix(in oklab, var(--accent) 18%, transparent);
-      border-color: var(--accent)
+      background: var(--accent)
     }
 
-    .tm-channel-item.active .tm-channel-item-name {
-      color: var(--accent)
+    .tm-channel-item.active .tm-channel-item-name,
+    .tm-channel-item.active .tm-channel-item-sub {
+      color: #fff
     }
 
     .tm-channel-item-meta {
       flex: 1;
-      min-width: 0
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 3px
     }
 
     .tm-channel-item-name {
-      font-size: var(--text-sm);
-      font-weight: 600;
+      font-size: var(--text-base);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis
+    }
+
+    .tm-channel-item-sub {
+      font-size: var(--text-2xs);
+      color: var(--text-dim);
+      opacity: .7;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis
@@ -392,15 +328,20 @@
          since these estimated heights make scrollHeight unreliable. */
       content-visibility: auto;
       contain-intrinsic-size: auto 400px;
-      max-width: 720px;
+      /* Limited width (like the feed message box) but CENTERED — left-aligning
+         a box of RTL (Persian) text left a lopsided gap that read as an indent. */
+      max-width: min(85%, 600px);
       width: 100%;
       margin: 0 auto;
-      background: var(--bg-elevated, var(--bg));
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 12px 16px 10px;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, .05);
-      transition: border-color .15s, transform .15s
+      background: var(--msg-in, var(--bg-elevated, var(--bg)));
+      border: 1px solid rgba(255, 255, 255, .07);
+      border-radius: var(--radius-xl, 14px);
+      padding: 8px 12px 6px;
+      transition: border-color .15s
+    }
+
+    :root[data-theme="light"] .tm-post {
+      border-color: var(--border)
     }
 
     .tm-post:hover {
@@ -416,7 +357,7 @@
 
     @keyframes tm-post-flash {
       0%, 30% { background: color-mix(in oklab, var(--accent) 14%, var(--bg)) }
-      100% { background: var(--bg-elevated, var(--bg)) }
+      100% { background: var(--msg-in, var(--bg-elevated, var(--bg))) }
     }
 
     .tm-post-head {
@@ -425,9 +366,7 @@
       gap: 8px;
       font-size: var(--text-2xs);
       color: var(--text-dim);
-      margin-bottom: 8px;
-      padding-bottom: 6px;
-      border-bottom: 1px dashed var(--border)
+      margin-bottom: 6px
     }
 
     .tm-post-author {
@@ -595,13 +534,14 @@
     }
 
     .tm-post-text {
-      /* Inherit from --font-size (set by the global Settings slider) and
-         add a small bump so telemirror posts read at the same scale as
-         main-feed messages. */
-      font-size: calc(var(--font-size) + 1px);
+      font-size: inherit;
       line-height: 1.7;
+      /* The text is the channel's inner HTML: <br> are the real line breaks; the
+         stray \n / indentation are just source formatting. Render as normal HTML
+         (collapse that whitespace) — pre-wrap/pre-line turned the formatting \n
+         into extra blank lines and a leading tab. */
+      white-space: normal;
       overflow-wrap: anywhere;
-      /* break long URLs / unbroken strings */
       word-break: break-word
     }
 
@@ -629,15 +569,38 @@
       min-width: 0
     }
 
-    /* Single photo: fill width, natural aspect, capped height. */
+    /* Single photo: fill width, natural aspect, capped height. The box reserves
+       a placeholder aspect up front (default 4/3 until tmPhotoLoaded swaps in the
+       image's real ratio) so a lazily-loaded image can't shift the scroll. */
     .tm-album-1 {
       grid-template-columns: 1fr
     }
 
+    .tm-album-1 .tm-photo {
+      aspect-ratio: 4 / 3;
+      max-height: 600px
+    }
+
     .tm-album-1 .tm-photo img {
+      width: 100%;
+      height: 100%;
       max-height: 600px;
       object-fit: contain;
       background: #000
+    }
+
+    /* Subtle shimmer while the placeholder waits for the image bytes. */
+    .tm-photo.tm-photo-loading {
+      background: linear-gradient(100deg,
+          var(--bg2) 30%, color-mix(in oklab, var(--bg2) 60%, var(--text-dim)) 50%, var(--bg2) 70%)
+        var(--bg2);
+      background-size: 200% 100%;
+      animation: tm-shimmer 1.2s ease-in-out infinite
+    }
+
+    @keyframes tm-shimmer {
+      from { background-position: 200% 0 }
+      to { background-position: -200% 0 }
     }
 
     /* 2 photos side by side. */
@@ -753,12 +716,12 @@
     .tm-post-foot {
       display: flex;
       align-items: center;
-      gap: 14px;
-      margin-top: 10px;
-      padding-top: 6px;
-      border-top: 1px dashed var(--border);
-      font-size: var(--text-2xs);
-      color: var(--text-dim)
+      gap: 6px;
+      justify-content: flex-end;
+      margin-top: 2px;
+      font-size: 10px;
+      color: var(--text-dim);
+      direction: ltr
     }
 
     .tm-views {
@@ -859,8 +822,8 @@
     }
 
     .tm-saved-shortcut-icon {
-      width: 40px;
-      height: 40px;
+      width: 44px;
+      height: 44px;
       border-radius: 50%;
       background: var(--accent);
       color: #fff;
@@ -870,7 +833,7 @@
       flex-shrink: 0;
     }
 
-    .tm-saved-shortcut-icon .icon svg { width: 20px; height: 20px; }
+    .tm-saved-shortcut-icon .icon svg { width: 22px; height: 22px; }
 
     /* Generic media tile (voice, audio, document, poll). */
     .tm-media-tile {

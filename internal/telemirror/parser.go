@@ -3,6 +3,7 @@ package telemirror
 import (
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -108,6 +109,7 @@ func parseSinglePost(wrap *html.Node) *Post {
 				Type:  "photo",
 				URL:   rewriteTranslateLink(attrOf(n, "href")),
 				Thumb: extractBgImage(attrOf(n, "style")),
+				Ratio: extractPhotoRatio(n),
 			})
 		case hasClass(n, "tgme_widget_message_video_player"):
 			m := Media{Type: "video", URL: rewriteTranslateLink(attrOf(n, "href"))}
@@ -414,6 +416,47 @@ func extractBgImage(style string) string {
 		return m[1]
 	}
 	return ""
+}
+
+var (
+	cssWidthRe  = regexp.MustCompile(`(?:^|[;\s])width:\s*([0-9.]+)px`)
+	cssHeightRe = regexp.MustCompile(`(?:^|[;\s])height:\s*([0-9.]+)px`)
+	cssPadTopRe = regexp.MustCompile(`padding-top:\s*([0-9.]+)%`)
+	dataRatioRe = regexp.MustCompile(`^[0-9.]+$`)
+)
+
+func cssNum(re *regexp.Regexp, s string) float64 {
+	m := re.FindStringSubmatch(s)
+	if len(m) == 2 {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
+// extractPhotoRatio returns a photo's aspect ratio (width/height) from the
+// Telegram markup so the UI can reserve the exact box and never reflow (no
+// scroll jump). Album/grouped photos carry width+height (and data-ratio) in the
+// wrap style; single photos carry it as a padding-top:% spacer child.
+func extractPhotoRatio(n *html.Node) float64 {
+	style := attrOf(n, "style")
+	w, h := cssNum(cssWidthRe, style), cssNum(cssHeightRe, style)
+	if w > 0 && h > 0 {
+		return w / h
+	}
+	if child := findFirstByClass(n, "tgme_widget_message_photo"); child != nil {
+		// padding-top:% = height/width*100, so width/height = 100/%.
+		if pt := cssNum(cssPadTopRe, attrOf(child, "style")); pt > 0 {
+			return 100.0 / pt
+		}
+	}
+	if dr := attrOf(n, "data-ratio"); dataRatioRe.MatchString(dr) {
+		if v, err := strconv.ParseFloat(dr, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
 }
 
 // Google Translate proxy URLs come in two forms; we rewrite hrefs

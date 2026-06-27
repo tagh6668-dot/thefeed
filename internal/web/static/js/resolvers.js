@@ -73,6 +73,9 @@ function renderResolverTabs() {
   };
   tabs.appendChild(add);
   renderBankPill();
+  // Mirror list changes into the reparented Resolver sidebar (rename/delete/
+  // select all funnel through here).
+  if (typeof renderResolverSidebar === 'function') renderResolverSidebar();
 }
 
 function renderBankPill() {
@@ -117,8 +120,10 @@ async function selectResolverList(name) {
   var picked = lists.find(function (l) { return l.name === name; });
   var noScan = false;
   if (picked && (picked.count || 0) === 0) {
-    var bankEl = document.getElementById('resolverBankCount');
-    var bankCount = bankEl ? (parseInt(bankEl.textContent, 10) || 0) : 0;
+    // Read the REAL bank size (the old #resolverBankCount element lives in the
+    // now-hidden modal and is often stale/empty → wrong "bank is empty" copy).
+    var bankCount = 0;
+    try { var br = await fetch('/api/resolvers/bank'); if (br.ok) { var bd = await br.json(); bankCount = bd.count || 0; } } catch (e) { }
     if (bankCount > 0) {
       var ok = await showConfirmDialog(
         (t('empty_list_scan_confirm') || 'List "{n}" is empty. Scan the bank to find working resolvers?').replace('{n}', name),
@@ -306,6 +311,8 @@ async function addBankAddrToList(listName) {
     } else {
       showToast((t('already_in_list') || 'Already in "{n}"').replace('{n}', listName));
     }
+    // Refresh the list counts/previews immediately (don't wait for the 3s poll).
+    try { await loadResolverLists(); } catch (e2) { }
   } catch (e) { showToast(e.message || 'add failed'); }
 }
 

@@ -109,7 +109,12 @@ jobs:
           VERSION=${GITHUB_REF_NAME:-dev}
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
+          # Keep symbols on Windows (strip elsewhere): a stripped Go .exe looks
+          # "packed" to Microsoft Defender and trips Trojan:Win32/Wacatac-style
+          # false positives. The unstripped binary reads as a normal program.
+          STRIP="-s -w"
+          if [ "${{ matrix.goos }}" = "windows" ]; then STRIP=""; fi
+          LDFLAGS="${STRIP} -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
           ext=""
           if [ "${{ matrix.goos }}" = "windows" ]; then ext=".exe"; fi
           go build -trimpath -ldflags="${LDFLAGS}" -o build/thefeed-server-${{ matrix.goos }}-${{ matrix.goarch }}${ext} ./cmd/server
@@ -136,7 +141,15 @@ jobs:
           else
             ASSET_TEMPLATE="thefeed-client-{V}-${{ matrix.goos }}-${{ matrix.goarch }}${ext}"
           fi
-          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE}"
+          # Strip symbols everywhere EXCEPT Windows: a stripped Go .exe looks
+          # "packed" to Microsoft Defender and trips Trojan:Win32/Wacatac-style
+          # false positives. Keeping the symbol table (bigger .exe) reads as a
+          # normal program, and the changed bytes also fall outside the current
+          # cloud signature. The real fix still needs code-signing or a Defender
+          # false-positive submission.
+          STRIP="-s -w"
+          if [ "${{ matrix.goos }}" = "windows" ]; then STRIP=""; fi
+          LDFLAGS="${STRIP} -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE}"
           # Modern Android requires PIE for executables launched via exec(),
           # and several heuristic AV engines (Kaspersky Boogr.gsh,
           # several VT vendors) flag non-PIE bundled binaries as suspicious.

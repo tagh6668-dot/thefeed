@@ -83,6 +83,14 @@ async function openSavedMessages() {
   if (chatName) { chatName.textContent = t('saved_messages'); }
   if (chatSub) { chatSub.textContent = ''; }
   if (headerActions) headerActions.style.display = 'none';
+  // Show the Saved (bookmark) icon in the header avatar — not the last
+  // channel's leftover picture.
+  var hAv = document.getElementById('chatHeaderAvatar');
+  if (hAv) {
+    hAv.classList.remove('ch-avatar-noimg');
+    hAv.classList.add('is-saved');
+    hAv.innerHTML = (typeof icon === 'function') ? icon('bookmark') : '';
+  }
 
   // Hide send panel
   var sendPanel = document.getElementById('sendPanel');
@@ -166,13 +174,10 @@ function renderSavedView() {
 
   var html = '<div class="sm-saved-root"><div class="sm-list">';
 
-  // Pinned banner above search bar
   var pinnedItems = savedMessages ? savedMessages.filter(function(m) { return m.pinned; }) : [];
-  if (pinnedItems.length) {
-    html += renderPinnedBanner(pinnedItems);
-  }
 
-  // Search bar + lock button
+  // Search bar + lock button. Floats over the message list (Telegram-style) so
+  // items scroll behind it; the pinned banner moves INTO the scroll area below.
   html += '<div class="sm-search-bar">'
     + '<div class="sm-search-inner">'
     + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>'
@@ -184,8 +189,12 @@ function renderSavedView() {
     + '</button>'
     + '</div>';
 
-  // Scrollable items
+  // Scrollable items (pinned banner rides at the top of the scroll so it slides
+  // under the floating search bar with the rest of the list).
   html += '<div class="sm-scroll" id="savedList">';
+  if (pinnedItems.length) {
+    html += renderPinnedBanner(pinnedItems);
+  }
   if (hasItems) {
     var lastDate = '';
     var dateLocale = lang === 'fa' ? 'fa-IR' : 'en-US';

@@ -277,20 +277,6 @@ func (c *ChatClient) updateQuota(remaining uint16, reset uint32) {
 	c.mu.Unlock()
 }
 
-// ServerAdvertisesChat is the cheap availability pre-check: it reads the signed
-// feed's ChatAvailable bit from metadata block 0 — one query, no ChatInfo
-// retries. A chatless server has no ChatInfo channel, so the full probe only
-// fails after several retried DNS fetches; this short-circuits that. known=false
-// means block 0 didn't carry the flag or the fetch failed, so the caller should
-// fall back to the authoritative EnsureInfo probe rather than assume anything.
-func (c *ChatClient) ServerAdvertisesChat(ctx context.Context) (advertises, known bool) {
-	b0, err := c.f.FetchBlock(ctx, protocol.MetadataChannel, 0)
-	if err != nil {
-		return false, false
-	}
-	return protocol.ChatAvailableFromBlock0(b0)
-}
-
 // EnsureInfo fetches and verifies the ChatInfo capability payload once (and
 // re-fetches after expiry or when marked stale). Fail-closed: chat requires a
 // pinned sk and a VERIFIED signature.
@@ -372,6 +358,20 @@ func (c *ChatClient) EnsureInfo(ctx context.Context) (*protocol.ChatInfo, error)
 		raw = append(raw, b...)
 	}
 	if verr := c.f.verifyExtraBytes(protocol.ChatInfoChannel, raw, extraRaw); verr != nil {
+		// Active tamper (bad signature / rollback / content mismatch) is ALWAYS
+		// fail-closed — we never serve unverified info.
+		if errors.Is(verr, ErrExtraBlockInvalid) {
+			return nil, ErrChatUnverified
+		}
+		// Otherwise the signature block was absent/unfetchable. On FIRST contact
+		// we can't tell a transient fetch failure from a malicious signature-strip,
+		// so fail-closed. But once we've verified this server's signature before
+		// (seenBefore), we know it signs — so a later absence is a transient glitch:
+		// classify it unreachable (short retry backoff) rather than the 30-min
+		// "disabled" one that silenced working servers.
+		if seenBefore {
+			return nil, ErrChatUnreachable
+		}
 		return nil, ErrChatUnverified
 	}
 
@@ -585,7 +585,7 @@ func (c *ChatClient) sendQuery(ctx context.Context, qname string) ([]byte, error
 		return nil, fmt.Errorf("chat: no active resolvers")
 	}
 	if c.f.debug {
-		c.f.log("[chat] cell %s", qname)
+		c.f.log("[chat] query qname=%s resolvers=[%s]", qname, strings.Join(picked, ", "))
 	}
 	return c.f.scatterQuery(ctx, picked, qname)
 }

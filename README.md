@@ -147,7 +147,7 @@ thefeed-server ... --chat-domains c.example.com
 - **Abuse limits**, advertised to clients automatically: `--chat-send-per-hour` (30), `--chat-inbox-cap` (50), `--chat-per-pair-cap` (10), `--chat-max-msg-bytes` (500). Undelivered messages expire after `--chat-ttl-hours` (72).
 - **Accounts are kept by default** (`--chat-account-ttl-days 0`) so reports stay accurate; set a day count to reclaim idle accounts on a busy server. `--chat-max-accounts` (0 = unlimited) caps total accounts.
 - **Durability vs throughput** (`--chat-sync-seconds`, default 1): the message store is flushed to disk every N seconds, so a crash may lose up to ~N seconds of just-received messages (acceptable — chat is end-to-end encrypted and senders resend). Set `0` to fsync on every message for strict durability at lower throughput.
-- In the client UI open **Messenger** from the sidebar. ✓ = stored on the server, ✓✓ = picked up by the recipient. Matching safety emojis on both devices confirm the conversation is secure.
+- In the client UI open **Chat** from the bottom navigation bar. ✓ = stored on the server, ✓✓ = picked up by the recipient. Matching safety emojis on both devices confirm the conversation is secure.
 
 The hourly DNS report includes `totalChatQueries` and a `chat` block (accounts, messages, registrations, sessions).
 
@@ -474,7 +474,7 @@ make build-client
 ./build/thefeed-client --password "your-secret"
 ```
 
-On first run, the client creates a `./thefeeddata/` directory next to where you run it. Open `http://127.0.0.1:8080` in your browser and configure your domain and passphrase through the Settings page. DNS resolvers are managed in the shared Resolver Bank (accessible from the sidebar), which is used by all profiles.
+On first run, the client creates a `./thefeeddata/` directory next to where you run it. Open `http://127.0.0.1:8080` in your browser and import a config (or enter your domain and passphrase) from **Settings → Configs**. DNS resolvers are managed in the **Resolver** section (bottom nav) — a shared Bank used by all configs, plus the Scanner to find more.
 
 All configuration, cache, and data files are stored in the data directory.
 
@@ -569,26 +569,19 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 
 ### Web UI
 
-The browser-based UI has:
-- **Channels sidebar** (left): channel list grouped by type (Public/X/Private) with badges
-- **Messages panel** (right): messages with native RTL/Farsi rendering (VazirMatn font)
-- **Send panel**: send messages to channels and private chats when Telegram is connected
-- **New message badges**: visual indicators for channels with new messages
-- **Next-fetch timer**: countdown to next automatic refresh
-- **Media detection**: `[IMAGE]`, `[VIDEO]`, `[DOCUMENT]` tag highlighting
-- **Message search**: search within the current channel's messages with match highlighting and prev/next navigation
-- **Export messages**: export the last N messages of a channel to clipboard
-- **Log panel** (bottom): live DNS query log
-- **Settings modal**: configure domain, passphrase, resolvers, query mode, rate limit, concurrent requests (scatter), timeout, debug mode
-- **Working resolvers**: view the list of currently active/healthy resolvers from settings
-- **Background image**: set a custom background image URL for the messages panel (stored locally)
-- **DNS query timeout**: configurable per-profile DNS query timeout (default 15s) in the profile editor
-- **Per-profile cache**: 1-hour browser cache so data is visible instantly on reopen
-- **Resolver Scanner**: scan IP ranges and CIDRs to discover working DNS resolvers
+A single Telegram-style shell with a **bottom navigation bar** that switches between five full sections (no more modals):
 
-### Resolver Scanner
+- **Feed** — the channel/X feed: channel list grouped by type (Public/X/Private) with badges, messages with native RTL/Farsi rendering (VazirMatn font), a floating round composer (send to channels/private chats when Telegram is connected), per-channel new-message badges, next-fetch countdown, media tag highlighting (`[IMAGE]`, `[VIDEO]`, …), in-channel search, export-to-clipboard, a tap-to-open link sheet, and a live DNS query log. **Saved Messages** (encrypted local notes + bookmarks) lives here too.
+- **Mirror** (Telemirror) — a Telegram-web-style read-only mirror of channels, with photo/album rendering that reserves each image's exact aspect ratio so the feed never jumps while loading.
+- **Chat** — the end-to-end-encrypted [Messenger](#messenger): conversation list, delivery ticks (✓/✓✓), send/receive progress, a per-conversation send-quota ring, safety-emoji verification, and a local-only contact book.
+- **Resolver** — the unified DNS-resolver hub: the shared **Bank**, your named resolver **lists** (activate / rename / delete / empty), and the **Scanner** that discovers new resolvers — all in one section (see below).
+- **Settings** — every preference as its own page: **Display** (theme, font size, language, wallpaper), **Connection** (query mode, rate limit, scatter, timeout, app password, profile pictures, debug), **Storage** (disk-cache budget), **Backup** (encrypted export/import), **About**, and **Configs** (the import/manage list, with ready-made starter configs). All fields auto-save.
 
-The web UI includes a built-in resolver scanner (🔍 icon in sidebar) that probes IP ranges to discover DNS servers capable of reaching your thefeed server. Features:
+Theme follows the **device** by default (System), with explicit **Dark** / **Light** options. Each config keeps its own 1-hour browser cache so data shows instantly on reopen; the **scatter** concurrency, DNS timeout, and other per-config options are edited in the config editor.
+
+### Resolver section
+
+The **Resolver** section (in the bottom nav) merges the resolver **Bank**, named **lists**, and the **Scanner** into one place. The Scanner probes IP ranges to discover DNS servers capable of reaching your thefeed server. Features:
 
 - **Flexible targets**: enter individual IPs, CIDRs (e.g. `5.1.0.0/16`), or domain names — one per line
 - **Default CIDR preset**: one-click button to load the bundled curated CIDR range list

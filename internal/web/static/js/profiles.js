@@ -17,6 +17,8 @@ function renderProfileBtn() {
   var display = (active && (active.nickname || active.config.domain)) || t('profiles');
   nameEl.textContent = display;
   avatarEl.textContent = (active && (active.nickname || active.config.domain) || '?').charAt(0).toUpperCase();
+  // Keep the reparented Settings sidebar's Profiles row name in sync.
+  if (typeof renderSettingsSidebar === 'function') { try { renderSettingsSidebar(); } catch (e) { } }
 }
 
 function openProfiles() {
@@ -25,6 +27,11 @@ function openProfiles() {
   document.getElementById('importSuccess').style.display = 'none';
   document.getElementById('importUriInput').value = '';
   renderProfilesModal();
+  // New users (no profiles yet): surface the ready-to-use default configs
+  // immediately so the quickest onboarding path is the most visible one.
+  var noProfiles = !profiles || !profiles.profiles || !profiles.profiles.length;
+  var dcList = document.getElementById('defaultConfigsList');
+  if (noProfiles && dcList && dcList.style.display === 'none') toggleDefaultConfigs();
 }
 function closeProfiles() { document.getElementById('profilesModal').classList.remove('active') }
 
@@ -235,6 +242,8 @@ async function activateProfile(id) {
     // profile's channel name/handle while the user picks a new one.
     document.getElementById('chatName').textContent = 'thefeed';
     document.getElementById('chatSub').textContent = '';
+    if (typeof setChatHeaderAvatar === 'function') setChatHeaderAvatar(null);
+    if (typeof updateFeedHeaderChrome === 'function') updateFeedHeaderChrome();
     document.getElementById('progressPanel').innerHTML = '';
     document.getElementById('messages').innerHTML = '<div class="empty-state"><p>' + t('switching') + '</p></div>';
     // On desktop the chat panel is always visible; collapse it back to
@@ -353,8 +362,13 @@ var defaultConfigs = null; // {profiles: [...], resolvers: [...]} from /api/prof
 
 async function toggleDefaultConfigs() {
   var el = document.getElementById('defaultConfigsList');
+  var btn = document.getElementById('dcToggle');
   if (!el) return;
-  if (el.style.display !== 'none') { el.style.display = 'none'; return }
+  if (el.style.display !== 'none') {
+    el.style.display = 'none';
+    if (btn) { btn.classList.remove('open'); btn.setAttribute('aria-expanded', 'false'); }
+    return;
+  }
   if (!defaultConfigs) {
     try {
       var r = await fetch('/api/profiles/defaults');
@@ -364,6 +378,7 @@ async function toggleDefaultConfigs() {
   }
   renderDefaultConfigs();
   el.style.display = '';
+  if (btn) { btn.classList.add('open'); btn.setAttribute('aria-expanded', 'true'); }
 }
 
 function renderDefaultConfigs() {
@@ -377,7 +392,7 @@ function renderDefaultConfigs() {
   (defaultConfigs.profiles || []).forEach(function (d, i) {
     var existing = byDomain[d.domain];
     h += '<div class="default-config-row">';
-    h += DEFAULT_CONFIG_EMBLEM;
+    h += '<span class="default-config-emblem">' + DEFAULT_CONFIG_EMBLEM + '</span>';
     h += '<div class="default-config-info"><div class="default-config-name">' + esc(d.nickname) + '</div>';
     h += '<div class="default-config-domain">' + esc(d.domain) + '</div></div>';
     var changed = existing && (
@@ -385,15 +400,16 @@ function renderDefaultConfigs() {
       (existing.config.serverKey || '') !== (d.serverKey || '') ||
       (existing.config.extraDomains || []).join(',') !== (d.extraDomains || []).join(','));
     if (!existing) {
-      h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ')">' + t('import') + '</button>';
+      h += '<button class="btn btn-primary btn-sm dc-add-btn" onclick="importDefaultConfig(' + i + ')"><span data-icon="add"></span> ' + t('import') + '</button>';
     } else if (changed) {
-      h += '<button class="btn btn-primary btn-sm" onclick="importDefaultConfig(' + i + ',\'' + existing.id + '\')">' + t('update') + '</button>';
+      h += '<button class="btn btn-primary btn-sm dc-add-btn" onclick="importDefaultConfig(' + i + ',\'' + existing.id + '\')"><span data-icon="refresh"></span> ' + t('update') + '</button>';
     } else {
-      h += '<button class="btn btn-flat btn-sm" disabled>' + t('already_imported') + '</button>';
+      h += '<span class="dc-imported"><span data-icon="check"></span> ' + t('already_imported') + '</span>';
     }
     h += '</div>';
   });
   el.innerHTML = h;
+  if (typeof hydrateIcons === 'function') hydrateIcons(el);
 }
 
 // importDefaultConfig imports default config i, or updates the existing
@@ -461,7 +477,14 @@ function openProfileEditor(id) {
     document.getElementById('peChannelSection').style.display = 'none';
   }
 }
-function closeProfileEditor() { document.getElementById('profileEditorModal').classList.remove('active'); editingProfileId = null }
+function closeProfileEditor() {
+  document.getElementById('profileEditorModal').classList.remove('active');
+  editingProfileId = null;
+  // Clear the passphrase so a leftover value in the hidden modal can't trip
+  // Chrome's "save password?" prompt on a later navigation (it pairs the
+  // nickname + this field as a login form).
+  var k = document.getElementById('peKey'); if (k) k.value = '';
+}
 
 // updateServerKeyHint shows the validity of the server key being edited.
 function updateServerKeyHint() {

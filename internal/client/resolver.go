@@ -18,15 +18,16 @@ import (
 // updates the active (healthy) resolver pool. It replaces the old file/CIDR
 // scanner — no file I/O; just a plain DNS probe on channel 0.
 type ResolverChecker struct {
-	fetcher    *Fetcher
-	timeout    time.Duration
-	logFunc    LogFunc
-	onScanDone func([]string)     // called after each completed scan with healthy resolvers
-	autoScan   bool               // if true, run hourly periodic scans
-	started    atomic.Bool        // guards against double-start
-	scanMu     sync.Mutex         // protects scanCancel
-	scanRunMu  sync.Mutex         // only one CheckNow at a time (via TryLock)
-	scanCancel context.CancelFunc // cancels the currently running CheckNow
+	fetcher        *Fetcher
+	timeout        time.Duration
+	logFunc        LogFunc
+	onScanDone     func([]string)     // called after each completed scan with healthy resolvers
+	onFirstHealthy func([]string)     // called once per pass the moment the first healthy resolver is found
+	autoScan       bool               // if true, run hourly periodic scans
+	started        atomic.Bool        // guards against double-start
+	scanMu         sync.Mutex         // protects scanCancel
+	scanRunMu      sync.Mutex         // only one CheckNow at a time (via TryLock)
+	scanCancel     context.CancelFunc // cancels the currently running CheckNow
 }
 
 // NewResolverChecker creates a health checker for the resolvers in fetcher.
@@ -50,6 +51,15 @@ func (rc *ResolverChecker) SetLogFunc(fn LogFunc) {
 // with the list of healthy resolver addresses. Not called when the scan is cancelled.
 func (rc *ResolverChecker) SetOnScanDone(fn func([]string)) {
 	rc.onScanDone = fn
+}
+
+// SetOnFirstHealthy registers a callback invoked the moment the first healthy
+// resolver of a pass is found, with the healthy set so far (one entry). It lets
+// the caller start loading channels immediately instead of waiting for the whole
+// pass to finish. The checker does not touch the active pool here — the callback
+// owns that policy (e.g. only act when nothing has loaded yet).
+func (rc *ResolverChecker) SetOnFirstHealthy(fn func([]string)) {
+	rc.onFirstHealthy = fn
 }
 
 // SetAutoScan enables or disables the hourly periodic health-check loop.
@@ -233,16 +243,25 @@ func (rc *ResolverChecker) CheckNow(ctx context.Context) bool {
 			defer func() { <-sem }()
 
 			ok := rc.checkOne(scanCtx, r)
+			var firstHealthy []string // non-nil when this probe is the pass's first success
 			mu.Lock()
 			if ok {
 				healthy = append(healthy, r)
 				rc.log("Resolver OK: %s", r)
+				if len(healthy) == 1 {
+					firstHealthy = append([]string(nil), healthy...) // copy: healthy keeps growing
+				}
 			} else {
 				rc.log("Resolver failed: %s", r)
 			}
 			done++
 			rc.log("RESOLVER_SCAN progress %d/%d healthy=%d", done, total, len(healthy))
 			mu.Unlock()
+			// Notify outside the lock so the callback (channel loading) can't
+			// stall the rest of the probes.
+			if firstHealthy != nil && rc.onFirstHealthy != nil {
+				rc.onFirstHealthy(firstHealthy)
+			}
 		}(r)
 	}
 	wg.Wait()

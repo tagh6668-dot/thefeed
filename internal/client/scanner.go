@@ -74,6 +74,7 @@ type ResolverScanner struct {
 	pauseCh  chan struct{}
 	resumeCh chan struct{}
 	logFunc  LogFunc
+	onFound  func(ScannerResult) // called once per found resolver
 
 	// probeCtx is a child of ctx that is cancelled on pause/stop to abort
 	// in-flight DNS exchanges immediately. Recreated on resume.

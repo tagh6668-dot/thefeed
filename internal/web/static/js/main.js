@@ -18,9 +18,11 @@ function _setBg(url) {
 }
 
 function _applyPattern(id) {
+  // .chat-area is the shared shell column hosting feed + reparented mirror/chat
+  // panes; the pattern lives on its ::before. (.tm-body was removed in the
+  // redesign; .chat-body-wrap is the standalone chat sheet.)
   var els = [
     document.querySelector('.chat-area'),
-    document.querySelector('.tm-body'),
     document.querySelector('.chat-body-wrap')
   ];
   for (var i = 0; i < els.length; i++) {

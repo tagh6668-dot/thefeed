@@ -258,6 +258,13 @@ type Server struct {
 	refreshMu      sync.Mutex
 	refreshCancels map[int]context.CancelFunc
 
+	// chatAdv caches, per chat server key, the last VERIFIED ChatAvailable bit
+	// read from that config's metadata — populated by BOTH the feed's regular
+	// metadata fetches and the messenger's own, so chat availability rarely needs
+	// a dedicated probe and a "no chat" verdict is always signature-backed.
+	chatAdvMu sync.Mutex
+	chatAdv   map[string]chatAdvEntry
+
 	logMu    sync.RWMutex
 	logLines []string
 
@@ -375,6 +382,7 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 		password:       password,
 		messages:       make(map[int][]protocol.Message),
 		clients:        make(map[chan string]struct{}),
+		chatAdv:        make(map[string]chatAdvEntry),
 		refreshCancels: make(map[int]context.CancelFunc),
 		lastMsgIDs:     make(map[int]uint32),
 		lastHashes:     make(map[int]uint32),
@@ -487,7 +495,6 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/cache/clear-one", s.handleCacheClearOne)
 	mux.HandleFunc("/api/cache/budget", s.handleCacheBudget)
 	mux.HandleFunc("/api/bg-image", s.handleBgImage)
-	mux.HandleFunc("/api/resolvers/apply-saved", s.handleApplySavedResolvers)
 	mux.HandleFunc("/api/resolvers/active", s.handleActiveResolvers)
 	mux.HandleFunc("/api/resolvers/remove", s.handleRemoveResolver)
 	mux.HandleFunc("/api/resolvers/reset-stats", s.handleResetResolverStats)
@@ -505,6 +512,7 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/resolvers/lists/save", s.handleResolverListSave)
 	mux.HandleFunc("/api/resolvers/lists/rename", s.handleResolverListRename)
 	mux.HandleFunc("/api/resolvers/lists/add", s.handleResolverListAdd)
+	mux.HandleFunc("/api/resolvers/lists/remove", s.handleResolverListRemove)
 	// Media (image/file) downloader: assembles a binary blob from a media
 	// channel and streams it back. See internal/web/media.go for the param
 	// contract.
@@ -534,7 +542,6 @@ func (s *Server) serve(ln net.Listener) error {
 	// Chat messenger endpoints — see handlers_chat.go.
 	mux.HandleFunc("/api/chat/info", s.handleChatInfo)
 	mux.HandleFunc("/api/chat/availability", s.handleChatAvailability)
-	mux.HandleFunc("/api/chat/servers", s.handleChatServers)
 	mux.HandleFunc("/api/chat/probe", s.handleChatProbeServer)
 	mux.HandleFunc("/api/chat/enable", s.handleChatEnable)
 	mux.HandleFunc("/api/chat/seed", s.handleChatSeed)
@@ -759,6 +766,14 @@ func (s *Server) initFetcher() error {
 		s.addLog(msg)
 	})
 
+	// Cache this config's VERIFIED chat-advertised bit from the feed's regular
+	// metadata fetches, so the messenger needn't re-probe to learn it.
+	if feedKey := chatServerKey(cfg.Domain); feedKey != "" {
+		fetcher.SetOnMetaChatAvail(func(advertised, verified bool) {
+			s.recordChatAdv(feedKey, advertised, verified)
+		})
+	}
+
 	// Create a shared context for this fetcher's lifetime.
 	ctx, cancel := context.WithCancel(context.Background())
 	s.fetcherCtx = ctx
@@ -836,6 +851,9 @@ func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Co
 	f.SetActiveResolvers(resolvers)
 	f.SetNoiseDisabled(true) // the main feed fetcher already emits cover traffic
 	pl, _ := s.loadProfiles()
+	// Respect the global debug toggle so chat cell queries (qname + resolvers)
+	// are logged just like the main feed's queries.
+	f.SetDebug(pl.Debug)
 	qm, rl, sc, to := connectionSettings(pl)
 	if qm == "double" {
 		f.SetQueryMode(protocol.QueryMultiLabel)
@@ -848,6 +866,13 @@ func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Co
 	}
 	f.SetTimeout(time.Duration(to * float64(time.Second)))
 	f.SetLogFunc(func(msg string) { s.addLog(msg) })
+	// Cache this config's VERIFIED chat-advertised bit from the messenger's own
+	// metadata fetches too (shared with the feed's, keyed by server).
+	if chatKey := chatServerKey(cfg.Domain); chatKey != "" {
+		f.SetOnMetaChatAvail(func(advertised, verified bool) {
+			s.recordChatAdv(chatKey, advertised, verified)
+		})
+	}
 	if main := s.fetcher; main != nil {
 		f.SetStatsForward(func(resolver string, ok bool, latency time.Duration) {
 			if ok {

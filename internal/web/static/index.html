@@ -10,6 +10,17 @@
   <title>thefeed</title>
   <script>
     if (typeof Android !== 'undefined') document.documentElement.classList.add('is-android-app');
+    // Resolve the theme before the stylesheets apply so there's no flash.
+    // Preference is 'system' (default) | 'dark' | 'light'; 'system' follows
+    // the device's prefers-color-scheme. core.js keeps it live afterwards.
+    (function () {
+      try {
+        var p = localStorage.getItem('thefeed_theme') || 'system';
+        var resolved = (p === 'dark' || p === 'light') ? p
+          : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+        document.documentElement.setAttribute('data-theme', resolved);
+      } catch (e) { }
+    })();
   </script>
   <link rel="stylesheet" href="/static/css/base.css">
   <link rel="stylesheet" href="/static/css/layout.css">
@@ -20,6 +31,7 @@
   <link rel="stylesheet" href="/static/css/components.css">
   <link rel="stylesheet" href="/static/css/responsive.css">
   <link rel="stylesheet" href="/static/css/saved.css">
+  <link rel="stylesheet" href="/static/css/nav.css">
 </head>
 
 <body>
@@ -91,8 +103,37 @@
 
   <div class="app" id="app">
 
+    <!-- BOTTOM / RAIL NAVIGATION (Telegram-2026 redesign) -->
+    <nav class="nav-bar" id="navBar" aria-label="Main navigation">
+      <button type="button" class="nav-tab active" id="navTabFeed" onclick="navTo('feed')" aria-current="page">
+        <span class="nav-ic" data-icon="navFeed"></span>
+        <span class="nav-lb" data-i18n="nav_feed">Feed</span>
+      </button>
+      <button type="button" class="nav-tab" id="navTabMirror" onclick="navTo('mirror')" aria-label="Mirror">
+        <span class="nav-ic" data-icon="navMirror"></span>
+        <span class="nav-lb" data-i18n="nav_mirror">Mirror</span>
+      </button>
+      <button type="button" class="nav-tab" id="navTabChat" onclick="navTo('chat')" aria-label="Chat">
+        <span class="nav-ic" data-icon="messenger"></span>
+        <span class="nav-lb" data-i18n="nav_chat">Chat</span>
+        <span class="nav-badge" id="navChatBadge" hidden></span>
+      </button>
+      <button type="button" class="nav-tab" id="navTabResolver" onclick="navTo('resolver')" aria-label="Resolver">
+        <span class="nav-ic" data-icon="bank"></span>
+        <span class="nav-lb" data-i18n="nav_resolver">Resolver</span>
+        <span class="nav-badge nav-badge-count" id="navResolverBadge" hidden></span>
+      </button>
+      <span class="nav-tab-spacer" aria-hidden="true"></span>
+      <button type="button" class="nav-tab" id="navTabSettings" onclick="navTo('settings')" aria-label="Settings">
+        <span class="nav-ic" data-icon="settings"></span>
+        <span class="nav-lb" data-i18n="nav_settings">Settings</span>
+      </button>
+    </nav>
+
     <!-- SIDEBAR -->
     <div class="sidebar" id="sidebar">
+      <!-- Desktop-only drag handle to resize the sidebar (CSS hides on mobile). -->
+      <div class="sidebar-resize" id="sidebarResize" aria-hidden="true"></div>
       <div class="sidebar-header">
         <div class="sidebar-header-top">
           <button class="profile-btn" id="profileBtn" onclick="openProfiles()">
@@ -102,10 +143,18 @@
             <span class="profile-btn-name" id="profileBtnName">Set Up</span>
             <span class="profile-btn-arrow"><span class="plus" data-icon="profileToggle"></span></span>
           </button>
-          <button class="icon-btn" onclick="openSettings()" title="Settings" data-i18n-title="settings" data-icon="settings"></button>
+          <button class="icon-btn" id="sidebarSettingsBtn" onclick="openSettings()" title="Settings" data-i18n-title="settings" data-icon="settings"></button>
           <button class="icon-btn" onclick="jumpToLog()" title="Log" data-i18n-title="sidebar_log"
             style="font-size:16px" data-icon="log"></button>
         </div>
+        <!-- BEGIN telemirror -->
+        <!-- Mirror add-channel row — occupies the profile row's slot in Mirror
+             mode so the folder pills don't jump when switching feed↔mirror. -->
+        <div class="tm-add-row" id="tmAddHeaderRow">
+          <input id="tmAddInput" type="text" data-i18n-ph="telemirror_add_ph" placeholder="@username" maxlength="40">
+          <button class="btn btn-primary" id="tmAddBtn" onclick="telemirrorAdd()" data-i18n="add" disabled>Add</button>
+        </div>
+        <!-- END telemirror -->
         <div class="sidebar-toolbar">
           <button class="stb" id="scannerIconBtn" onclick="openScanner()"><span data-icon="search"></span> <span data-i18n="scanner_find_resolvers">Find
             Resolvers</span></button>
@@ -122,8 +171,10 @@
               data-i18n="chat_btn">Messenger</span><span class="chat-sidebar-badge" id="chatSidebarBadge">0</span></button>
           <!-- END chat -->
         </div>
-        <input class="sidebar-search" id="channelSearch" type="text" data-i18n-ph="search" placeholder="Search..."
-          oninput="filterChannels()">
+        <div class="search-wrap">
+          <input class="sidebar-search" id="channelSearch" type="text" data-i18n-ph="search" placeholder="Search..."
+            oninput="filterChannels()">
+        </div>
       </div>
       <div class="channel-list" id="channelList">
         <div class="saved-channel-entry" id="savedChannelBtn" role="button" tabindex="0"
@@ -135,21 +186,45 @@
         <div style="padding:20px;text-align:center;color:var(--text-dim);font-size:13px" data-i18n="no_channels">No
           channels yet</div>
       </div>
-      <div class="sidebar-footer">
-        <a href="https://t.me/networkti" target="_blank" data-i18n="telegram">Telegram</a>
-        &middot;
-        <a href="#" onclick="event.preventDefault();openSource()" data-i18n="source_code">Source code</a>
-        &middot;
-        <a href="#" onclick="event.preventDefault();openDonate()" data-i18n="donate">Donate</a>
-        &middot;
-        <a href="#" onclick="event.preventDefault();openPrivacy()" data-i18n="privacy_policy">Privacy</a>
-      </div>
+      <!-- BEGIN telemirror -->
+      <!-- Mirror channel list — a swappable pane in the SHARED sidebar, shown
+           when the Mirror folder is active (html.tm-open). Resizes with the
+           sidebar for free; the posts topbar lives over the content column. -->
+      <aside id="tmSidebar" class="tm-sidebar">
+        <div class="tm-disclaimer-wrap" id="tmDisclaimerWrap">
+          <button class="tm-disclaimer-x" onclick="tmDismissNote()" data-i18n-title="telemirror_note_dismiss"
+            title="Don't show again" aria-label="Dismiss" data-icon="close"></button>
+          <p class="tm-disclaimer" dir="auto" data-i18n="telemirror_disclaimer">Mirror loads channels over Google and only works
+            while Google is reachable. Only image downloads are supported. Add your own channels with the field below.</p>
+        </div>
+        <div id="tmChannelsList" class="tm-channels-list"></div>
+      </aside>
+      <!-- END telemirror -->
+      <!-- BEGIN chat -->
+      <!-- Chat conversation list — a swappable pane in the shared sidebar, shown
+           when the Chat section is active (html.chat-section). Filled by
+           chatRenderList(). -->
+      <div id="chatSidebar" class="chat-sidebar"></div>
+      <!-- END chat -->
+      <!-- BEGIN resolver -->
+      <!-- Resolver list pane in the shared sidebar (html.resolver-section):
+           Bank row, named lists, Scanner entry, actions. renderResolverSidebar(). -->
+      <div id="resolverSidebar" class="resolver-sidebar"></div>
+      <!-- END resolver -->
+      <!-- BEGIN settings -->
+      <!-- Settings list pane in the shared sidebar (html.settings-section):
+           Profiles row + one item per settings group. renderSettingsSidebar(). -->
+      <div id="settingsSidebar" class="resolver-sidebar"></div>
+      <!-- END settings -->
     </div>
 
     <!-- CHAT AREA -->
     <div class="chat-area">
       <div class="chat-header">
         <button class="back-btn" onclick="feedBack()" data-icon="arrowLeft"></button>
+        <!-- Channel avatar — matches the mirror topbar. Populated on channel
+             select; empty (and hidden) on the no-channel placeholder. -->
+        <div class="ch-avatar chat-header-avatar ch-avatar-noimg" id="chatHeaderAvatar"></div>
         <div class="chat-header-info">
           <div class="chat-header-name" id="chatName">thefeed</div>
           <div class="chat-header-sub" id="chatSub"></div>
@@ -159,15 +234,11 @@
             style="display:none" data-i18n-title="next_fetch_info" title="" onclick="showToast(t('next_fetch_info'))"
             tabindex="0" data-icon="info"></span>
           <button class="icon-btn header-search-btn" onclick="toggleMsgSearch()" title="Search"
-            data-i18n-title="search_messages"
-            style="width:auto;height:30px;font-size:12px;padding:0 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface)"
-            data-i18n="search_messages">Search</button>
+            data-i18n-title="search_messages" data-icon="search"></button>
           <button class="icon-btn header-export-btn" onclick="openExportModal()" title="Export"
-            data-i18n-title="export_messages"
-            style="width:auto;height:30px;font-size:12px;padding:0 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface)"
-            data-i18n="export_messages">Export</button>
+            data-i18n-title="export_messages" data-icon="copy"></button>
           <button class="icon-btn" id="refreshBtn" onclick="doRefreshUI()" title="Refresh"
-            style="width:44px;height:44px;font-size:20px" data-icon="refresh"></button>
+            data-icon="refresh"></button>
           <div class="header-kebab" id="headerKebab">
             <button class="icon-btn" onclick="toggleKebabMenu(event)" title="More"
               style="width:44px;height:44px;font-size:20px" data-icon="more"></button>
@@ -206,6 +277,70 @@
       <div class="progress-panel" id="progressPanel"></div>
       <div class="log-toggle" onclick="toggleLog()"><span>LOG</span><span id="logToggleIcon" data-icon="chevronRight"></span></div>
       <div class="log-panel hidden" id="logPanel"></div>
+      <!-- BEGIN telemirror -->
+      <!-- Mirror posts pane — topbar + posts in the SHARED content column. The
+           topbar sits ONLY over this column, never above the sidebar. Shown
+           when the Mirror folder is active (html.tm-open). -->
+      <div id="tmPane">
+        <header class="tm-topbar">
+          <button class="tm-back" onclick="closeTelemirror()" aria-label="Close" data-icon="arrowLeft"></button>
+          <button class="tm-menu" onclick="toggleTmSidebar()" aria-label="Back" data-icon="arrowLeft"></button>
+          <div class="tm-topbar-info">
+            <div id="tmTopbarAvatar"></div>
+            <div class="tm-topbar-meta">
+              <div class="tm-topbar-name" id="tmTopbarName" data-i18n="telemirror_title">Mirror</div>
+              <div class="tm-topbar-sub" id="tmTopbarSub" data-i18n="telemirror_subtitle">Custom channels</div>
+            </div>
+          </div>
+          <button class="tm-refresh" onclick="tmRefreshActive()" title="Refresh"
+            data-i18n-title="telemirror_refresh" data-icon="refresh"></button>
+        </header>
+        <main id="tmContent" class="tm-content">
+          <div class="tm-empty" data-i18n="telemirror_pick_channel">Pick a channel</div>
+        </main>
+        <button class="tm-scroll-down" id="tmScrollDownBtn" onclick="tmScrollToBottom()" aria-label="Scroll to latest"
+          title="Scroll to latest" data-icon="arrowDown"></button>
+      </div>
+      <!-- END telemirror -->
+      <!-- BEGIN chat -->
+      <!-- Chat conversation pane — shows the open thread (or a placeholder) in
+           the shared content column. Filled by chatRenderThread(). -->
+      <div id="chatPane"></div>
+      <!-- END chat -->
+      <!-- BEGIN resolver -->
+      <!-- Resolver content pane (html.resolver-section): floating topbar + the
+           board/scanner views, relocated here from the old modals at init by
+           resolverReparentOnce(). -->
+      <div id="resolverPane">
+        <header class="tm-topbar">
+          <button class="tm-back" onclick="closeResolverSection()" aria-label="Close" data-icon="arrowLeft"></button>
+          <button class="tm-menu" onclick="resolverShowSidebar()" aria-label="Back" data-icon="arrowLeft"></button>
+          <div class="tm-topbar-info">
+            <div class="tm-topbar-meta">
+              <div class="tm-topbar-name" id="resolverPaneTitle" data-i18n="resolvers_title">Resolver Bank</div>
+              <div class="tm-topbar-sub" id="resolverPaneSub"></div>
+            </div>
+          </div>
+          <button class="tm-refresh" onclick="copyResolversList()" title="Copy" data-i18n-title="copy"
+            data-icon="copy"></button>
+        </header>
+        <main id="resolverContent" class="tm-content"></main>
+      </div>
+      <!-- END resolver -->
+      <!-- BEGIN settings section -->
+      <div id="settingsPane">
+        <header class="tm-topbar">
+          <button class="tm-back" onclick="closeSettingsSection()" aria-label="Close" data-icon="arrowLeft"></button>
+          <button class="tm-menu" onclick="settingsShowSidebar()" aria-label="Back" data-icon="arrowLeft"></button>
+          <div class="tm-topbar-info">
+            <div class="tm-topbar-meta">
+              <div class="tm-topbar-name" id="settingsPaneTitle" data-i18n="settings">Settings</div>
+            </div>
+          </div>
+        </header>
+        <main id="settingsContent" class="tm-content"></main>
+      </div>
+      <!-- END settings section -->
     </div>
   </div>
 
@@ -281,41 +416,8 @@
   <div id="chatModal" class="chat-modal"></div>
   <!-- END chat -->
 
-  <!-- BEGIN telemirror -->
-  <div id="telemirrorModal" class="tm-modal">
-    <header class="tm-topbar">
-      <button class="tm-back" onclick="closeTelemirror()" aria-label="Close" data-icon="arrowLeft"></button>
-      <button class="tm-menu" onclick="toggleTmSidebar()" aria-label="Channels" data-icon="menu"></button>
-      <div class="tm-topbar-info">
-        <div id="tmTopbarAvatar"></div>
-        <div class="tm-topbar-meta">
-          <div class="tm-topbar-name" id="tmTopbarName" data-i18n="telemirror_title">Browse channels</div>
-          <div class="tm-topbar-sub" id="tmTopbarSub"></div>
-        </div>
-      </div>
-      <button class="tm-refresh" onclick="tmRefreshActive()" title="Refresh"
-        data-i18n-title="telemirror_refresh" data-icon="refresh"></button>
-    </header>
-    <div class="tm-body">
-      <aside id="tmSidebar" class="tm-sidebar">
-        <p class="tm-disclaimer" data-i18n="telemirror_disclaimer">Experimental backup feature for browsing public
-          Telegram channels. Depends on third-party services and may stop working or be rate-limited. For reliable
-          access, use the core thefeed feature.</p>
-        <div class="tm-add-row">
-          <input id="tmAddInput" type="text" data-i18n-ph="telemirror_add_ph" placeholder="@username" maxlength="40">
-          <button class="btn btn-primary" onclick="telemirrorAdd()" data-i18n="add">Add</button>
-        </div>
-        <div id="tmChannelsList" class="tm-channels-list"></div>
-      </aside>
-      <div class="tm-backdrop" onclick="toggleTmSidebar()" aria-hidden="true"></div>
-      <main id="tmContent" class="tm-content">
-        <div class="tm-empty" data-i18n="telemirror_pick_channel">Pick a channel</div>
-      </main>
-      <button class="tm-scroll-down" id="tmScrollDownBtn" onclick="tmScrollToBottom()" aria-label="Scroll to latest"
-        title="Scroll to latest" data-icon="arrowDown"></button>
-    </div>
-  </div>
-  <!-- END telemirror -->
+  <!-- telemirror reparented into the shell: sidebar pane (#tmSidebar) +
+       content pane (#tmPane) above, inside .app. No standalone modal. -->
 
   <!-- ===== SAVED RESOLVERS POPUP ===== -->
   <div class="modal-overlay" id="savedResolversModal">
@@ -328,11 +430,10 @@
            from Settings → Show startup scan prompt. -->
       <div style="display:flex;justify-content:flex-end;margin-bottom:10px">
         <button class="btn btn-flat" id="savedResolversNever" onclick="savedResolversNever()"
-          data-i18n="dont_show_again" style="font-size:11px;padding:4px 10px;color:var(--text-dim)">Don't show
+          data-i18n="dont_show_again" style="font-size:13px;font-weight:700;padding:4px 10px;color:var(--text)">Don't show
           again</button>
       </div>
       <div class="modal-actions">
-        <button class="btn btn-flat" onclick="savedResolversSkip()" data-i18n="saved_resolvers_skip">Skip</button>
         <button class="btn btn-outline" id="savedResolversRescanBtn" onclick="savedResolversRescan()"
           data-i18n="saved_resolvers_rescan">Scan
           Again</button>
@@ -347,6 +448,17 @@
   <div class="modal-overlay" id="settingsModal">
     <div class="modal">
       <h2><span data-icon="settings"></span> <span data-i18n="settings">Settings</span></h2>
+
+      <!-- Profiles surfaced at the top of Settings so it's clear they live
+           here; opens the existing Profiles manager. -->
+      <button type="button" class="settings-profiles-row" onclick="closeSettings();openProfiles()">
+        <span class="settings-profiles-ic" data-icon="profileToggle"></span>
+        <span class="settings-profiles-text">
+          <span class="settings-profiles-title" data-i18n="profiles">Configs</span>
+          <span class="settings-profiles-sub" id="settingsProfilesSub"></span>
+        </span>
+        <span class="settings-profiles-chev" data-icon="chevronRight"></span>
+      </button>
 
       <!-- Tab strip. Three static tabs keep the modal short on mobile. -->
       <div class="settings-tabs" role="tablist">
@@ -366,12 +478,14 @@
       <div class="settings-panel" id="settingsPanelDisplay">
         <div class="font-size-row">
           <label for="fontSizeSlider" data-i18n="font_size">Font Size</label>
-          <input type="range" id="fontSizeSlider" min="11" max="22" value="14" oninput="previewFontSize(this.value)">
+          <input type="range" id="fontSizeSlider" min="11" max="22" value="14" oninput="previewFontSize(this.value)"
+            onchange="autoSaveSettings()">
           <span class="font-size-val" id="fontSizeVal">14</span>
         </div>
         <div class="form-group">
           <span class="group-label" data-i18n="theme">Theme</span>
           <div class="theme-row">
+            <button class="theme-btn" id="themeSystem" onclick="setTheme('system')" data-i18n="theme_system">System</button>
             <button class="theme-btn" id="themeDark" onclick="setTheme('dark')" data-i18n="theme_dark">Dark</button>
             <button class="theme-btn" id="themeLight" onclick="setTheme('light')" data-i18n="theme_light">Light</button>
           </div>
@@ -441,7 +555,7 @@
             <label for="cfgQueryMode" data-i18n="query_mode">Query Mode</label>
             <span class="help-toggle" onclick="toggleHelp('helpQueryMode')" title="?" data-icon="info"></span>
           </div>
-          <select id="cfgQueryMode">
+          <select id="cfgQueryMode" onchange="autoSaveSettings()">
             <option value="single" data-i18n="query_mode_single">Single label (base32)</option>
             <option value="double" data-i18n="query_mode_double">Multi-label (hex)</option>
           </select>
@@ -452,7 +566,7 @@
             <label for="cfgRateLimit" data-i18n="rate_limit">Concurrent block fetches</label>
             <span class="help-toggle" onclick="toggleHelp('helpRateLimit')" title="?" data-icon="info"></span>
           </div>
-          <input type="number" id="cfgRateLimit" value="10" min="1" step="1">
+          <input type="number" id="cfgRateLimit" value="10" min="1" step="1" onchange="autoSaveSettings()">
           <div class="help-text" id="helpRateLimit" style="display:none" data-i18n="rate_limit_help"></div>
         </div>
         <div class="form-group">
@@ -460,7 +574,7 @@
             <label for="cfgScatter" data-i18n="scatter">Parallel resolvers per block</label>
             <span class="help-toggle" onclick="toggleHelp('helpScatter')" title="?" data-icon="info"></span>
           </div>
-          <input type="number" id="cfgScatter" value="6" min="1" max="10">
+          <input type="number" id="cfgScatter" value="6" min="1" max="10" onchange="autoSaveSettings()">
           <div class="help-text" id="helpScatter" style="display:none" data-i18n="scatter_help"></div>
         </div>
         <div class="form-group">
@@ -468,7 +582,7 @@
             <label for="cfgTimeout" data-i18n="dns_timeout">DNS Query Timeout (seconds)</label>
             <span class="help-toggle" onclick="toggleHelp('helpTimeout')" title="?" data-icon="info"></span>
           </div>
-          <input type="number" id="cfgTimeout" value="10" min="1" max="60" step="1">
+          <input type="number" id="cfgTimeout" value="10" min="1" max="60" step="1" onchange="autoSaveSettings()">
           <div class="help-text" id="helpTimeout" style="display:none" data-i18n="dns_timeout_help"></div>
         </div>
         <div class="form-group">
@@ -494,7 +608,7 @@
         </div>
         <div class="form-group">
           <div class="row">
-            <input type="checkbox" id="cfgResolverCacheShare">
+            <input type="checkbox" id="cfgResolverCacheShare" onchange="autoSaveSettings()">
             <label for="cfgResolverCacheShare" data-i18n="resolver_cache_share">Shared resolver cache</label>
             <span class="help-toggle" onclick="toggleHelp('helpResolverCacheShare')" title="?" data-icon="info"></span>
           </div>
@@ -504,7 +618,7 @@
         </div>
         <div class="form-group">
           <div class="row">
-            <input type="checkbox" id="cfgDebug">
+            <input type="checkbox" id="cfgDebug" onchange="autoSaveSettings()">
             <label for="cfgDebug" data-i18n="debug_mode">Debug mode</label>
           </div>
         </div>
@@ -543,7 +657,7 @@
           <div style="font-size:15px;font-weight:600;color:var(--text);margin-bottom:10px" data-i18n="backup_export">Download Backup</div>
           <div style="display:flex;flex-direction:column;gap:8px">
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
-              <input type="checkbox" id="bkProfiles" checked> <span data-i18n="backup_profiles">Profiles &amp; Settings</span>
+              <input type="checkbox" id="bkProfiles" checked> <span data-i18n="backup_profiles">Configs &amp; Settings</span>
             </label>
             <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text)">
               <input type="checkbox" id="bkChat" checked> <span data-i18n="backup_chat">Chat Identity &amp; Messages</span>
@@ -581,11 +695,11 @@
 
       <!-- ===== About tab ===== -->
       <div class="settings-panel" id="settingsPanelAbout" style="display:none">
-        <div class="settings-info-row" style="margin-top:0">
+        <div class="settings-info-row settings-version-row" style="margin-top:0">
           <span data-i18n="version">Version</span>
           <span id="appVersionEl">-</span>
         </div>
-        <div class="settings-info-row">
+        <div class="settings-info-row settings-version-row">
           <span data-i18n="latest_version">Latest Version</span>
           <span id="latestVersionEl">-</span>
         </div>
@@ -596,24 +710,28 @@
             data-i18n="check_github" style="flex:1">Check on GitHub</button>
         </div>
         <div class="settings-info-row" style="display:flex;gap:6px;margin-top:14px">
-          <button class="btn btn-flat btn-sm" onclick="closeSettings();openSource()" data-i18n="source_code"
+          <button class="btn btn-flat btn-sm" onclick="openSource()" data-i18n="source_code"
             style="flex:1">Source code</button>
-          <button class="btn btn-flat btn-sm" onclick="closeSettings();openPrivacy()" data-i18n="privacy_policy"
+          <button class="btn btn-flat btn-sm" onclick="openPrivacy()" data-i18n="privacy_policy"
             style="flex:1">Privacy</button>
+        </div>
+        <div class="settings-info-row" style="display:flex;gap:6px;margin-top:8px">
+          <button class="btn btn-flat btn-sm" onclick="openDonate()" data-i18n="donate"
+            style="flex:1">Donate</button>
+          <a class="btn btn-flat btn-sm ext-link" href="https://t.me/networkti" target="_blank" rel="noopener"
+            style="flex:1;text-align:center;text-decoration:none"><span data-i18n="telegram">Telegram</span><span class="ext-arrow" data-icon="external" aria-hidden="true"></span></a>
         </div>
       </div>
 
-      <div class="modal-actions" id="settingsActions">
-        <button class="btn btn-flat" onclick="closeSettings()" data-i18n="cancel">Cancel</button>
-        <button class="btn btn-primary" onclick="saveSettings()" data-i18n="save">Save</button>
-      </div>
+      <!-- No Save/Cancel: every field auto-saves on change. -->
+      <div id="settingsActions" hidden></div>
     </div>
   </div>
 
   <!-- ===== PROFILES MODAL ===== -->
   <div class="modal-overlay" id="profilesModal">
     <div class="modal">
-      <h2 data-i18n="profiles">Profiles</h2>
+      <h2 data-i18n="profiles">Configs</h2>
       <!-- Import URI at top -->
       <div class="import-section"
         style="margin-top:0;margin-bottom:14px;padding:10px 12px;background:var(--bg);border-radius:8px;border:1px solid var(--border)">
@@ -627,11 +745,15 @@
         </div>
         <div id="importError" style="color:var(--error);font-size:12px;display:none;margin-top:6px"></div>
         <div id="importSuccess" style="color:var(--success);font-size:12px;display:none;margin-top:6px"></div>
-        <button class="btn btn-outline btn-sm" style="margin-top:8px" onclick="toggleDefaultConfigs()"><img
-            class="lion-sun-icon" src="/static/lion-sun.svg" alt=""
-            style="height:14px;vertical-align:middle;margin-right:2px"> <span
-            data-i18n="default_configs">Default configs</span></button>
-        <div id="defaultConfigsList" style="display:none;margin-top:8px"></div>
+        <button type="button" class="dc-toggle" id="dcToggle" onclick="toggleDefaultConfigs()" aria-expanded="false">
+          <img class="lion-sun-icon dc-toggle-emblem" src="/static/lion-sun.svg" alt="">
+          <span class="dc-toggle-text">
+            <span class="dc-toggle-title" data-i18n="default_configs">Default configs</span>
+            <span class="dc-toggle-sub" data-i18n="default_configs_hint">Ready-to-use servers — add one in a tap</span>
+          </span>
+          <span class="dc-toggle-chev" data-icon="chevronDown"></span>
+        </button>
+        <div id="defaultConfigsList" class="dc-list" style="display:none"></div>
       </div>
       <div id="profilesListEl"></div>
       <div class="modal-actions">
@@ -684,7 +806,7 @@
   <!-- ===== PROFILE EDITOR MODAL ===== -->
   <div class="modal-overlay" id="profileEditorModal">
     <div class="modal">
-      <h2 id="profileEditorTitle" data-i18n="new_profile">New Profile</h2>
+      <h2 id="profileEditorTitle" data-i18n="new_profile">New Config</h2>
       <div id="peWarning" class="tg-warning"></div>
       <div class="form-group"><label for="peNick" data-i18n="nickname">Nickname</label><input id="peNick" maxlength="32"
           placeholder="My Server" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
@@ -693,7 +815,7 @@
           autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
       </div>
       <div class="form-group"><label for="peKey" data-i18n="passphrase">Passphrase</label><input type="password" id="peKey"
-          placeholder="..."></div>
+          placeholder="..." autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false"></div>
       <div class="form-group"><label for="peServerKey" data-i18n="server_key">Server public key (sk)</label><input id="peServerKey"
           placeholder="server public key (sk= from config)" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
           oninput="updateServerKeyHint()" style="direction:ltr;text-align:left">
@@ -842,15 +964,15 @@
 
       <!-- Collapsible help -->
       <div style="margin-bottom:14px">
-        <p id="scannerAboutShort" style="font-size:13px;color:var(--text-dim);line-height:1.5;margin:0">
+        <p id="scannerAboutShort" dir="auto" style="font-size:13px;color:var(--text-dim);line-height:1.5;margin:0">
           <span data-i18n="scanner_about_short">Scan IP ranges to find DNS resolvers that work with your server.</span>
           <a href="#" id="scannerReadMoreLink"
             onclick="event.preventDefault();document.getElementById('scannerAboutFull').style.display='';this.style.display='none'"
             style="color:var(--accent);text-decoration:none" data-i18n="scanner_read_more">Read more...</a>
         </p>
-        <p id="scannerAboutFull" style="display:none;font-size:12px;color:var(--text-dim);line-height:1.6;margin:0">
+        <p id="scannerAboutFull" dir="auto" style="display:none;font-size:12px;color:var(--text-dim);line-height:1.6;margin:0">
           <span data-i18n="scanner_about">This tool scans IP ranges to find DNS servers that can reach your thefeed
-            server. Enter CIDRs (like 192.168.1.0/24) or individual IPs, pick a profile, and hit Scan. The app sends a
+            server. Enter CIDRs (like 192.168.1.0/24) or individual IPs, pick a config, and hit Scan. The app sends a
             small test query to each IP. If the IP answers correctly, it is a working resolver. You can also turn on
             "Expand /24" — when a working IP is found, the app will automatically check nearby IPs in the same network.
             Results show response time so you can pick the fastest ones. You can pause, resume, or stop the scan at any
@@ -881,7 +1003,7 @@
           </div>
         </div>
         <div class="form-group">
-          <label for="scanProfile" data-i18n="scanner_profile">Profile</label>
+          <label for="scanProfile" data-i18n="scanner_profile">Config</label>
           <select id="scanProfile" style="width:100%"></select>
         </div>
         <details style="margin-bottom:12px">
@@ -967,8 +1089,6 @@
           <button class="btn btn-flat" style="flex:1;padding:8px 0;font-size:13px" onclick="copySelectedScanResults()">
             <span data-i18n="copy">Copy</span> <span id="scanCopyCount" style="opacity:.7"></span>
           </button>
-          <button class="btn btn-flat" style="flex:1;padding:8px 0;font-size:13px" onclick="copyAllScanResults()"
-            data-i18n="scanner_copy_all">Copy All</button>
           <button class="btn btn-outline" style="flex:1;padding:8px 0;font-size:13px;font-weight:600"
             onclick="resetScannerUI()"><span data-icon="refresh"></span> <span data-i18n="scanner_new_scan">New Scan</span></button>
         </div>
@@ -1010,6 +1130,8 @@
   <!-- BEGIN chat -->
   <script src="/static/js/chat.js"></script>
   <!-- END chat -->
+  <!-- Nav layer loads last so every open*/close* it wraps already exists. -->
+  <script src="/static/js/nav.js"></script>
 </body>
 
 </html>

@@ -29,6 +29,7 @@ type Media struct {
 	Type     string   `json:"type"` // photo | video | voice | audio | document | sticker | poll
 	URL      string   `json:"url,omitempty"`
 	Thumb    string   `json:"thumb,omitempty"`
+	Ratio    float64  `json:"ratio,omitempty"` // width/height; lets the UI reserve the exact box (no scroll jump)
 	Duration string   `json:"duration,omitempty"`
 	Title    string   `json:"title,omitempty"`    // file name / poll question / audio title
 	Subtitle string   `json:"subtitle,omitempty"`

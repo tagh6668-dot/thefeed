@@ -94,16 +94,26 @@ function formatTitleWithFlag(s) {
 }
 function esc(s) { var d = document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML }
 function escAttr(s) { return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;') }
+// jsStr: safe to drop into a single-quoted JS string inside a double-quoted HTML
+// attribute — onclick="fn('VALUE')". esc()/escAttr() do NOT make a value
+// JS-safe: escAttr turns ' into &#39;, which the HTML parser decodes back to '
+// BEFORE the JS runs, re-opening the string. Backslash-escape ' (survives HTML
+// decode) and neutralise " so it can't close the attribute. Use for any
+// user/import-controlled value placed in an inline handler (resolver addrs,
+// list/config names, etc.).
+function jsStr(s) {
+  return esc(String(s == null ? '' : s)).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
 function linkify(raw) {
-  // Accepts raw (unescaped) text. Handles [label](url) markdown links and
-  // plain URLs. Escapes HTML in non-URL segments so & in URLs is preserved.
+  // Accepts raw (unescaped) text. Handles [label](url) markdown links,
+  // plain URLs, and @username mentions.
   var result = '', last = 0, m;
-  var re = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"']+)/g;
+  var re = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>"']+)|@([A-Za-z_][A-Za-z0-9_]{3,31})/g;
   while ((m = re.exec(raw)) !== null) {
     result += esc(raw.slice(last, m.index));
     if (m[2]) {
       result += '<a href="' + escAttr(m[2]) + '" target="_blank" rel="noopener" dir="ltr">' + esc(m[1]) + '</a>';
-    } else {
+    } else if (m[3]) {
       var url = m[3], trail = '';
       while (url.length > 1) {
         var ch = url[url.length - 1];
@@ -114,11 +124,21 @@ function linkify(raw) {
         } else { break; }
       }
       result += '<a href="' + escAttr(url) + '" target="_blank" rel="noopener" dir="ltr">' + esc(url) + '</a>' + esc(trail);
+    } else if (m[4]) {
+      result += '<a class="mention" data-mention="' + escAttr(m[4]) + '" href="https://t.me/' + escAttr(m[4]) + '">@' + esc(m[4]) + '</a>';
     }
     last = m.index + m[0].length;
   }
   result += esc(raw.slice(last));
   return result;
+}
+function findChannelByUsername(username) {
+  var clean = username.replace(/^@/, '').toLowerCase();
+  for (var i = 0; i < channels.length; i++) {
+    var n = (channels[i].Name || channels[i].name || '').replace(/^@/, '').toLowerCase();
+    if (n === clean) return i + 1;
+  }
+  return 0;
 }
 function scrollToMsg(id) {
   var els = document.querySelectorAll('.msg');

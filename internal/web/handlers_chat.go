@@ -28,11 +28,19 @@ const (
 	chatDirName = "chat"
 	// chatPollInterval is the idle background poll cadence (no UI watching).
 	chatPollInterval = 90 * time.Second
-	// chatPollActiveInterval is the faster cadence used while a UI is open, so
-	// incoming messages surface quickly even when the user is on the feed and
-	// the messenger view is closed.
-	chatPollActiveInterval = 30 * time.Second
-	chatPollFirstWait      = 45 * time.Second
+	// chatPollActiveInterval is the cadence used while a UI is open: the backend
+	// is the SOLE timer-based poller (the frontend never polls on a timer — only
+	// when the user taps refresh), so query volume is independent of how many
+	// tabs/clients are connected.
+	chatPollActiveInterval = 20 * time.Second
+	// chatPollFastInterval tightens the cadence to 10s right after activity (a
+	// message sent or received within chatActivityWindow), for a snappy
+	// back-and-forth, then relaxes back to chatPollActiveInterval.
+	chatPollFastInterval = 10 * time.Second
+	// chatActivityWindow: a send/receive within this window counts as "active"
+	// and selects chatPollFastInterval.
+	chatActivityWindow = 60 * time.Second
+	chatPollFirstWait  = 45 * time.Second
 	// chatEnableRegisterAttempts: register+poll retries on enable (background loop).
 	chatEnableRegisterAttempts = 20
 	// chatAvailCacheTTL: report a confirmed-reachable server available without
@@ -200,6 +208,7 @@ type perServerChat struct {
 	backoffUntil time.Time         // skip polling until this time (guarded by chatHub.mu)
 	lastReason   string            // i18n key of the last probe failure (guarded by chatHub.mu)
 	lastOKAt     time.Time         // last confirmed-reachable time; positive availability cache (guarded by chatHub.mu)
+	lastLimits   map[string]any    // advertised limits from the last good probe, so the cached path can still report them (guarded by chatHub.mu)
 	scorer       *chatBudgetScorer // adaptive cell-budget selection (guarded by chatHub.mu)
 }
 
@@ -225,6 +234,13 @@ type chatHub struct {
 	// lastResolvers is the resolver list last pushed to the chat fetchers; chat
 	// resolvers track the feed's live healthy pool, re-synced only on change.
 	lastResolvers []string
+	// lastActivity stamps the most recent send or received message. The poll loop
+	// tightens to chatPollFastInterval while this is within chatActivityWindow.
+	lastActivity time.Time
+	// pollKick wakes runPollLoop out of its sleep: send true to poll immediately
+	// (a UI client just connected), false to only reschedule + resync the
+	// frontend countdown (a manual refresh already polled).
+	pollKick chan bool
 	// budget is the per-cell op-plaintext budget B applied to every server's
 	// client (RFC §8.2): the size/count trade-off the user picks via a preset.
 	budget int
@@ -244,6 +260,7 @@ func newChatHub(s *Server, dataDir string) *chatHub {
 		contacts:   make(map[string]string),
 		threads:    make(map[string]*chatThreadFile),
 		enabled:    make(map[string]bool),
+		pollKick:   make(chan bool, 1),
 		budget:     protocol.ChatCellPlainSize, // Standard preset (fixed-mode fallback)
 		budgetMode: chatBudgetModeAuto,         // default: cost-scored adaptive pick
 	}
@@ -553,24 +570,77 @@ func (h *chatHub) runPollLoop(ctx context.Context) {
 	timer := time.NewTimer(chatPollFirstWait)
 	defer timer.Stop()
 	for {
+		// poll governs whether this wake actually queries the servers. A timer
+		// tick always polls; a kick polls only when it asked to (UI connect).
+		poll := true
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case poll = <-h.pollKick:
+			// Drain the fired timer so the Reset below is the only pending wake.
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 		}
-		if n := h.pollAllServers(ctx, nil); n > 0 {
-			h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
-			// Native notifier (mobile): the web UI handles foreground alerts, but
-			// a backgrounded app has its WebView suspended — let the platform post
-			// a system notification. The handler itself decides foreground gating.
-			h.s.notifyNewMessages(n)
+		if poll {
+			if n := h.pollAllServers(ctx, nil); n > 0 {
+				h.markActivity()
+				h.s.broadcastChat(map[string]any{"type": "inbox", "got": n})
+				// Native notifier (mobile): the web UI handles foreground alerts,
+				// but a backgrounded app has its WebView suspended — let the
+				// platform post a system notification. The handler gates foreground.
+				h.s.notifyNewMessages(n)
+			}
 		}
-		interval := chatPollInterval
-		if h.s.hasUIClients() {
-			interval = chatPollActiveInterval
-		}
+		interval := h.pollInterval()
+		h.broadcastNextPoll(interval) // keep the frontend countdown in sync
 		timer.Reset(interval)
 	}
+}
+
+// markActivity stamps a send or received message, tightening the poll loop to
+// chatPollFastInterval for chatActivityWindow.
+func (h *chatHub) markActivity() {
+	h.mu.Lock()
+	h.lastActivity = time.Now()
+	h.mu.Unlock()
+}
+
+// pollInterval picks the loop's next sleep: the slow background cadence with no
+// UI watching, else the fast cadence right after activity, else the active
+// cadence. The backend is the only timer-based poller, so this is the single
+// knob governing chat-server query volume.
+func (h *chatHub) pollInterval() time.Duration {
+	if !h.s.hasUIClients() {
+		return chatPollInterval
+	}
+	h.mu.Lock()
+	active := !h.lastActivity.IsZero() && time.Since(h.lastActivity) < chatActivityWindow
+	h.mu.Unlock()
+	if active {
+		return chatPollFastInterval
+	}
+	return chatPollActiveInterval
+}
+
+// kickPoll wakes runPollLoop. pollNow=true polls immediately (a UI just
+// connected); pollNow=false only reschedules + resyncs the countdown (a manual
+// refresh already polled). Non-blocking: a pending kick is enough.
+func (h *chatHub) kickPoll(pollNow bool) {
+	select {
+	case h.pollKick <- pollNow:
+	default:
+	}
+}
+
+// broadcastNextPoll tells connected UIs when the next background poll lands, so
+// the frontend countdown ring reflects the backend's actual schedule.
+func (h *chatHub) broadcastNextPoll(d time.Duration) {
+	h.s.broadcastChat(map[string]any{"type": "nextpoll", "ms": d.Milliseconds()})
 }
 
 // backedOff reports whether ps is currently in its no-chat/transient backoff
@@ -625,6 +695,52 @@ func (h *chatHub) cachedAvailable(ps *perServerChat, now time.Time) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return !ps.lastOKAt.IsZero() && now.Sub(ps.lastOKAt) < chatAvailCacheTTL
+}
+
+// chatAdvEntry caches a config's chat-advertised bit read from VERIFIED feed
+// metadata, with the time it was read. See Server.chatAdv.
+type chatAdvEntry struct {
+	advertised bool
+	at         time.Time
+}
+
+// chatAdvTTL: how long a verified metadata chat-bit is trusted before a re-read
+// is wanted. Matches the verified-disabled re-check cadence.
+const chatAdvTTL = 30 * time.Minute
+
+// recordChatAdv stores a config's chat-advertised bit, but ONLY when it came
+// from signature-verified metadata — an unverified bit is never authoritative
+// and must never drive a "no chat" verdict. Called from the feed AND the chat
+// fetchers' metadata callbacks, so the feed populates it for free.
+func (s *Server) recordChatAdv(serverKey string, advertised, verified bool) {
+	if serverKey == "" || !verified {
+		return
+	}
+	s.chatAdvMu.Lock()
+	s.chatAdv[serverKey] = chatAdvEntry{advertised: advertised, at: time.Now()}
+	s.chatAdvMu.Unlock()
+}
+
+// chatAdvVerified returns the last verified chat-advertised bit for serverKey and
+// whether it is still fresh (within chatAdvTTL).
+func (s *Server) chatAdvVerified(serverKey string) (advertised, fresh bool) {
+	s.chatAdvMu.Lock()
+	defer s.chatAdvMu.Unlock()
+	e, ok := s.chatAdv[serverKey]
+	if !ok || time.Since(e.at) >= chatAdvTTL {
+		return false, false
+	}
+	return e.advertised, true
+}
+
+// everConfirmed reports whether ps was EVER verified to have chat this process
+// (lastOKAt is set by markReachable and never cleared). Once true, the cheap
+// UNVERIFIED block-0 pre-check must not be trusted to disable it — only the
+// authoritative, signature-verified EnsureInfo may. See probeOneServer.
+func (h *chatHub) everConfirmed(ps *perServerChat) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !ps.lastOKAt.IsZero()
 }
 
 // shouldSkipProbe reports whether the availability handler should skip a live
@@ -929,11 +1045,28 @@ func (s *Server) handleChatInfo(w http.ResponseWriter, r *http.Request) {
 			enabledCount++
 		}
 	}
+	// Disk-backed server list (no DNS probe): lets the UI render the server
+	// picker + the add-contact field instantly on open — with each row's live
+	// reachability filled in later by /api/chat/availability — instead of a
+	// blanket "checking…" until the slow probe returns.
+	srvList := make([]map[string]any, 0, len(h.servers))
+	for key, ps := range h.servers {
+		srvList = append(srvList, map[string]any{
+			"key":     key,
+			"name":    ps.name,
+			"domain":  ps.domain,
+			"enabled": h.enabled[key],
+		})
+	}
+	sort.Slice(srvList, func(i, j int) bool {
+		return srvList[i]["key"].(string) < srvList[j]["key"].(string)
+	})
 	writeJSON(w, map[string]any{
 		"exists":      true,
 		"address":     client.ChatAddressString(h.identity.Addr),
 		"backedUp":    h.backedUp,
 		"serverCount": len(h.servers),
+		"servers":     srvList,
 		// anyEnabled / enabledCount are the server-side source of truth for "has
 		// the user set up a chat server" — the client uses them to drive first-run
 		// guidance and to render the header instantly on open (no "checking…"
@@ -974,15 +1107,31 @@ func (h *chatHub) probeOneServer(ctx context.Context, ps *perServerChat, enabled
 	res := chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled}
 	cctx, c := context.WithTimeout(ctx, 45*time.Second)
 	defer c()
-	// Cheap pre-check: the signed feed metadata's ChatAvailable bit (one query)
-	// tells us a server has no messenger, so we skip the ChatInfo probe whose
-	// retries-on-absence are the slow path. Only an explicit "no chat"
-	// short-circuits; unknown/unreachable falls through to the real probe.
-	if advertises, known := ps.client.ServerAdvertisesChat(cctx); known && !advertises {
+	// Chat-availability gate, drawn from VERIFIED metadata only. The feed's
+	// regular metadata fetches cache each config's signed ChatAvailable bit
+	// (s.chatAdv); a "no chat" verdict is therefore always signature-backed —
+	// never the old unverified raw block-0 read that let fake/transient data
+	// silence a working server.
+	advertised, fresh := h.s.chatAdvVerified(ps.serverKey)
+	if !fresh && !h.everConfirmed(ps) {
+		// Never confirmed and no fresh verified bit: fetch+verify the FULL metadata
+		// now so we can authoritatively fast-fail a chatless server (skipping
+		// EnsureInfo's slow ChatInfo-absence retries). The fetch caches the bit via
+		// the metadata callback. A confirmed server skips this — EnsureInfo's cache
+		// already confirms it, and a verified "off" still arrives via the feed.
+		if _, err := ps.f.FetchMetadata(cctx); err == nil {
+			advertised, fresh = h.s.chatAdvVerified(ps.serverKey)
+		}
+	}
+	if fresh && !advertised {
+		// VERIFIED: this server advertises no messenger → disabled; re-check after
+		// the 30-min backoff (or sooner when the feed re-reads its metadata).
 		res.Reason = "chat_err_disabled"
 		h.setProbeFailure(ps, time.Now().Add(chatServerBackoff(client.ErrChatDisabled)), res.Reason)
 		return res, nil
 	}
+	// Advertised, or we couldn't get a verified bit (old/unsigned server) → the
+	// authoritative, signature-verified ChatInfo probe decides (keys + limits).
 	info, err := ps.client.EnsureInfo(cctx)
 	if err != nil {
 		res.Reason = chatStatusKey(err)
@@ -991,7 +1140,14 @@ func (h *chatHub) probeOneServer(ctx context.Context, ps *perServerChat, enabled
 	}
 	res.Available = true
 	h.markReachable(ps)
-	return res, chatLimitsMap(info.Limits)
+	lim := chatLimitsMap(info.Limits)
+	// Cache the advertised limits so the positive-cache path (which skips the
+	// probe) can still report them — otherwise the send-quota ring vanishes
+	// whenever availability is served from cache.
+	h.mu.Lock()
+	ps.lastLimits = lim
+	h.mu.Unlock()
+	return res, lim
 }
 
 // handleChatAvailability probes EVERY chat server (each profile that pins a
@@ -1041,6 +1197,16 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 		// Positive cache: skip the probe for a recently-reachable server (unless forced).
 		if !forced && h.cachedAvailable(ps, now) {
 			out[i] = chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: enabled, Available: true, Cached: true}
+			h.mu.Lock()
+			cachedLim := ps.lastLimits
+			h.mu.Unlock()
+			// `limits` is shared with the probe goroutines below — guard it with
+			// the SAME local mutex they use (not h.mu) to avoid a data race.
+			mu.Lock()
+			if limits == nil && cachedLim != nil {
+				limits = cachedLim
+			}
+			mu.Unlock()
 			continue
 		}
 		// A DISABLED server that recently failed (old/incompatible/dead) is
@@ -1091,34 +1257,6 @@ func (s *Server) handleChatAvailability(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, resp)
 }
 
-// handleChatServers lists every chat server WITHOUT probing — instant, so the
-// UI renders the server sheet immediately and then probes each row via
-// /api/chat/probe. Cached state (recently reachable, or a recent failure
-// reason) is included so re-opening the sheet doesn't re-probe.
-func (s *Server) handleChatServers(w http.ResponseWriter, r *http.Request) {
-	h := s.chat
-	h.mu.Lock()
-	hasID := h.identity != nil
-	h.mu.Unlock()
-	if !hasID {
-		writeJSON(w, map[string]any{"needsCreate": true})
-		return
-	}
-	servers := h.snapshotServers()
-	now := time.Now()
-	out := make([]chatServerResult, len(servers))
-	for i, ps := range servers {
-		row := chatServerResult{Key: ps.serverKey, Name: ps.name, Domain: ps.domain, Enabled: h.serverEnabled(ps.serverKey)}
-		if h.cachedAvailable(ps, now) {
-			row.Available, row.Cached = true, true
-		} else if backed, reason := h.probeBackoff(ps, now); backed {
-			row.Reason = reason
-		}
-		out[i] = row
-	}
-	writeJSON(w, map[string]any{"servers": out})
-}
-
 // handleChatProbeServer probes ONE server (?server=KEY). The UI fires these in
 // parallel — one per row — can cancel any individually, and updates each row as
 // it resolves, so a slow/dead server never blocks the others. Served from the
@@ -1148,9 +1286,15 @@ func (s *Server) handleChatProbeServer(w http.ResponseWriter, r *http.Request) {
 	enabled := h.serverEnabled(key)
 	now := time.Now()
 	if r.URL.Query().Get("retry") != "1" && h.cachedAvailable(ps, now) {
-		writeJSON(w, map[string]any{"server": chatServerResult{
+		resp := map[string]any{"server": chatServerResult{
 			Key: key, Name: ps.name, Domain: ps.domain, Enabled: enabled, Available: true, Cached: true,
-		}})
+		}}
+		h.mu.Lock()
+		if ps.lastLimits != nil {
+			resp["limits"] = ps.lastLimits
+		}
+		h.mu.Unlock()
+		writeJSON(w, resp)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 50*time.Second)
@@ -1295,6 +1439,11 @@ func (s *Server) handleChatEnable(w http.ResponseWriter, r *http.Request) {
 					h.setBackoff(ps, time.Now().Add(chatServerBackoff(lastErr)))
 				}()
 			}
+		}
+		if req.On {
+			// A server just came on: reschedule the loop so it announces the
+			// next-poll time over SSE and the frontend countdown populates at once.
+			h.kickPoll(false)
 		}
 		writeJSON(w, out)
 
@@ -1768,6 +1917,10 @@ func (s *Server) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// Send succeeded → server is reachable; clear poll backoff so the next
 	// background poll fetches replies immediately instead of waiting.
 	h.setBackoff(ps, time.Time{})
+	// A send is activity: tighten the poll loop to the fast cadence for snappy
+	// replies, and resync the frontend countdown to the new (shorter) schedule.
+	h.markActivity()
+	h.kickPoll(false)
 
 	// Re-fetch the thread under the lock: a delete may have removed the
 	// pre-send pointer during the (multi-minute) upload, and reusing it would
@@ -1891,6 +2044,12 @@ func (s *Server) handleChatPoll(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	n := h.pollAllServers(ctx, progress)
+	if n > 0 {
+		h.markActivity()
+	}
+	// We just polled — reset the background loop's timer so it doesn't poll again
+	// right behind us, and resync the frontend countdown to the fresh schedule.
+	h.kickPoll(false)
 	writeJSON(w, map[string]any{"ok": true, "got": n})
 }
 

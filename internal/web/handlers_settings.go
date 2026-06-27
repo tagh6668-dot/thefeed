@@ -95,7 +95,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if req.Debug != nil {
 			pl.Debug = *req.Debug
 		}
-		if req.Theme != nil && (*req.Theme == "dark" || *req.Theme == "light") {
+		if req.Theme != nil && (*req.Theme == "dark" || *req.Theme == "light" || *req.Theme == "system") {
 			pl.Theme = *req.Theme
 		}
 		if req.Lang != nil && (*req.Lang == "fa" || *req.Lang == "en") {

@@ -1,5 +1,8 @@
     /* ===== SETTINGS SECTIONS ===== */
-    .settings-section {
+    /* :not(:root) so this component class never matches the <html> state class
+       of the same name (html.settings-section) — otherwise the root element
+       inherits this spacing and shows an empty bar above the whole app. */
+    .settings-section:not(:root) {
       margin-top: 14px;
       padding-top: 12px;
       border-top: 1px solid var(--border)
@@ -795,6 +798,12 @@
 
     .btn-primary:hover {
       background: var(--accent-hover)
+    }
+
+    .btn:disabled {
+      opacity: .45;
+      cursor: default;
+      pointer-events: none
     }
 
     .btn-danger {

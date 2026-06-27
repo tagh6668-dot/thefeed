@@ -54,6 +54,15 @@ var defaultProfiles = []defaultProfile{
 		Key:       b64("SXJhbmVBemFk"),
 		ServerKey: "P13ug6RkRVySwdPJY-ba3JYms7HoeWj49YkTLgANG8w",
 	},
+	{
+		Nickname:  "پیامرسان | messenger",
+		Domain:    b64("Y2h0LnNhcnRvLnNicw=="),
+		Key:       b64("c2FydG8="),
+		ServerKey: "nifmrv8q9YC5iKQl-dc2wnsymscLbqpykNaIdh2PGMI",
+		ExtraDomains: []string{
+			b64("Y2h0LnNhcnRvLndlYnNpdGU="),
+		},
+	},
 }
 
 // b64 decodes a base64 literal; returns "" on malformed input.

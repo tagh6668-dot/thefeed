@@ -135,6 +135,19 @@ async function toggleScanPause() {
   } catch (e) { }
 }
 
+// scanActive drives the "a scan is running" indicators (resolver nav tab +
+// the Find-more row in the resolver sidebar) so the user can tell something is
+// happening even from another section — like the old spinning magnifier.
+window.scanActive = false;
+function updateScanIndicators() {
+  var nav = document.getElementById('navTabResolver');
+  if (nav) nav.classList.toggle('scanning', !!window.scanActive);
+  // The Find-more row is re-rendered by renderResolverSidebar (which reads
+  // window.scanActive), but toggle the live one too for instant feedback.
+  var find = document.querySelector('#resolverSidebar .rs-item-find');
+  if (find) find.classList.toggle('rs-scanning', !!window.scanActive);
+}
+
 function showScanRunning() {
   document.getElementById('scannerConfig').style.display = 'none';
   document.getElementById('scannerProgressSection').style.display = '';
@@ -144,6 +157,7 @@ function showScanRunning() {
   document.getElementById('scanPauseBtn').style.display = '';
   document.getElementById('scannerApplySection').style.display = 'none';
   document.getElementById('scannerIconBtn').classList.add('scanning');
+  window.scanActive = true; updateScanIndicators();
 }
 
 function showScanIdle() {
@@ -156,6 +170,7 @@ function showScanIdle() {
   document.getElementById('scanStopBtn').style.display = 'none';
   document.getElementById('scanPauseBtn').style.display = 'none';
   document.getElementById('scannerIconBtn').classList.remove('scanning');
+  window.scanActive = false; updateScanIndicators();
 }
 
 function resetScannerUI() {
@@ -172,6 +187,7 @@ function showScanDone(progress) {
   document.getElementById('scanStopBtn').style.display = 'none';
   document.getElementById('scanPauseBtn').style.display = 'none';
   document.getElementById('scannerIconBtn').classList.remove('scanning');
+  window.scanActive = false; updateScanIndicators();
   // Always show the apply section (it has the New Scan button).
   document.getElementById('scannerApplySection').style.display = '';
   if (progress && progress.results && progress.results.length > 0) {

@@ -154,6 +154,15 @@ document.addEventListener('visibilitychange', function () {
 });
 function filterChannels() {
   var q = document.getElementById('channelSearch').value.toLowerCase();
+  // In the Mirror folder the same search box filters the telemirror list.
+  if (document.documentElement.classList.contains('tm-open')) {
+    document.querySelectorAll('#tmChannelsList .tm-channel-item').forEach(function (el) {
+      if (el.classList.contains('tm-saved-shortcut')) return; // keep Saved shortcut visible
+      var hay = ((el.getAttribute('data-u') || '') + ' ' + (el.textContent || '')).toLowerCase();
+      el.style.display = hay.includes(q) ? 'flex' : 'none';
+    });
+    return;
+  }
   document.querySelectorAll('.ch-item').forEach(function (el) {
     var hay = (el.dataset.name + ' ' + (el.dataset.label || '')).toLowerCase();
     el.style.display = hay.includes(q) ? 'flex' : 'none';
@@ -218,9 +227,9 @@ async function loadFontSize() {
       document.getElementById('fontSizeVal').textContent = s.fontSize;
     }
     if (s.debug) document.getElementById('cfgDebug').checked = true;
-    if (s.theme && (s.theme === 'dark' || s.theme === 'light')) {
+    if (s.theme && (s.theme === 'dark' || s.theme === 'light' || s.theme === 'system')) {
       localStorage.setItem('thefeed_theme', s.theme);
-      document.documentElement.setAttribute('data-theme', s.theme);
+      applyResolvedTheme();
       applyThemeButtons();
     }
     if (s.lang && (s.lang === 'fa' || s.lang === 'en')) {
@@ -294,20 +303,41 @@ function maybeWarnNewVersion() {
 function previewFontSize(v) { document.documentElement.style.setProperty('--font-size', v + 'px'); document.getElementById('fontSizeVal').textContent = v }
 
 // ===== THEME =====
+// Preference is 'system' (default) | 'dark' | 'light'. 'system' follows the
+// device's prefers-color-scheme and tracks live OS changes. The data-theme
+// attribute the CSS reads is always the RESOLVED 'dark'/'light'.
+function themePref() { return localStorage.getItem('thefeed_theme') || 'system'; }
+function resolveTheme(pref) {
+  if (pref === 'dark' || pref === 'light') return pref;
+  return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+}
+function applyResolvedTheme() {
+  document.documentElement.setAttribute('data-theme', resolveTheme(themePref()));
+}
+var _themeMqlBound = false;
 function loadTheme() {
-  var t = localStorage.getItem('thefeed_theme') || 'dark';
-  document.documentElement.setAttribute('data-theme', t);
+  applyResolvedTheme();
+  // While the preference is 'system', re-apply when the OS theme flips.
+  if (!_themeMqlBound && window.matchMedia) {
+    _themeMqlBound = true;
+    var mql = window.matchMedia('(prefers-color-scheme: light)');
+    var onChange = function () { if (themePref() === 'system') applyResolvedTheme(); };
+    if (mql.addEventListener) mql.addEventListener('change', onChange);
+    else if (mql.addListener) mql.addListener(onChange); // older WebView/Safari
+  }
 }
 function setTheme(t) {
   localStorage.setItem('thefeed_theme', t);
-  document.documentElement.setAttribute('data-theme', t);
+  applyResolvedTheme();
   applyThemeButtons();
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: t }) }).catch(function () { });
 }
 function applyThemeButtons() {
-  var cur = localStorage.getItem('thefeed_theme') || 'dark';
+  var cur = themePref();
+  var s = document.getElementById('themeSystem');
   var d = document.getElementById('themeDark');
   var l = document.getElementById('themeLight');
+  if (s) s.classList.toggle('active-theme', cur === 'system');
   if (d) d.classList.toggle('active-theme', cur === 'dark');
   if (l) l.classList.toggle('active-theme', cur === 'light');
 }
@@ -371,6 +401,9 @@ function showConfirmDialog(msg, yesText, noText) {
   return new Promise(function (resolve) {
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    // Float above any open full-screen view (chat modal z9100, etc.) so the
+    // confirm lands on the SAME screen the user clicked from — not behind it.
+    overlay.style.zIndex = '99990';
     overlay.innerHTML = '<div class="modal" style="max-width:380px"><p style="font-size:13px;color:var(--text);margin-bottom:16px;line-height:1.6">' + esc(msg) + '</p><div class="modal-actions"><button class="btn btn-flat" id="confirmNo">' + esc(noText || t('cancel')) + '</button><button class="btn btn-primary" id="confirmYes">' + esc(yesText || t('ok')) + '</button></div></div>';
     document.body.appendChild(overlay);
     document.getElementById('confirmNo').onclick = function () { document.body.removeChild(overlay); resolve(false) };
@@ -388,6 +421,7 @@ function showInputDialog(opts) {
   return new Promise(function (resolve) {
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '99990'; // above full-screen views (see showConfirmDialog)
     var titleHtml = opts.title ? '<h2 style="margin-top:0;margin-bottom:8px;font-size:16px">' + esc(opts.title) + '</h2>' : '';
     var msgHtml = opts.message ? '<p style="font-size:13px;color:var(--text-dim);margin:0 0 12px;line-height:1.6">' + esc(opts.message) + '</p>' : '';
     overlay.innerHTML =
@@ -500,7 +534,8 @@ function showLinkSheet(url) {
     overlay.remove();
   };
   overlay.querySelector('.link-open').onclick = function () {
-    window.open(url, '_blank', 'noopener,noreferrer');
+    var w = window.open(url, '_blank', 'noopener,noreferrer');
+    if (!w) window.location.href = url;
     overlay.remove();
   };
   document.body.appendChild(overlay);

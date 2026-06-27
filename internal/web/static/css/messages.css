@@ -120,6 +120,13 @@
       border-color: var(--border)
     }
 
+    .msg a.mention {
+      color: var(--accent);
+      font-weight: 600;
+      text-decoration: none;
+      cursor: pointer
+    }
+
     .msg-meta {
       display: flex;
       justify-content: flex-end;

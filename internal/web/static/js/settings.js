@@ -1,10 +1,10 @@
 // ===== SETTINGS =====
-function openSettings() {
+function openSettings(adopt) {
   renderLatestVersion();
   applyThemeButtons();
   renderPatternGrid();
   switchSettingsTab('display');
-  document.getElementById('settingsModal').classList.add('active');
+  openSettingsSection(adopt); // reparented into the shell (was: modal .active)
   try { initAndroidSettings(); } catch (e) { console.error('initAndroidSettings error:', e); }
   // Reflect current localStorage flag on every open — toggling it
   // away in the prompt itself should be picked up next time
@@ -143,7 +143,144 @@ function setShowScanPrompt(enabled) {
     });
   } catch (e) { }
 }
-function closeSettings() { document.getElementById('settingsModal').classList.remove('active') }
+function closeSettings() { closeSettingsSection(); }
+
+// ===== SETTINGS SECTION (reparented into the unified shell) =====
+// Same pattern as the Resolver section: each settings group is a sidebar item;
+// the panels + actions live in #settingsPane. Panels are MOVED out of the old
+// modal once so all existing settings logic keeps working unchanged.
+
+var _settingsReparented = false;
+var settingsSectionOpen = false;
+var settingsHistoryPushed = false;
+var settingsSuppressPopstate = 0;
+var settingsPanePushed = false;     // mobile: a settings section is open over the sidebar
+var settingsTab = 'display';
+var SETTINGS_TABS = ['display', 'connection', 'storage', 'backup', 'about'];
+
+function settingsReparentOnce() {
+  if (_settingsReparented) return;
+  var content = document.getElementById('settingsContent');
+  if (!content) return;
+  SETTINGS_TABS.forEach(function (name) {
+    var p = document.getElementById('settingsPanel' + name.charAt(0).toUpperCase() + name.slice(1));
+    if (p) content.appendChild(p);
+  });
+  var actions = document.getElementById('settingsActions');
+  if (actions) content.appendChild(actions);
+  _settingsReparented = true;
+}
+
+function renderSettingsSidebar() {
+  var sb = document.getElementById('settingsSidebar');
+  if (!sb) return;
+  var nameEl = document.getElementById('profileBtnName');
+  var hasProfile = (typeof activeProfileId !== 'undefined' && activeProfileId);
+  var profileName = (hasProfile && nameEl) ? (nameEl.textContent || '').trim() : '';
+  var chev = '<span class="rs-chevron" aria-hidden="true">' + icon('chevron') + '</span>';
+  var h = '<div class="rs-head">' + esc(t('settings') || 'Settings') + '</div>';
+  // Profiles row: avatar tile (profile initial) + "Profiles" + the active
+  // profile name as a trailing value + chevron — one line, no "+" button.
+  var initial = profileName ? profileName.trim().charAt(0).toUpperCase() : '';
+  h += '<button class="rs-item rs-item-set rs-item-profiles" onclick="openProfiles()">'
+    + '<span class="rs-ic rs-ic-tile rs-tile-profiles">' + (initial || icon('profileToggle')) + '</span>'
+    + '<span class="rs-name">' + esc(t('profiles') || 'Configs') + '</span>'
+    + (profileName ? '<span class="rs-value">' + esc(profileName) + '</span>' : '')
+    + chev + '</button>';
+  h += '<div class="rs-label">' + esc(t('settings') || 'Settings') + '</div>';
+  var labels = {
+    display: t('settings_tab_display') || 'Display',
+    connection: t('settings_tab_connection') || 'Connection',
+    storage: t('settings_tab_storage') || 'Storage',
+    backup: t('settings_tab_backup') || 'Backup',
+    about: t('settings_tab_about') || 'About'
+  };
+  var icons = { display: 'settings', connection: 'antenna', storage: 'stats', backup: 'bank', about: 'info' };
+  SETTINGS_TABS.forEach(function (name) {
+    // Highlight the section currently shown in the pane (desktop two-pane: both
+    // the list and the open section are visible, so the active one must stand out).
+    var on = (name === settingsTab);
+    h += '<button class="rs-item rs-item-set' + (on ? ' rs-item-active' : '') + '" onclick="settingsShowSection(\'' + name + '\',true)">'
+      + '<span class="rs-ic rs-ic-tile rs-tile-' + name + '">' + icon(icons[name]) + '</span>'
+      + '<span class="rs-name">' + esc(labels[name]) + '</span>' + chev + '</button>';
+  });
+  sb.innerHTML = h;
+}
+
+function settingsShowSection(tab, swapMobile) {
+  settingsTab = tab;
+  switchSettingsTab(tab);
+  var titleEl = document.getElementById('settingsPaneTitle');
+  if (titleEl) {
+    var lbl = { display: 'settings_tab_display', connection: 'settings_tab_connection', storage: 'settings_tab_storage', backup: 'settings_tab_backup', about: 'settings_tab_about' }[tab];
+    titleEl.textContent = t(lbl) || (t('settings') || 'Settings');
+  }
+  renderSettingsSidebar();
+  if (swapMobile) settingsEnterPane();
+}
+
+// settingsEnterPane: on mobile, slide to the content pane AND push a history
+// entry so hardware-back returns to the sidebar (not to the feed). Keyed off the
+// flag, not .chat-open (core.js's popstate clears the class before ours runs).
+function settingsEnterPane() {
+  if (typeof mobileQuery === 'undefined' || !mobileQuery.matches) return;
+  var app = document.getElementById('app'); if (app) app.classList.add('chat-open');
+  if (!settingsPanePushed) {
+    try { history.pushState({ view: 'settingsPane' }, ''); settingsPanePushed = true; } catch (e) { }
+  }
+}
+
+function settingsShowSidebar() {
+  var app = document.getElementById('app'); if (app) app.classList.remove('chat-open');
+  if (settingsPanePushed) { settingsPanePushed = false; settingsSuppressPopstate++; try { history.go(-1); } catch (e) { } }
+}
+
+function openSettingsSection(adopt) {
+  settingsReparentOnce();
+  document.documentElement.classList.add('settings-section');
+  settingsSectionOpen = true;
+  if (adopt) {
+    settingsHistoryPushed = true;
+  } else if (!settingsHistoryPushed) {
+    try { history.pushState({ view: 'settingsSection' }, ''); settingsHistoryPushed = true; } catch (e) { }
+  }
+  var app = document.getElementById('app'); if (app) app.classList.remove('chat-open');
+  renderSettingsSidebar();
+  settingsShowSection(settingsTab || 'display', false);
+}
+
+function settingsTeardown() {
+  settingsSectionOpen = false;
+  settingsPanePushed = false;
+  document.documentElement.classList.remove('settings-section');
+  var app = document.getElementById('app'); if (app) app.classList.remove('chat-open');
+}
+
+function settingsCloseForNav() {
+  var had = settingsHistoryPushed;
+  settingsHistoryPushed = false;
+  settingsTeardown();
+  return had;
+}
+
+function closeSettingsSection() {
+  var steps = settingsHistoryPushed ? 1 : 0;
+  settingsHistoryPushed = false;
+  settingsTeardown();
+  if (steps > 0) { settingsSuppressPopstate += steps; try { history.go(-steps); } catch (e) { } }
+}
+
+window.addEventListener('popstate', function () {
+  if (settingsSuppressPopstate > 0) { settingsSuppressPopstate--; return; }
+  // Mobile: back from a section pane returns to the sidebar (consume the pane
+  // entry). Key off our flag — core.js clears .chat-open before this runs.
+  if (settingsPanePushed) {
+    settingsPanePushed = false;
+    var app = document.getElementById('app'); if (app) app.classList.remove('chat-open');
+    return;
+  }
+  if (settingsHistoryPushed) { settingsHistoryPushed = false; settingsTeardown(); }
+});
 async function saveSettings() {
   var fs = parseInt(document.getElementById('fontSizeSlider').value) || 14;
   var dbg = document.getElementById('cfgDebug').checked;
@@ -157,8 +294,9 @@ async function saveSettings() {
   if (to > 0) body.timeout = to;
   body.resolverCacheShare = document.getElementById('cfgResolverCacheShare').checked;
   try { await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) } catch (e) { }
-  closeSettings();
 }
+// Every settings field auto-saves on change, so this is the shared handler.
+var autoSaveSettings = saveSettings;
 
 // ===== ANDROID SETTINGS =====
 
@@ -639,7 +777,7 @@ function renderBackupPreview(d) {
 
   var items = [];
   if (d.profiles) {
-    items.push({ id: 'profiles', label: t('backup_profiles') || 'Profiles & Settings',
+    items.push({ id: 'profiles', label: t('backup_profiles') || 'Configs & Settings',
       detail: d.profiles.count + ' — ' + (d.profiles.names || []).join(', ') });
   }
   if (d.chat) {

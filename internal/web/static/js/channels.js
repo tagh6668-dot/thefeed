@@ -372,6 +372,8 @@ async function selectChannel(num) {
   var isXCh = ch && (ch.ChatType || ch.chatType) === 2;
   var subHandle = (!isXCh && chHandle) ? (chHandle.charAt(0) === '@' ? chHandle : '@' + chHandle) : '';
   document.getElementById('chatSub').textContent = subHandle;
+  setChatHeaderAvatar(ch);
+  updateFeedHeaderChrome();
   renderChannels(); updateSendPanel();
   document.getElementById('messages').innerHTML = '<div class="empty-state"><p>' + t('loading') + '</p></div>';
   document.getElementById('scrollDownBtn').classList.remove('visible');
@@ -385,6 +387,39 @@ async function selectChannel(num) {
   refreshingChannels[num] = true;
   doRefresh(false);
 }
+
+// Populate the floating feed header's avatar from a channel record, mirroring
+// the channel-list avatar (profile pic if cached, else the initial letter).
+// Pass null/undefined to clear it (no-channel placeholder → hidden via :empty).
+function setChatHeaderAvatar(ch) {
+  var el = document.getElementById('chatHeaderAvatar');
+  if (!el) return;
+  el.classList.remove('is-saved');
+  if (!ch) { el.innerHTML = ''; el.classList.add('ch-avatar-noimg'); return; }
+  var nm = (ch.DisplayName || ch.displayName || ch.Name || ch.name || '?');
+  var isX = (ch.ChatType || ch.chatType || 0) === 2;
+  var bare = String(ch.Name || ch.name || nm).replace(/^@/, '').toLowerCase();
+  if (isX && bare.indexOf('x/') === 0) bare = bare.substring(2);
+  var key = isX ? ('x:' + bare) : bare;
+  var letter = (String(nm).replace(/^@/, '') || '?').charAt(0).toUpperCase();
+  var img = '';
+  if (typeof profilePicCache !== 'undefined' && profilePicCache.users && profilePicCache.users[key]) {
+    img = '<img class="ch-avatar-img" src="/api/profile-pics/' + encodeURIComponent(key)
+      + '" loading="lazy" alt="" onerror="this.parentNode.classList.add(\'ch-avatar-noimg\');this.remove()">';
+  }
+  el.classList.remove('ch-avatar-noimg');
+  el.innerHTML = img + '<span class="ch-avatar-letter">' + esc(letter) + '</span>';
+}
+if (typeof window !== 'undefined') window.setChatHeaderAvatar = setChatHeaderAvatar;
+
+// Toggle `.has-channel` on the feed header so its action buttons (search /
+// copy / refresh / timer / kebab) only show when a channel is actually open —
+// they're meaningless on the "select a channel" placeholder.
+function updateFeedHeaderChrome() {
+  var h = document.querySelector('.chat-area > .chat-header');
+  if (h) h.classList.toggle('has-channel', typeof selectedChannel !== 'undefined' && selectedChannel > 0);
+}
+if (typeof window !== 'undefined') window.updateFeedHeaderChrome = updateFeedHeaderChrome;
 
 function showChannelFetchProgress(num, name) {
   var panel = document.getElementById('progressPanel');

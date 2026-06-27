@@ -81,22 +81,16 @@ func (s *Server) nextAutoUpdateWait(lastTick time.Time) time.Duration {
 }
 
 // canAutoUpdate returns false when we should skip a tick: server hasn't
-// produced metadata yet (channel list empty), or the resolver scanner is
-// busy (it'd race with our DNS fetches), or there's no fetcher.
+// produced metadata yet (channel list empty), or there's no fetcher.
+// The scanner may run concurrently — channel loading proceeds in the
+// background as long as healthy resolvers are available.
 func (s *Server) canAutoUpdate() bool {
 	s.mu.RLock()
 	channels := s.channels
 	fetcher := s.fetcher
-	scanner := s.scanner
 	s.mu.RUnlock()
 	if fetcher == nil || len(channels) == 0 {
 		return false
-	}
-	if scanner != nil {
-		switch scanner.State() {
-		case client.ScannerRunning, client.ScannerPaused:
-			return false
-		}
 	}
 	return true
 }
@@ -214,8 +208,27 @@ func (s *Server) startCheckerThenRefresh() {
 		return
 	}
 
+	s.armFirstHealthyEarlyLoad(checker)
 	checker.StartAndNotify(ctx, func() {
 		s.refreshMetadataOnly()
+	})
+}
+
+// armFirstHealthyEarlyLoad makes channel loading start the instant the initial
+// resolver bank check finds its first healthy resolver, instead of waiting for
+// the whole pass to finish. Gated on channels being empty so periodic re-checks
+// never trigger a redundant metadata fetch.
+func (s *Server) armFirstHealthyEarlyLoad(checker *client.ResolverChecker) {
+	checker.SetOnFirstHealthy(func(healthy []string) {
+		s.mu.RLock()
+		n := len(s.channels)
+		f := s.fetcher
+		s.mu.RUnlock()
+		if n > 0 || f == nil {
+			return
+		}
+		f.SetActiveResolvers(healthy)
+		go s.refreshMetadataOnly()
 	})
 }
 
@@ -237,7 +250,9 @@ func (s *Server) skipCheckerUseSaved() {
 		checker.StartPeriodic(ctx)
 		go s.refreshMetadataOnly()
 	} else {
-		// No saved resolvers — do a full scan (with retry-every-minute).
+		// No saved resolvers — do a full scan (with retry-every-minute),
+		// loading channels the moment the first healthy resolver appears.
+		s.armFirstHealthyEarlyLoad(checker)
 		checker.StartAndNotify(ctx, func() {
 			s.refreshMetadataOnly()
 		})

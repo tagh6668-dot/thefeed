@@ -1,20 +1,9 @@
 /* BEGIN chat messenger */
+/* #chatModal is now only a host for chat popups/sheets (they position
+   themselves); the list renders into #chatSidebar and the thread into
+   #chatPane. display:contents = no box of its own. */
 .chat-modal {
-  position: fixed;
-  inset: 0;
-  z-index: 9100;
-  background: var(--bg);
-  display: none;
-  flex-direction: column;
-  color: var(--text);
-  padding-top: var(--safe-top);
-  padding-bottom: var(--safe-bottom);
-  padding-left: var(--safe-left);
-  padding-right: var(--safe-right)
-}
-
-.chat-modal.active {
-  display: flex
+  display: contents
 }
 
 .chat-topbar {
@@ -62,6 +51,58 @@
   color: var(--accent)
 }
 
+/* Circular next-poll timer (a depleting ring with the seconds inside). The ring
+   background (conic-gradient) is set by chatUpdateCountdown(). */
+.chat-timer-btn {
+  padding: 4px;
+}
+
+.chat-timer-ring {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chat-timer-num {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--surface2, var(--bg-elevated, var(--bg)));
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Rate-limit / quota value in the contact panel (moved out of the topbar). */
+.chat-info-quota-low {
+  color: var(--error)
+}
+
+/* Red "needs attention" dot — used for the recovery-backup breadcrumb
+   (⋮ button → Recovery menu item → "I saved it" button). */
+.chat-dot {
+  position: relative;
+}
+
+.chat-dot::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  inset-inline-end: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--error);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
 .chat-edit-pencil,
 .chat-peer-name .icon svg {
   width: 13px;
@@ -70,9 +111,11 @@
   vertical-align: middle
 }
 
-/* In RTL the back chevron should point the other way. */
+/* The chat is laid out LTR (.chat-modal{direction:ltr}) even in Persian, so the
+   back button sits on the LEFT and its arrow must point LEFT — do NOT flip it
+   under [dir="rtl"] (the flip left it pointing right while on the left). */
 [dir="rtl"] .chat-back .icon svg {
-  transform: scaleX(-1)
+  transform: none
 }
 
 .chat-charcount {
@@ -752,6 +795,20 @@
   letter-spacing: 1px
 }
 
+/* Small ⓘ hint next to the safety code so the user knows it's tappable. */
+.chat-safety-i {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-inline-start: 5px;
+  color: var(--text-dim);
+  opacity: .8
+}
+
+.chat-safety-i svg {
+  width: 14px;
+  height: 14px
+}
+
 .chat-safety-explain {
   display: none;
   max-width: 88%;
@@ -802,9 +859,10 @@
 }
 
 .chat-footer {
-  border-top: 1px solid var(--border);
-  background: var(--surface);
-  padding: 9px 12px;
+  /* No enclosing bar — the quota ring, text pill, and send button float as
+     three separate pills over the chat background. */
+  background: transparent;
+  padding: 8px 10px calc(8px + var(--safe-bottom));
   flex-shrink: 0;
   position: relative
 }
@@ -816,6 +874,44 @@
   cursor: pointer;
   line-height: 0;
   user-select: none
+}
+
+/* Quota ring at the start of the compose row — a circle (matches the send
+   button) showing remaining sends with a progress ring; tap for the detail. */
+.chat-quota-btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  border: none;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--bg2, var(--bg));
+  color: var(--text);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-md);
+}
+
+.chat-quota-ring {
+  position: absolute;
+  inset: 2px;
+  width: calc(100% - 4px);
+  height: calc(100% - 4px);
+}
+
+.chat-quota-num {
+  position: relative;
+  z-index: 1;
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-quota-btn.low .chat-quota-num {
+  color: var(--error);
 }
 
 .chat-send-error {
@@ -870,18 +966,19 @@
   flex: 1;
   min-width: 0;
   resize: none;
-  background: var(--bg);
+  background: var(--bg2, var(--bg));
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 21px;
   color: var(--text);
-  padding: 9px 12px;
+  padding: 10px 16px;
   font-size: 14px;
   font-family: inherit;
   line-height: 1.4;
   height: 42px;
   min-height: 42px;
   max-height: 120px;
-  box-sizing: border-box
+  box-sizing: border-box;
+  box-shadow: var(--shadow-md);
 }
 
 .chat-input-row textarea:focus {
@@ -901,7 +998,8 @@
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  padding: 0
+  padding: 0;
+  box-shadow: var(--shadow-md);
 }
 
 .chat-send-btn:disabled {
@@ -955,9 +1053,11 @@
 }
 
 .chat-sheet-overlay {
-  position: absolute;
+  /* fixed + above the nav (9300) now that #chatModal is just a passthrough
+     host, not a full-screen z9100 layer. */
+  position: fixed;
   inset: 0;
-  z-index: 10;
+  z-index: 9990;
   background: rgba(0, 0, 0, .45);
   display: flex;
   align-items: flex-end;
@@ -1036,7 +1136,10 @@
   font-size: 11px;
   font-weight: 600;
   color: var(--accent, var(--text));
-  background: color-mix(in srgb, var(--accent, #888) 16%, transparent)
+  background: color-mix(in srgb, var(--accent, #888) 16%, transparent);
+  /* Isolate the mixed number+label run so BiDi doesn't fling the query count to
+     the wrong side in RTL (e.g. "۱۵ کوئری · امتیاز: ۹.۵" stays in order). */
+  unicode-bidi: isolate;
 }
 
 /* warning shown at the top of the server picker (e.g. "contact isn't here") */

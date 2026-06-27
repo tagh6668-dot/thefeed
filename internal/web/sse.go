@@ -24,8 +24,16 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 	ch := make(chan string, 500)
 	s.sseMu.Lock()
+	wasEmpty := len(s.clients) == 0
 	s.clients[ch] = struct{}{}
 	s.sseMu.Unlock()
+
+	// First UI client connecting: the chat poll loop may be on its slow
+	// no-UI cadence (90s). Wake it to poll now so freshly-opened apps don't wait
+	// a full slow cycle for new mail. Only on 0→1 to avoid extra-tab floods.
+	if wasEmpty && s.chat != nil {
+		s.chat.kickPoll(true)
+	}
 
 	defer func() {
 		s.sseMu.Lock()

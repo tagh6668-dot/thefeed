@@ -9,6 +9,21 @@
     tmActive = localStorage.getItem('tm_active') || '';
   } catch (e) { }
 
+  // Titles now come from the backend (persisted server-side, shared across
+  // ports) in the channels list (c.title) and per-channel fetch
+  // (d.channel.title). tmSetTitle just updates the in-memory list entry so the
+  // sidebar shows the latest name immediately; the server already persisted it.
+  function tmSetTitle(username, title) {
+    if (!username || !title) return;
+    var key = username.toLowerCase();
+    for (var i = 0; i < tmChannels.length; i++) {
+      if (tmChannels[i].username && tmChannels[i].username.toLowerCase() === key) {
+        tmChannels[i].title = title;
+        break;
+      }
+    }
+  }
+
   function tmSaveActive() {
     try { localStorage.setItem('tm_active', tmActive || ''); } catch (e) { }
   }
@@ -286,40 +301,73 @@
   };
 
   // ===== open / close =====
-  // Track whether we pushed a history entry on open, so close() can
-  // pop it without leaving phantom states behind. Without this the
-  // Android hardware back button does nothing inside this modal.
+  // Telemirror is reparented INTO the shell: #tmSidebar is a pane in the
+  // shared sidebar and #tmPane is the posts column. "Opening" the Mirror
+  // folder just sets html.tm-open and the CSS swaps the panes in place. The
+  // mobile channel view reuses the feed's .app.chat-open pane-swap. History
+  // layers are still tracked so the Android back button unwinds
+  // list ← channel ← folder one step at a time.
   var tmHistoryPushed = false;
 
-  window.openTelemirror = function () {
-    document.getElementById('telemirrorModal').classList.add('active');
-    document.body.classList.add('tm-no-scroll');
-    if (!tmHistoryPushed) {
+  // Reset the topbar so the last channel's id/avatar doesn't linger when we
+  // drop back to the list.
+  function tmClearTopbar() {
+    var nm = document.getElementById('tmTopbarName');
+    if (nm) nm.textContent = tmI18n('telemirror_title', 'Mirror');
+    var sub = document.getElementById('tmTopbarSub');
+    if (sub) sub.textContent = tmI18n('telemirror_subtitle', 'Custom channels');
+    var av = document.getElementById('tmTopbarAvatar');
+    if (av) av.innerHTML = '';
+  }
+
+  // Back to the channel list (mobile): un-swap the content pane + clear state.
+  function tmBackToList() {
+    document.documentElement.classList.remove('tm-channel');
+    var app = document.getElementById('app');
+    if (app) app.classList.remove('chat-open');
+    tmClearTopbar();
+  }
+
+  window.openTelemirror = function (adopt) {
+    document.documentElement.classList.add('tm-open');
+    // Land on the list, not a half-open channel from a previous session.
+    document.documentElement.classList.remove('tm-channel');
+    var app = document.getElementById('app');
+    if (app) app.classList.remove('chat-open');
+    // adopt = switching from another section (Chat) that left its history entry
+    // in place — reuse it rather than pushing a new one (avoids popstate cross-talk).
+    if (adopt) {
+      tmHistoryPushed = true;
+    } else if (!tmHistoryPushed) {
       try { history.pushState({ view: 'telemirror' }, ''); tmHistoryPushed = true; } catch (e) { }
     }
-    // Defer the layout-mode check until after the modal is rendered, so
-    // getComputedStyle on .tm-menu reflects the actual CSS state.
-    requestAnimationFrame(function () {
-      var sb = document.getElementById('tmSidebar');
-      if (sb && tmIsMobileLayout()) sb.classList.add('open');
-    });
     tmLoadChannels();
   };
 
-  // Suppress N popstate events while we unwind the history layers
-  // ourselves. Without this, history.go(-N) would fire popstates that
-  // re-open the sidebar / lightbox we just closed.
+  // tmCloseForNav tears Mirror down for a nav SECTION SWITCH (→ Chat) without
+  // the history.go() unwind. Returns whether Mirror owned a history entry so the
+  // next section can adopt it.
+  window.tmCloseForNav = function () {
+    var had = tmHistoryPushed || tmChannelViewPushed || tmLightboxPushed;
+    tmHistoryPushed = false; tmChannelViewPushed = false; tmLightboxPushed = false;
+    var lb = document.getElementById('tmLightbox'); if (lb) lb.remove();
+    document.documentElement.classList.remove('tm-open');
+    document.documentElement.classList.remove('tm-channel');
+    var app2 = document.getElementById('app'); if (app2) app2.classList.remove('chat-open');
+    return had;
+  };
+
+  // Suppress N popstate events while we unwind the history layers ourselves.
   var tmSuppressPopstate = 0;
 
   window.closeTelemirror = function () {
-    var modal = document.getElementById('telemirrorModal');
-    if (!modal || !modal.classList.contains('active')) return;
+    if (!document.documentElement.classList.contains('tm-open')) return;
     var lb = document.getElementById('tmLightbox');
     if (lb) lb.remove();
-    modal.classList.remove('active');
-    document.body.classList.remove('tm-no-scroll');
-    var sb = document.getElementById('tmSidebar');
-    if (sb) sb.classList.remove('open');
+    document.documentElement.classList.remove('tm-open');
+    document.documentElement.classList.remove('tm-channel');
+    var app = document.getElementById('app');
+    if (app) app.classList.remove('chat-open');
     var steps = (tmHistoryPushed ? 1 : 0)
       + (tmChannelViewPushed ? 1 : 0)
       + (tmLightboxPushed ? 1 : 0);
@@ -332,13 +380,10 @@
     }
   };
 
-  // Hardware / browser back: if our modal is the top of the history
-  // stack, intercept and close without re-popping (history already
-  // popped us).
+  // Hardware / browser back: unwind lightbox → channel → folder one layer at
+  // a time. Programmatic unwinds from closeTelemirror are swallowed.
   window.addEventListener('popstate', function () {
-    // Programmatic unwind from closeTelemirror — swallow these.
     if (tmSuppressPopstate > 0) { tmSuppressPopstate--; return; }
-    // Layered back: lightbox → mobile sidebar reopen → modal close.
     if (tmLightboxPushed) {
       tmLightboxPushed = false;
       var lb = document.getElementById('tmLightbox');
@@ -347,23 +392,22 @@
     }
     if (tmChannelViewPushed && tmIsMobileLayout()) {
       tmChannelViewPushed = false;
-      var sb1 = document.getElementById('tmSidebar');
-      if (sb1) sb1.classList.add('open');
+      tmBackToList();
       return;
     }
     if (tmHistoryPushed) {
       tmHistoryPushed = false;
-      var modal = document.getElementById('telemirrorModal');
-      if (modal) modal.classList.remove('active');
-      document.body.classList.remove('tm-no-scroll');
-      var sb = document.getElementById('tmSidebar');
-      if (sb) sb.classList.remove('open');
+      document.documentElement.classList.remove('tm-open');
+      document.documentElement.classList.remove('tm-channel');
+      var app = document.getElementById('app');
+      if (app) app.classList.remove('chat-open');
+      if (typeof setActiveTab === 'function') setActiveTab('feed');
     }
   });
 
+  // The topbar back arrow (.tm-menu, mobile only) returns to the channel list.
   window.toggleTmSidebar = function () {
-    var sb = document.getElementById('tmSidebar');
-    if (sb) sb.classList.toggle('open');
+    tmBackToList();
   };
 
   // ===== channel list =====
@@ -415,20 +459,18 @@
   function tmRenderChannels() {
     var box = document.getElementById('tmChannelsList');
     var html = '';
-    // Saved Messages shortcut — navigate to Saved from inside the Telemirror
-    // modal without having to close it first.
-    html += '<div class="tm-channel-item tm-saved-shortcut" onclick="tmCloseThenSaved()">'
-      + '<div class="tm-saved-shortcut-icon">' + window.icon('bookmark') + '</div>'
-      + '<div class="tm-channel-item-meta"><div class="tm-channel-item-name">'
-      + tmEsc(tmI18n('saved_messages', 'Saved Messages'))
-      + '</div></div></div>';
+    // (Saved Messages shortcut removed — it lives in the Feed sidebar only.)
     for (var i = 0; i < tmChannels.length; i++) {
       var c = tmChannels[i];
       var active = (c.username.toLowerCase() === tmActive.toLowerCase()) ? ' active' : '';
+      // Name = backend title (if known) else the username; sub = @username.
+      // Mirrors the feed's name + @handle two-line rows.
+      var title = c.title || c.username;
       html += '<div class="tm-channel-item' + active + '" data-u="' + tmEscAttr(c.username) + '" onclick="tmSelectFromClick(this.dataset.u)">'
-        + tmAvatarHTML(c.username, c.username, 40)
+        + tmAvatarHTML(c.username, title, 44)
         + '<div class="tm-channel-item-meta">'
-        + '<div class="tm-channel-item-name">' + tmEsc(c.username) + (c.pinned ? ' <span class="tm-pin">' + window.icon('pinned') + '</span>' : '') + '</div>'
+        + '<div class="tm-channel-item-name">' + tmEsc(title) + (c.pinned ? ' <span class="tm-pin">' + window.icon('pinned') + '</span>' : '') + '</div>'
+        + '<div class="tm-channel-item-sub">@' + tmEsc(c.username) + '</div>'
         + '</div>';
       if (!c.pinned) {
         html += '<button class="tm-x" data-u="' + tmEscAttr(c.username) + '" onclick="event.stopPropagation();tmRemove(this.dataset.u)">&times;</button>';
@@ -443,10 +485,15 @@
   var tmChannelViewPushed = false;
   window.tmSelectFromClick = function (username) {
     tmSelect(username);
-    var sb = document.getElementById('tmSidebar');
-    if (sb) sb.classList.remove('open');
-    if (tmIsMobileLayout() && !tmChannelViewPushed) {
-      try { history.pushState({ view: 'tmChannel' }, ''); tmChannelViewPushed = true; } catch (e) { }
+    // Mobile: swap to the posts column (reusing the feed's pane-swap) and mark
+    // the channel open so the topbar shows a Back arrow and the nav hides.
+    if (tmIsMobileLayout()) {
+      document.documentElement.classList.add('tm-channel');
+      var app = document.getElementById('app');
+      if (app) app.classList.add('chat-open');
+      if (!tmChannelViewPushed) {
+        try { history.pushState({ view: 'tmChannel' }, ''); tmChannelViewPushed = true; } catch (e) { }
+      }
     }
   };
 
@@ -479,6 +526,7 @@
       var d = await r.json();
       tmLastFetchedAt[username.toLowerCase()] = Date.now();
       tmSaveActive();
+      if (d && d.channel && d.channel.title) { tmSetTitle(username, d.channel.title); tmRenderChannels(); }
       tmRenderTopbar(d && d.channel, username);
       tmRenderPosts(d);
     } catch (e) {
@@ -530,7 +578,9 @@
   // z-index, so it ended up hidden behind our z:9000 modal.
   function tmConfirm(message, yesText, noText) {
     return new Promise(function (resolve) {
-      var modal = document.getElementById('telemirrorModal');
+      // Mount over the posts column (a positioned ancestor) so it sits above
+      // the posts at the right stacking — the standalone modal is gone now.
+      var modal = document.querySelector('.chat-area');
       if (!modal) { resolve(window.confirm(message)); return; }
       var overlay = document.createElement('div');
       overlay.className = 'tm-confirm-overlay';
@@ -594,7 +644,7 @@
         + '<div class="tm-channel-bio-label">'
         + tmEsc(tmI18n('telemirror_about', 'About this channel'))
         + '</div>'
-        + '<div class="tm-channel-bio-body">' + ch.description + '</div>'
+        + '<div class="tm-channel-bio-body" dir="auto">' + ch.description + '</div>'
         + '</div>';
     }
     // Load-older button if we have at least one post — anchored to the
@@ -668,11 +718,11 @@
           + (p.reply.url ? ' style="cursor:pointer"' : '')
           + '>';
         if (rAuth) html += '<div class="tm-post-reply-author">' + rAuth + '</div>';
-        if (rText) html += '<div class="tm-post-reply-text">' + tmStripEmojiSprites(rText) + '</div>';
+        if (rText) html += '<div class="tm-post-reply-text" dir="auto">' + tmStripEmojiSprites(rText) + '</div>';
         html += '</div>';
       }
 
-      if (p.text) html += '<div class="tm-post-text">' + tmStripEmojiSprites(p.text) + '</div>';
+      if (p.text) html += '<div class="tm-post-text" dir="auto">' + tmStripEmojiSprites(p.text) + '</div>';
 
       if (p.media && p.media.length) {
         var photoCount = 0;
@@ -682,7 +732,7 @@
         var gridClass = 'tm-post-media tm-album-' + Math.min(Math.max(photoCount, 1), 3);
         html += '<div class="' + gridClass + '">';
         for (var j = 0; j < p.media.length; j++) {
-          html += tmRenderMedia(p.media[j], i, j);
+          html += tmRenderMedia(p.media[j], i, j, photoCount === 1);
         }
         html += '</div>';
       }
@@ -787,12 +837,18 @@
 
   // Render one media tile based on its type.
   // postIdx/mediaIdx are used to build a sane filename for downloads.
-  function tmRenderMedia(m, postIdx, mediaIdx) {
+  function tmRenderMedia(m, postIdx, mediaIdx, single) {
     if (m.type === 'photo' && m.thumb) {
       var fname = 'photo-' + (postIdx + 1) + '-' + (mediaIdx + 1) + '.jpg';
-      return '<div class="tm-photo">'
+      // For SINGLE photos we know the real aspect ratio up front (parsed from
+      // Telegram's markup), so reserve the EXACT box — the image loads into a
+      // box that's already its final size, so nothing reflows and the scroll
+      // never jumps. tmPhotoLoaded stays as a fallback for posts without ratio.
+      var ratioStyle = (single && m.ratio > 0) ? ' style="aspect-ratio:' + m.ratio.toFixed(4) + '"' : '';
+      return '<div class="tm-photo tm-photo-loading"' + ratioStyle + '>'
         + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" decoding="async" alt=""'
         + ' referrerpolicy="no-referrer"'
+        + ' onload="tmPhotoLoaded(this)"'
         + ' onclick="tmOpenLightbox(\'' + tmEscAttr(m.thumb) + '\')"'
         + ' style="cursor:zoom-in"'
         + ' onerror="this.parentNode.classList.add(\'tm-photo-failed\')">'
@@ -852,6 +908,31 @@
     }
     return '';
   }
+
+  // tmPhotoLoaded runs when a single photo's bytes arrive. It swaps the
+  // placeholder aspect for the image's real one and — crucially — if the photo
+  // sits ABOVE the viewport (the user scrolled up past it), nudges scrollTop by
+  // the height change so the post they're reading doesn't jump. Albums keep
+  // their fixed CSS aspect, so this only touches single photos.
+  window.tmPhotoLoaded = function (img) {
+    var box = img.closest ? img.closest('.tm-photo') : null;
+    if (!box) return;
+    box.classList.remove('tm-photo-loading');
+    if (box.style.aspectRatio) return; // exact box already reserved from the parsed ratio — no reflow
+    if (!box.closest('.tm-album-1')) return; // albums already reserve space
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    var sc = document.getElementById('tmContent');
+    var topBefore = box.getBoundingClientRect().top;
+    var hBefore = box.getBoundingClientRect().height;
+    box.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight;
+    if (!sc) return;
+    var delta = box.getBoundingClientRect().height - hBefore;
+    // Compensate only when the box starts above the visible top — i.e. its
+    // growth pushed the content the user is reading downward.
+    if (delta && topBefore < sc.getBoundingClientRect().top) {
+      sc.scrollTop += delta;
+    }
+  };
 
   // tmDownloadPhoto fetches the bytes and either hands them to the
   // Android bridge (saveMedia) or builds a blob-URL <a download> on
@@ -1012,26 +1093,26 @@
     }
   };
 
-  // tmCloseThenSaved — close the Telemirror modal and open Saved Messages.
-  // Open Saved FIRST (its overlay hides the transition so home never flashes),
-  // then close the modal. closeTelemirror() unwinds history with history.go(),
-  // whose popstate(s) core.js turns into openSidebar() (clearing .chat-open on
-  // mobile, which would collapse Saved back to home). The number of popstates
-  // isn't predictable, so self-heal: for a short window, re-assert .chat-open
-  // whenever a stray unwind popstate clears it while Saved is active.
+  // tmCloseThenSaved — leave the Mirror folder and open Saved Messages.
+  // Saved renders into the feed shell's #messages, so we must drop tm-open.
+  // We switch DIRECTLY (no closeTelemirror history.go(-N) cascade) — those
+  // popstates were what made the view visibly "jump to the feed list" first.
+  // We still reset the tm history flags so a later Back doesn't double-unwind.
   window.tmCloseThenSaved = function () {
-    if (typeof openSavedMessages === 'function') openSavedMessages();
-    window.closeTelemirror();
-    var app = document.getElementById('app');
-    if (!app) return;
-    var start = (window.performance && performance.now) ? performance.now() : Date.now();
-    (function guardChatOpen() {
-      if (window.viewingSaved && !app.classList.contains('chat-open')) {
-        app.classList.add('chat-open');
-      }
-      var now = (window.performance && performance.now) ? performance.now() : Date.now();
-      if (now - start < 500) requestAnimationFrame(guardChatOpen);
-    })();
+    var lb = document.getElementById('tmLightbox'); if (lb) lb.remove();
+    tmHistoryPushed = false; tmChannelViewPushed = false; tmLightboxPushed = false;
+    // Render Saved into the still-hidden feed content FIRST (tm-open keeps
+    // #messages hidden), then drop tm-open to reveal it — so the feed content
+    // never flashes between Mirror and Saved.
+    var reveal = function () {
+      document.documentElement.classList.remove('tm-open');
+      document.documentElement.classList.remove('tm-channel');
+      if (typeof setActiveTab === 'function') setActiveTab('feed');
+    };
+    if (typeof openSavedMessages !== 'function') { reveal(); return; }
+    var p;
+    try { p = openSavedMessages(); } catch (e) { reveal(); return; }
+    if (p && typeof p.then === 'function') p.then(reveal, reveal); else reveal();
   };
   function tmCopyFallback(text, done) {
     var ta = document.createElement('textarea');
@@ -1056,6 +1137,7 @@
       });
       if (!r.ok) { tmToast(tmI18n('telemirror_invalid_user', 'Invalid username')); return; }
       input.value = '';
+      var b = document.getElementById('tmAddBtn'); if (b) b.disabled = true;
       await tmLoadChannels();
     } catch (e) { tmToast((e && e.message) || 'failed'); }
   };
@@ -1076,12 +1158,17 @@
     } catch (e) { tmToast((e && e.message) || 'failed'); }
   };
 
-  // Allow Enter in the add input.
   document.addEventListener('DOMContentLoaded', function () {
     var inp = document.getElementById('tmAddInput');
-    if (inp) inp.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); window.telemirrorAdd(); }
-    });
+    var addBtn = document.getElementById('tmAddBtn');
+    function syncAddBtn() { if (addBtn) addBtn.disabled = !(inp && inp.value.trim()); }
+    if (inp) {
+      inp.addEventListener('input', syncAddBtn);
+      inp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); window.telemirrorAdd(); }
+      });
+      syncAddBtn();
+    }
 
     // Intercept link clicks and long-press inside posts.
     var tmC = document.getElementById('tmContent');
@@ -1231,7 +1318,8 @@
       overlay.remove();
     };
     overlay.querySelector('.tm-link-open').onclick = function () {
-      window.open(url, '_blank', 'noopener,noreferrer');
+      var w = window.open(url, '_blank', 'noopener,noreferrer');
+      if (!w) window.location.href = url;
       overlay.remove();
     };
     if (tg) {
