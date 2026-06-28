@@ -110,15 +110,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     private func requestPhotoAdd(_ handler: @escaping (Bool) -> Void) {
-        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-        if status == .authorized || status == .limited {
-            handler(true); return
-        }
-        if status == .denied || status == .restricted {
-            handler(false); return
-        }
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { st in
-            DispatchQueue.main.async { handler(st == .authorized || st == .limited) }
+        // The add-only access level (.addOnly) and .limited status are iOS 14+;
+        // iOS 13 only has the all-or-nothing authorization.
+        if #available(iOS 14.0, *) {
+            let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+            if status == .authorized || status == .limited {
+                handler(true); return
+            }
+            if status == .denied || status == .restricted {
+                handler(false); return
+            }
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { st in
+                DispatchQueue.main.async { handler(st == .authorized || st == .limited) }
+            }
+        } else {
+            let status = PHPhotoLibrary.authorizationStatus()
+            if status == .authorized {
+                handler(true); return
+            }
+            if status == .denied || status == .restricted {
+                handler(false); return
+            }
+            PHPhotoLibrary.requestAuthorization { st in
+                DispatchQueue.main.async { handler(st == .authorized) }
+            }
         }
     }
 
@@ -165,21 +180,29 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     private func present(url: URL, save: Bool) {
         DispatchQueue.main.async { [weak self] in
-            guard
-                let scene = UIApplication.shared.connectedScenes
-                    .compactMap({ $0 as? UIWindowScene })
-                    .first,
-                let root = scene.windows.first?.rootViewController
-            else { return }
-            let activities: [UIActivity]? = nil
+            // We run a non-scene UIKit lifecycle (see AppDelegate), so
+            // UIApplication.connectedScenes is empty — find the key window
+            // directly and walk to the top-most presented controller.
+            guard let top = Self.topViewController() else { return }
             let vc = UIActivityViewController(
                 activityItems: [url],
-                applicationActivities: activities
+                applicationActivities: nil
             )
             // iPad popover anchor.
             vc.popoverPresentationController?.sourceView = self?.webView
-            root.present(vc, animated: true)
+            top.present(vc, animated: true)
         }
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let windows = UIApplication.shared.windows
+        let root = windows.first(where: { $0.isKeyWindow })?.rootViewController
+            ?? windows.first?.rootViewController
+        var top = root
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
     }
 
     private func safeName(_ s: String) -> String? {

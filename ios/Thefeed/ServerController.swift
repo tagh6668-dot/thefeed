@@ -3,30 +3,64 @@ import Mobile
 import UIKit
 
 /// Owns the embedded gomobile-backed HTTP server.
-/// Restarts on foreground and stops on background since iOS doesn't
-/// permit a long-lived background server.
+///
+/// The server is kept ALIVE for the whole app session — it is deliberately
+/// NOT stopped on background and recreated on foreground. iOS only *suspends*
+/// the process on app-switch / screen-lock (memory stays intact), so the
+/// running resolver scan and bank rescan simply freeze and thaw on return —
+/// true continuation with no state loss. The previous stop-on-background /
+/// start-on-foreground churn (a) cancelled in-progress work and (b) could
+/// leave two servers briefly writing profiles.json at once. On a genuine
+/// background *kill* (memory pressure / long background), iOS cold-launches
+/// the app and `AppDelegate` calls `start()` again from scratch.
 final class ServerController: ObservableObject {
     @Published private(set) var port: Int = 0
     @Published private(set) var lastError: String?
+    /// Bumped on every successful (re)start. ContentView keys the WebView on
+    /// this so a cold start / retry reloads the page against the fresh server.
+    /// It is NOT bumped on a plain foreground (the server is unchanged then,
+    /// so the WebView — and the resolver/scanner view the user was watching —
+    /// is preserved while its JS timers and SSE resume).
+    @Published private(set) var generation: Int = 0
 
     private var instance: MobileServer?
     private var observers: [NSObjectProtocol] = []
+    private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
     init() {
         let center = NotificationCenter.default
         observers.append(center.addObserver(
             forName: UIApplication.didEnterBackgroundNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in self?.stop() })
+        ) { [weak self] _ in self?.beginBackgroundGrace() })
         observers.append(center.addObserver(
             forName: UIApplication.willEnterForegroundNotification,
             object: nil, queue: .main
-        ) { [weak self] _ in self?.start() })
+        ) { [weak self] _ in self?.endBackgroundGrace() })
     }
 
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
+        endBackgroundGrace()
         instance?.stop()
+    }
+
+    // beginBackgroundGrace asks iOS for a short window (~30s) before the
+    // process is suspended, so a nearly-finished scan can complete instead of
+    // freezing mid-flight. iOS grants only finite time — there is no API to
+    // keep an HTTP server running in the background indefinitely.
+    private func beginBackgroundGrace() {
+        endBackgroundGrace()
+        bgTask = UIApplication.shared.beginBackgroundTask(withName: "thefeed.serverGrace") {
+            [weak self] in self?.endBackgroundGrace()
+        }
+    }
+
+    private func endBackgroundGrace() {
+        if bgTask != .invalid {
+            UIApplication.shared.endBackgroundTask(bgTask)
+            bgTask = .invalid
+        }
     }
 
     func start() {
@@ -42,6 +76,7 @@ final class ServerController: ObservableObject {
             instance = s
             let actual = Int(s.port())
             port = actual
+            generation += 1
             UserDefaults.standard.set(actual, forKey: "tf.lastPort")
             lastError = nil
         } catch {

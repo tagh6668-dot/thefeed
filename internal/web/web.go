@@ -341,6 +341,11 @@ type Server struct {
 	// notification (the in-app, foreground case is handled by the web UI).
 	newMsgMu      sync.Mutex
 	newMsgHandler func(count int)
+
+	// httpSrv is the running *http.Server, captured in serve() so Shutdown()
+	// (mobile background) can force-close it. Guarded by srvMu.
+	srvMu   sync.Mutex
+	httpSrv *http.Server
 }
 
 // SetNewMessageHandler registers a callback invoked (off the UI path) whenever
@@ -629,10 +634,40 @@ func (s *Server) serve(ln net.Listener) error {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       30 * time.Minute,
 	}
+	s.srvMu.Lock()
+	s.httpSrv = srv
+	s.srvMu.Unlock()
 	if ln != nil {
 		return srv.Serve(ln)
 	}
 	return srv.ListenAndServe()
+}
+
+// Shutdown stops the server's background goroutines and closes the HTTP
+// listener. It is the clean counterpart to serve() for embedders that
+// reuse the process — notably the iOS/Android bind layer, which calls
+// Shutdown when the app is backgrounded so the fetcher/checker/chat
+// goroutines stop touching profiles.json while suspended. Without this
+// the goroutines leak across every background→foreground cycle and a
+// scan suspended mid-flight can corrupt shared state.
+func (s *Server) Shutdown() {
+	if s == nil {
+		return
+	}
+	// Cancel the active fetcher's goroutine tree (rate limiter, noise,
+	// resolver checker, chat poll loop — they all derive from fetcherCtx).
+	s.mu.Lock()
+	cancel := s.fetcherCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.srvMu.Lock()
+	srv := s.httpSrv
+	s.srvMu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
 }
 
 // sameOriginGuard blocks cross-site STATE-CHANGING requests, the CSRF/DNS-

@@ -24,6 +24,11 @@
     <true/>
     <key>UILaunchScreen</key>
     <dict/>
+    <!-- iOS 13 ignores UILaunchScreen and needs a launch storyboard for a
+         full-resolution (non-letterboxed) launch. iOS 14+ prefers
+         UILaunchScreen; having both is the supported way to span 13–14+. -->
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>

@@ -39,5 +39,13 @@ ios/*.xcuserdata
 ios/Thefeed.xcodeproj/xcuserdata
 ios/Thefeed.xcodeproj/project.xcworkspace/xcuserdata
 
+# Signing secrets — these belong in the CI provider's encrypted store,
+# never in the repo (App Store Connect API key, certs, keystores).
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+build/ios/ipa
+
 # Stale backups (sed/in-place edits)
 *.bak

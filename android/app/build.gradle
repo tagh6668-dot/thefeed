@@ -11,20 +11,27 @@ android {
         applicationId 'com.thefeed.android'
         minSdk 24
         targetSdk 35
-        // versionCode auto-increments from git commit count so each build can be installed over the previous one
+        // versionCode auto-increments from git commit count so each build can be installed over the previous one.
+        // CI can override it with -PversionCode=<n> so the uploaded code strictly
+        // increases even on a shallow clone where the commit count would be wrong.
+        // Local/GitHub builds keep the git fallback.
         versionCode = { ->
+            def override = project.findProperty('versionCode')
+            if (override) return override.toString().toInteger()
             try {
-                "git rev-list --count HEAD".execute([], rootDir).text.trim().toInteger()
+                return "git rev-list --count HEAD".execute([], rootDir).text.trim().toInteger()
             } catch (ignored) {
-                1
+                return 1
             }
         }()
         versionName = { ->
+            def override = project.findProperty('versionName')
+            if (override) return override.toString()
             try {
                 def tag = "git describe --tags --always --dirty".execute([], rootDir).text.trim()
-                tag ?: "dev"
+                return tag ?: "dev"
             } catch (ignored) {
-                "dev"
+                return "dev"
             }
         }()
 
