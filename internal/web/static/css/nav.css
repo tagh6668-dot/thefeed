@@ -18,7 +18,11 @@
       height: 52px;
       display: flex;
       align-items: stretch;
-      background: var(--bg2);
+      /* Translucent like the floating topbar so content scrolling underneath
+         shows through for a Telegram-ish glass look. Alpha only — NO
+         backdrop-filter (would re-rasterise the scrolling content every frame
+         and jank weak phones). Matches the topbar's 88% mix. */
+      background: color-mix(in srgb, var(--bg2) 88%, transparent);
       border: 1px solid var(--border);
       border-radius: 22px;
       box-shadow: var(--shadow-lg);
@@ -651,7 +655,10 @@
     #resolverPane #resolverPanelList {
       overflow-y: auto;
       max-height: none !important;
-      padding-top: 62px;
+      /* 70px clears the floating topbar (top:8 + min-height:52 ≈ 60px bottom
+         edge) with the same gap mirror/scanner use; 62px left the first IP
+         tucked under the bar. */
+      padding-top: 70px;
     }
 
     /* Bank panel: only the IP box grows; cleanup + add rows keep their size. The
@@ -661,7 +668,7 @@
     }
 
     #resolverPane #resolverBankListEl {
-      padding-top: 62px;
+      padding-top: 70px;
     }
 
     #resolverPane #resolverBankListEl {

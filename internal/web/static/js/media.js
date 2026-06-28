@@ -763,57 +763,67 @@ var androidBridge = (typeof window !== 'undefined' && window.Android) ? window.A
 // back into the bridge for "minimize"/"kill" if the user picks one
 // of those from the close-confirmation dialog.
 window.handleAndroidBack = async function () {
-  if (closeMediaLightbox()) return;
-  // Telemirror layered back: lightbox → mobile sidebar reopen →
-  // drawer close → modal close. Mirrors the popstate flow used on
-  // platforms that fire popstate naturally.
+  // Unwind ONE layer per press, matching the in-app back buttons (which the
+  // hardware key can't reach because MainActivity routes here instead of
+  // firing popstate). Order: transient overlays first, then the reparented
+  // shell sections, then the feed; at the feed root, confirm before closing.
+  var de = document.documentElement;
+  var app = document.getElementById('app');
+
+  // --- transient overlays (most-nested first) ---
+  if (typeof closeMediaLightbox === 'function' && closeMediaLightbox()) return;
+
   var tmLb = document.getElementById('tmLightbox');
   if (tmLb) {
     if (typeof tmCloseLightbox === 'function') tmCloseLightbox();
     else tmLb.remove();
     return;
   }
-  var tmModal = document.getElementById('telemirrorModal');
-  if (tmModal && tmModal.classList.contains('active')) {
-    var tmSb = document.getElementById('tmSidebar');
-    var tmMenu = document.querySelector('.tm-menu');
-    var tmIsMobile = !!(tmMenu && getComputedStyle(tmMenu).display !== 'none');
-    // Mobile + drawer closed (channel view): reopen drawer instead
-    // of leaving telemirror.
-    if (tmIsMobile && tmSb && !tmSb.classList.contains('open')) {
-      tmSb.classList.add('open');
-      return;
-    }
-    if (tmSb && tmSb.classList.contains('open') && !tmIsMobile) {
-      tmSb.classList.remove('open');
-      return;
-    }
-    if (typeof closeTelemirror === 'function') closeTelemirror();
-    else tmModal.classList.remove('active');
-    return;
-  }
+
+  var chatSheet = document.querySelector('.chat-sheet-overlay');
+  if (chatSheet && chatSheet.parentNode) { chatSheet.parentNode.removeChild(chatSheet); return; }
+
+  // Any open modal dialog (profiles, link sheet, info dialog, close-confirm…).
   var openModal = document.querySelector('.modal-overlay.active');
   if (openModal) { openModal.classList.remove('active'); return; }
-  // Messenger (#chatModal): close a layered chat sheet first, then thread →
-  // list, then list → close. Mirrors the in-app back arrows so the hardware
-  // back key behaves the same. (The native back delegates here instead of
-  // firing popstate, so the messenger has to be handled explicitly.)
-  var chatModalEl = document.getElementById('chatModal');
-  if (chatModalEl && chatModalEl.classList.contains('active')) {
-    var chatSheet = document.querySelector('.chat-sheet-overlay');
-    if (chatSheet && chatSheet.parentNode) { chatSheet.parentNode.removeChild(chatSheet); return; }
-    if (typeof chatState !== 'undefined' && chatState.view === 'thread'
-      && typeof chatBackToList === 'function') {
-      chatBackToList();
-    } else if (typeof closeMessenger === 'function') {
-      closeMessenger();
-    }
+
+  // --- reparented shell sections (state lives on <html>, not in modals) ---
+  // Mirror: open channel → channel list; the list itself → feed.
+  if (de.classList.contains('tm-channel')) {
+    if (typeof toggleTmSidebar === 'function') toggleTmSidebar();
     return;
   }
-  if (mobileQuery.matches && document.getElementById('app').classList.contains('chat-open')) {
-    openSidebar();
+  // Chat: open thread → conversation list; the list itself → feed. (Check
+  // chat-thread before chat-section — both are set while a thread is open.)
+  if (de.classList.contains('chat-thread')) {
+    if (typeof chatBackToList === 'function') chatBackToList();
+    else if (typeof closeMessenger === 'function') closeMessenger();
     return;
   }
+  if (de.classList.contains('tm-open')) {
+    if (typeof closeTelemirror === 'function') closeTelemirror();
+    return;
+  }
+  if (de.classList.contains('chat-section')) {
+    if (typeof closeMessenger === 'function') closeMessenger();
+    return;
+  }
+  if (de.classList.contains('resolver-section')) {
+    if (typeof closeResolverSection === 'function') closeResolverSection();
+    return;
+  }
+  if (de.classList.contains('settings-section')) {
+    if (typeof closeSettingsSection === 'function') closeSettingsSection();
+    return;
+  }
+
+  // Feed: an open channel conversation → channel list (also handles Saved).
+  if (mobileQuery.matches && app && app.classList.contains('chat-open')) {
+    if (typeof feedBack === 'function') feedBack();
+    else openSidebar();
+    return;
+  }
+
   // At app root — confirm before closing/killing the process.
   var choice = await showCloseConfirm();
   if (choice === 'background' && androidBridge && androidBridge.minimizeApp) {
@@ -831,6 +841,9 @@ function showCloseConfirm() {
     var overlay = document.createElement('div');
     overlay.id = 'closeConfirmModal';
     overlay.className = 'modal-overlay active';
+    // The floating nav sits at z-index 9300; the base .modal-overlay (100) would
+    // render the close prompt underneath it. Lift it above the nav.
+    overlay.style.zIndex = '9600';
     overlay.innerHTML =
       '<div class="modal" style="max-width:380px">'
       + '<p style="font-size:14px;color:var(--text);margin-bottom:18px;line-height:1.6">'

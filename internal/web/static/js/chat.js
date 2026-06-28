@@ -788,7 +788,7 @@ function chatRenderList(keepView) {
       var nm = th.name || chatName(th.addr);
       var pinMark = th.pinned ? ('<span class="chat-pin-mark">' + icon('pinned') + '</span> ') : '';
       html += '<div class="chat-thread-item" onclick="openChatThread(\'' + escAttr(th.addr) + '\')">' +
-        chatAvatarHTML(nm, 38) +
+        chatAvatarHTML(nm, 44) + // match the feed (.ch-avatar) and mirror list avatars (44px)
         '<div class="chat-thread-main"><div class="chat-thread-name">' + pinMark + esc(nm) + '</div>' +
         '<div class="chat-thread-last">' + esc(th.lastText || '') + '</div></div>' +
         (th.unread ? '<span class="chat-unread-badge">' + th.unread + '</span>' : '') +
@@ -1114,6 +1114,14 @@ async function openChatThread(addr) {
   chatState.peer = addr;
   chatState.draft = ''; // each conversation starts with an empty compose box
   chatState.safetyOpen = false; // collapse the safety explainer per conversation
+  // Clear this conversation's unread badge immediately. The messages fetch in
+  // chatRenderThread uses markRead=1 (clears it server-side); reflect it locally
+  // now so the sidebar list row + global badge update without waiting for the
+  // next thread reload. In the desktop two-pane the list stays visible next to
+  // the open thread, so a stale "1" would otherwise linger by the name.
+  (chatState.threads || []).forEach(function (th) { if (th.addr === addr) th.unread = 0; });
+  chatUpdateBadge();
+  if (chatState.open) chatRenderList(true); // keepView: don't leave the thread
   if (!chatThreadPushed) {
     try { history.pushState({ view: 'chatThread' }, ''); chatThreadPushed = true; } catch (e) { }
   }

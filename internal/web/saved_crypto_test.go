@@ -2,6 +2,8 @@ package web
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -84,6 +86,57 @@ func TestSavedCryptoRemovePassphraseKeepsData(t *testing.T) {
 	}
 	if got, err := openBytes(reloaded.dek, sealed); err != nil || string(got) != "payload" {
 		t.Fatalf("data lost across removePassphrase: %q %v", got, err)
+	}
+}
+
+// If the keyring is lost but a SEALED saved.json remains (e.g. an inconsistent
+// OS backup-restore), loadSavedCrypto must LOCK and preserve the bytes — never
+// regenerate a fresh DEK, which would orphan the user's data forever.
+func TestSavedCryptoLostKeyringWithSealedStoreLocks(t *testing.T) {
+	dir := t.TempDir()
+	// Establish a device-mode store and seal some data with its DEK.
+	sc1, err := loadSavedCrypto(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := sealBytes(sc1.dek, []byte("{\"items\":[]}"))
+	if err := os.WriteFile(filepath.Join(dir, "saved.json"), sealed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the keyring + device key vanishing (only the sealed store is left).
+	os.Remove(filepath.Join(dir, "saved", "keyring.json"))
+	os.Remove(filepath.Join(dir, "saved", "devicekey"))
+
+	sc2, err := loadSavedCrypto(dir)
+	if err != nil {
+		t.Fatalf("loadSavedCrypto err = %v", err)
+	}
+	if !sc2.locked {
+		t.Fatal("expected LOCKED instance when keyring is lost but a sealed store exists")
+	}
+	// The sealed store must be untouched (no fresh keyring written over it).
+	if _, err := os.Stat(filepath.Join(dir, "saved", "keyring.json")); err == nil {
+		t.Fatal("a new keyring was generated — sealed data would be orphaned")
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "saved.json"))
+	if err != nil || !bytes.Equal(got, sealed) {
+		t.Fatal("sealed saved.json was modified/lost")
+	}
+}
+
+// Lost keyring with a legacy PLAINTEXT saved.json is a safe migration: init a
+// device key and re-seal (no data loss).
+func TestSavedCryptoLostKeyringWithPlaintextMigrates(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "saved.json"), []byte("{\"items\":[]}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sc, err := loadSavedCrypto(dir)
+	if err != nil {
+		t.Fatalf("loadSavedCrypto err = %v", err)
+	}
+	if sc.locked || sc.mode != "device" {
+		t.Fatalf("expected unlocked device mode for legacy plaintext, got %+v", sc)
 	}
 }
 
