@@ -462,7 +462,12 @@ function checkAndShowSavedResolversPrompt(status) {
   // Hide "Use Now" when we have nothing saved to apply.
   var useBtn = document.getElementById('savedResolversUseBtn');
   if (useBtn) useBtn.style.display = hasSaved ? '' : 'none';
-  document.getElementById('savedResolversModal').classList.add('active');
+  var srm = document.getElementById('savedResolversModal');
+  // Lift above the floating nav (z-index 9300); the base .modal-overlay (100)
+  // would otherwise render this startup prompt under the nav bar. Matches the
+  // askRescan overlay lift.
+  srm.style.zIndex = '9600';
+  srm.classList.add('active');
 }
 function savedResolversSkip() {
   // "Later" — just close, server already applied saved resolvers and refresh is underway
