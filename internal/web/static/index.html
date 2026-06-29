@@ -19,6 +19,10 @@
         var resolved = (p === 'dark' || p === 'light') ? p
           : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
         document.documentElement.setAttribute('data-theme', resolved);
+        // Paint the page background NOW, before the external stylesheets load,
+        // otherwise the browser shows its default white until base.css applies
+        // — a white flash on every (re)load. Must match base.css --bg2.
+        document.documentElement.style.backgroundColor = (resolved === 'light') ? '#f0f2f5' : '#0e1621';
       } catch (e) { }
     })();
   </script>

@@ -21,15 +21,23 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
-        // Drop the WebView's HTTP cache (NOT localStorage) so an app update can't
-        // load a STALE cached bundle from a previous version against the new
-        // index.html — a version mismatch that left a blank screen. The server is
-        // in-process, so refetching is instant. localStorage (settings, lang,
-        // saved port) lives in a different data type and is preserved.
-        let httpCacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
-        WKWebsiteDataStore.default().removeData(
-            ofTypes: httpCacheTypes, modifiedSince: Date(timeIntervalSince1970: 0)
-        ) { /* fire-and-forget; no-store headers keep it clean afterward */ }
+        // One-time cache flush on app update. The pinned localhost port keeps the
+        // WebView's asset URLs stable, so across an app update it could serve a
+        // STALE cached bundle (old JS vs. the new index.html) — the mismatch that
+        // left a blank screen. Drop the HTTP cache once per version change; normal
+        // caching resumes afterward (media stays cached). This touches only the
+        // HTTP cache, NOT localStorage (settings/lang/saved port).
+        let appVersion = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String) ?? ""
+        if UserDefaults.standard.string(forKey: "webCacheVersion") != appVersion {
+            let httpCacheTypes: Set<String> = [WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache]
+            // Mark done only AFTER the clear actually completes, so a kill mid-clear
+            // retries on the next launch instead of skipping it forever.
+            WKWebsiteDataStore.default().removeData(
+                ofTypes: httpCacheTypes, modifiedSince: Date(timeIntervalSince1970: 0)
+            ) {
+                UserDefaults.standard.set(appVersion, forKey: "webCacheVersion")
+            }
+        }
 
         let root = ContentView().environmentObject(server)
         let host = UIHostingController(rootView: root)

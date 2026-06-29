@@ -141,13 +141,10 @@ function mediaTryRestoreVisibleCards() {
       mediaShowQueued(card);
       continue;
     }
-    // Disk-cache restore only makes sense for DNS-channel media because
-    // the cache is keyed off the DNS channel number; GH-only files are
-    // re-fetched on demand.
-    var ch = parseInt(card.getAttribute('data-ch'), 10);
-    if (ch >= 10000 && ch <= 60000) {
-      mediaRestoreFromCache(msgID);
-    }
+    // Restore from the content-addressed IndexedDB cache (keyed by size+crc,
+    // not channel — see mediaCacheKey). Applies to both DNS- and GitHub-relay
+    // media; a cache miss safely no-ops.
+    mediaRestoreFromCache(msgID);
   }
 }
 
