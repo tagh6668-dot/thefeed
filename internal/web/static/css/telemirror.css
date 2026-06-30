@@ -163,7 +163,11 @@
     }
 
     .tm-add-row input {
-      flex: 1;
+      flex: 1 1 0;
+      /* Allow the field to shrink below its intrinsic width as the sidebar
+         narrows, so the Add + search buttons stay in view instead of being
+         pushed off the edge (under the content pane). */
+      min-width: 0;
       padding: 8px 12px;
       font-size: var(--text-sm);
       background: var(--bg);
@@ -172,6 +176,12 @@
       border-radius: var(--radius-md);
       font-family: inherit;
       transition: border-color var(--motion-fast) var(--ease)
+    }
+
+    /* The action buttons never shrink/disappear; only the field gives way. */
+    .tm-add-row .btn,
+    .tm-add-row .icon-btn {
+      flex-shrink: 0;
     }
 
     .tm-add-row input:focus {

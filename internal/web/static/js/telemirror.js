@@ -316,6 +316,7 @@
   }
 
   window.openTelemirror = function (adopt) {
+    if (typeof closeChannelSearch === 'function') closeChannelSearch();
     document.documentElement.classList.add('tm-open');
     // Land on the list, not a half-open channel from a previous session.
     document.documentElement.classList.remove('tm-channel');
@@ -349,6 +350,7 @@
 
   window.closeTelemirror = function () {
     if (!document.documentElement.classList.contains('tm-open')) return;
+    if (typeof closeChannelSearch === 'function') closeChannelSearch();
     var lb = document.getElementById('tmLightbox');
     if (lb) lb.remove();
     document.documentElement.classList.remove('tm-open');

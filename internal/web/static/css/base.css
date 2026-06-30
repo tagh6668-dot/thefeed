@@ -75,6 +75,9 @@
       --safe-right: env(safe-area-inset-right);
       --safe-bottom: env(safe-area-inset-bottom);
       --safe-left: env(safe-area-inset-left);
+      /* Floating channel header height; the message list pads by this and the
+         new-messages separator's scroll-margin clears it. */
+      --ch-header-h: 70px;
       /* ----- Apple-HIG design tokens (dark) ----- */
       /* Surfaces */
       --card-bg: #1d2b3a;        /* was undefined — used by .rb-row/.rtab */

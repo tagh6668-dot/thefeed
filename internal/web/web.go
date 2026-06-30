@@ -590,17 +590,10 @@ func (s *Server) serve(ln net.Listener) error {
 		if applied := s.applySelectedList(); applied {
 			s.checker.StartPeriodic(s.fetcherCtx)
 			go s.refreshMetadataOnly()
-		} else if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
-			// Pin the runtime pool to the saved scan and propagate
-			// those resolvers into the selected list and bank when
-			// either is empty — without this, the user sees
-			// counts of "0" in the UI even though the fetcher is
-			// happily using the saved resolvers.
-			s.fetcher.UpdateResolverPool(ls.Resolvers)
-			s.fetcher.SetActiveResolvers(ls.Resolvers)
-			s.persistLastScanToProfiles(ls.Resolvers)
-			s.checker.StartPeriodic(s.fetcherCtx)
-			go s.refreshMetadataOnly()
+		} else if s.reuseKnownResolvers(nil) {
+			// Reused last_scan → resolver bank (best-scored, known-dead dropped)
+			// with no scan — the same path a config switch takes, so boot and
+			// switch behave identically.
 		} else {
 			s.startCheckerThenRefresh()
 		}

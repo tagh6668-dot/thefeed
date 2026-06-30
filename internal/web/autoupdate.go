@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -232,29 +233,114 @@ func (s *Server) armFirstHealthyEarlyLoad(checker *client.ResolverChecker) {
 	})
 }
 
-// skipCheckerUseSaved uses saved resolvers from the last scan and starts
-// periodic health checks without an initial scan pass.
-// If no saved resolvers are available, falls back to a full scan with
-// retry-every-minute until at least one resolver is found.
-func (s *Server) skipCheckerUseSaved() {
+// reuseKnownResolvers applies an already-known resolver set WITHOUT scanning,
+// honoring the user's "skip rescan". Priority: the caller's live (currently
+// active) set → last scan → resolver bank (known-dead dropped, best first).
+// Returns false only when no resolvers exist anywhere, so the caller can scan.
+// Keeps the fetcher's pool and active set in sync (pool == active == reuse) so a
+// later periodic check validates exactly these resolvers.
+//
+// The bank fallback matters: a user who imported a config (resolvers land in the
+// bank) but never ran a scan has an empty last_scan; without it a config switch
+// would wrongly rescan and flash "0 active resolvers".
+func (s *Server) reuseKnownResolvers(live []string) bool {
+	s.mu.RLock()
+	fetcher := s.fetcher
+	checker := s.checker
+	ctx := s.fetcherCtx
+	s.mu.RUnlock()
+	if fetcher == nil {
+		return false
+	}
+	var reuse []string
+	fromLastScan := false
+	switch {
+	case len(live) > 0:
+		reuse = live
+	default:
+		if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
+			reuse, fromLastScan = ls.Resolvers, true
+		} else if pl, _ := s.loadProfiles(); pl != nil && len(pl.ResolverBank) > 0 {
+			reuse = usableBankResolvers(pl)
+		}
+	}
+	if len(reuse) == 0 {
+		return false
+	}
+	// Pool first (it filters active to the intersection), then pin the active
+	// set — leaves pool == active == reuse.
+	fetcher.UpdateResolverPool(reuse)
+	fetcher.SetActiveResolvers(reuse)
+	if fromLastScan {
+		// Seed an empty selected list / bank so the UI counts aren't 0 while the
+		// fetcher happily uses the saved resolvers. No-op when already populated.
+		s.persistLastScanToProfiles(reuse)
+	}
+	if checker != nil && ctx != nil {
+		checker.StartPeriodic(ctx)
+	}
+	go s.refreshMetadataOnly()
+	return true
+}
+
+// usableBankResolvers returns the resolver bank with clearly-dead entries
+// (history of only failures, never a success) dropped and the rest ordered
+// best-score-first, so reusing the bank without a scan doesn't activate
+// known-bad resolvers. Falls back to the whole bank when filtering would leave
+// too few — e.g. a freshly imported config with no score history yet (all
+// neutral, none dropped).
+func usableBankResolvers(pl *ProfileList) []string {
+	if pl == nil || len(pl.ResolverBank) == 0 {
+		return nil
+	}
+	type ranked struct {
+		addr  string
+		score float64
+		dead  bool
+	}
+	all := make([]ranked, 0, len(pl.ResolverBank))
+	for _, addr := range pl.ResolverBank {
+		r := ranked{addr: addr, score: 0.2} // neutral default (matches computeResolverScore)
+		if sc := pl.ResolverScores[addr]; sc != nil {
+			r.score = computeResolverScore(sc.Success, sc.Failure, sc.TotalMs)
+			r.dead = sc.Success == 0 && sc.Failure > 0
+		}
+		all = append(all, r)
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].score > all[j].score })
+	live := make([]string, 0, len(all))
+	for _, r := range all {
+		if !r.dead {
+			live = append(live, r.addr)
+		}
+	}
+	if len(live) >= 3 {
+		return live
+	}
+	// Too few survivors (or no score history) — keep the whole bank, best first.
+	full := make([]string, 0, len(all))
+	for _, r := range all {
+		full = append(full, r.addr)
+	}
+	return full
+}
+
+// skipCheckerUseSaved reuses known resolvers (live → last scan → bank) without a
+// scan; only when nothing is available anywhere does it fall back to a full scan
+// with retry-every-minute until the first healthy resolver appears.
+func (s *Server) skipCheckerUseSaved(live []string) {
+	if s.reuseKnownResolvers(live) {
+		return
+	}
 	s.mu.RLock()
 	checker := s.checker
 	ctx := s.fetcherCtx
-	fetcher := s.fetcher
 	s.mu.RUnlock()
-	if checker == nil || fetcher == nil {
+	if checker == nil {
 		return
 	}
-	if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
-		fetcher.SetActiveResolvers(ls.Resolvers)
-		checker.StartPeriodic(ctx)
-		go s.refreshMetadataOnly()
-	} else {
-		// No saved resolvers — do a full scan (with retry-every-minute),
-		// loading channels the moment the first healthy resolver appears.
-		s.armFirstHealthyEarlyLoad(checker)
-		checker.StartAndNotify(ctx, func() {
-			s.refreshMetadataOnly()
-		})
-	}
+	s.armFirstHealthyEarlyLoad(checker)
+	checker.StartAndNotify(ctx, func() {
+		s.refreshMetadataOnly()
+	})
 }

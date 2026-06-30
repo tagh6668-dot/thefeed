@@ -786,6 +786,59 @@
       transform: scale(0.97)
     }
 
+    /* Numeric stepper: a small centred field flanked by big + / − buttons,
+       with the browser's default spin arrows removed. */
+    .num-stepper {
+      display: flex;
+      align-items: stretch;
+      gap: 6px;
+      /* Fixed width so every stepper is identical regardless of label length
+         or value — keeps the column tidy. */
+      width: 150px;
+      flex: 0 0 auto;
+    }
+
+    .num-stepper input[type="number"] {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      text-align: center;
+      -moz-appearance: textfield;
+      appearance: textfield;
+    }
+
+    .num-stepper input[type="number"]::-webkit-outer-spin-button,
+    .num-stepper input[type="number"]::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .num-step-btn {
+      flex: 0 0 auto;
+      width: 40px;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+      color: var(--text);
+      border-radius: var(--radius-md);
+      font-size: 19px;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .num-step-btn:hover {
+      background: var(--hover);
+    }
+
+    .num-step-btn:active {
+      transform: scale(0.94);
+    }
+
     .btn:focus-visible {
       outline: none;
       box-shadow: var(--focus-ring)

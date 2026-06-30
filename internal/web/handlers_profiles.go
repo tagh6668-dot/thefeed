@@ -164,6 +164,14 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 			s.mu.Lock()
 			s.config = activeConfig
 			s.mu.Unlock()
+			// Snapshot live resolvers before initFetcher discards the fetcher, so
+			// "skip" can reuse them rather than rescanning (see switch below).
+			s.mu.RLock()
+			var liveResolvers []string
+			if s.fetcher != nil {
+				liveResolvers = s.fetcher.Resolvers()
+			}
+			s.mu.RUnlock()
 			if err := s.initFetcher(); err != nil {
 				log.Printf("[web] re-init fetcher after profile change: %v", err)
 			} else {
@@ -184,7 +192,7 @@ func (s *Server) handleProfiles(w http.ResponseWriter, r *http.Request) {
 					}
 					go s.refreshMetadataOnly()
 				case req.SkipCheck:
-					s.skipCheckerUseSaved()
+					s.skipCheckerUseSaved(liveResolvers)
 				default:
 					// Full health-check; active is already populated above so
 					// the feed keeps working during the scan.
@@ -215,6 +223,17 @@ func (s *Server) handleProfileSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", 400)
 		return
 	}
+	// Snapshot the currently-active resolvers BEFORE we tear the fetcher down.
+	// On "skip" we reuse exactly these (see below) so switching config never
+	// silently rescans — initFetcher() builds a fresh, empty fetcher, and
+	// SelectedList/last_scan aren't always populated even when resolvers are live
+	// (which is precisely when the "skip rescan?" prompt appears).
+	s.mu.RLock()
+	var liveResolvers []string
+	if s.fetcher != nil {
+		liveResolvers = s.fetcher.Resolvers()
+	}
+	s.mu.RUnlock()
 	s.profilesMu.Lock()
 	pl, err := s.loadProfiles()
 	if err != nil || pl == nil {
@@ -275,7 +294,7 @@ func (s *Server) handleProfileSwitch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("init fetcher: %v", err), 500)
 		return
 	}
-	// Same fallback chain as boot: selected list → last_scan → full scan.
+	// Skip path: selected list → live → last scan → bank → (only then) scan.
 	if req.SkipCheck && s.applySelectedList() {
 		s.mu.RLock()
 		checker := s.checker
@@ -286,7 +305,7 @@ func (s *Server) handleProfileSwitch(w http.ResponseWriter, r *http.Request) {
 		}
 		go s.refreshMetadataOnly()
 	} else if req.SkipCheck {
-		s.skipCheckerUseSaved()
+		s.skipCheckerUseSaved(liveResolvers)
 	} else {
 		s.startCheckerThenRefresh()
 	}

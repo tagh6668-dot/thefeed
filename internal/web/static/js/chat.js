@@ -2164,7 +2164,10 @@ function chatShowHandshakeProgress(done) {
   var fill = document.getElementById('chatSendProgressFill');
   if (fill) fill.style.width = '100%';
   var label = document.getElementById('chatSendProgressLabel');
-  if (label) label.textContent = chatT('chat_connecting') + ' ' + done + '↑';
+  // Isolate the count+arrow in an LTR bidi run so it stays a unit at the START
+  // of the line; as bare text inside RTL (Persian) the number was reordered to
+  // the end. chat_connecting is trusted i18n text (no HTML), done is a number.
+  if (label) label.innerHTML = '<bdi dir="ltr">' + (done | 0) + '↑</bdi> ' + chatT('chat_connecting');
 }
 
 // Receive/poll progress can be shown in either view (list has chatPollProgress,

@@ -432,7 +432,10 @@ async function importDefaultConfig(i, updateId) {
       if (ex && ex.nickname) nick = ex.nickname;
     }
     var profile = { id: updateId || '', nickname: nick, config: { domain: d.domain, key: d.key, serverKey: d.serverKey || '', extraDomains: d.extraDomains || [], queryMode: 'single', rateLimit: 6 } };
-    var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: updateId ? 'update' : 'create', profile: profile }) });
+    // skipCheck: importing/updating a default config must reuse existing
+    // resolvers, not force a full rescan (the server only truly rescans when no
+    // resolvers are available anywhere).
+    var r = await fetch('/api/profiles', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: updateId ? 'update' : 'create', profile: profile, skipCheck: true }) });
     if (!r.ok) throw new Error(await r.text() || 'save failed');
     okEl.textContent = (updateId ? t('update_success') : t('import_success')).replace('{d}', nick); okEl.style.display = 'block';
     await loadProfiles(); renderProfilesModal(); renderDefaultConfigs();

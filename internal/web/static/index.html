@@ -150,6 +150,10 @@
           <button class="icon-btn" id="sidebarSettingsBtn" onclick="openSettings()" title="Settings" data-i18n-title="settings" data-icon="settings"></button>
           <button class="icon-btn" onclick="jumpToLog()" title="Log" data-i18n-title="sidebar_log"
             style="font-size:16px" data-icon="log"></button>
+          <!-- Search toggle pinned LAST (the row's far edge) so it lands in the
+               same corner as the Mirror search button — its position doesn't jump
+               when switching Feed↔Mirror. -->
+          <button class="icon-btn channel-search-toggle" onclick="toggleChannelSearch()" title="Search" data-i18n-title="search" data-icon="magnifier"></button>
         </div>
         <!-- BEGIN telemirror -->
         <!-- Mirror add-channel row — occupies the profile row's slot in Mirror
@@ -157,6 +161,7 @@
         <div class="tm-add-row" id="tmAddHeaderRow">
           <input id="tmAddInput" type="text" data-i18n-ph="telemirror_add_ph" placeholder="@username" maxlength="40">
           <button class="btn btn-primary" id="tmAddBtn" onclick="telemirrorAdd()" data-i18n="add" disabled>Add</button>
+          <button class="icon-btn channel-search-toggle" onclick="toggleChannelSearch()" title="Search" data-i18n-title="search" data-icon="magnifier"></button>
         </div>
         <!-- END telemirror -->
         <div class="sidebar-toolbar">
@@ -573,28 +578,40 @@
           </select>
           <div class="help-text" id="helpQueryMode" style="display:none" data-i18n="query_mode_help"></div>
         </div>
-        <div class="form-group">
+        <div class="form-group stepper-field">
           <div class="help-row">
             <label for="cfgRateLimit" data-i18n="rate_limit">Concurrent block fetches</label>
             <span class="help-toggle" onclick="toggleHelp('helpRateLimit')" title="?" data-icon="info"></span>
           </div>
-          <input type="number" id="cfgRateLimit" value="10" min="1" step="1" onchange="autoSaveSettings()">
+          <div class="num-stepper">
+            <button type="button" class="num-step-btn" onclick="stepNum('cfgRateLimit',-1)" aria-label="decrease">−</button>
+            <input type="number" id="cfgRateLimit" value="10" min="1" step="1" onchange="autoSaveSettings()">
+            <button type="button" class="num-step-btn" onclick="stepNum('cfgRateLimit',1)" aria-label="increase">+</button>
+          </div>
           <div class="help-text" id="helpRateLimit" style="display:none" data-i18n="rate_limit_help"></div>
         </div>
-        <div class="form-group">
+        <div class="form-group stepper-field">
           <div class="help-row">
             <label for="cfgScatter" data-i18n="scatter">Parallel resolvers per block</label>
             <span class="help-toggle" onclick="toggleHelp('helpScatter')" title="?" data-icon="info"></span>
           </div>
-          <input type="number" id="cfgScatter" value="6" min="1" max="10" onchange="autoSaveSettings()">
+          <div class="num-stepper">
+            <button type="button" class="num-step-btn" onclick="stepNum('cfgScatter',-1)" aria-label="decrease">−</button>
+            <input type="number" id="cfgScatter" value="6" min="1" max="10" onchange="autoSaveSettings()">
+            <button type="button" class="num-step-btn" onclick="stepNum('cfgScatter',1)" aria-label="increase">+</button>
+          </div>
           <div class="help-text" id="helpScatter" style="display:none" data-i18n="scatter_help"></div>
         </div>
-        <div class="form-group">
+        <div class="form-group stepper-field">
           <div class="help-row">
             <label for="cfgTimeout" data-i18n="dns_timeout">DNS Query Timeout (seconds)</label>
             <span class="help-toggle" onclick="toggleHelp('helpTimeout')" title="?" data-icon="info"></span>
           </div>
-          <input type="number" id="cfgTimeout" value="10" min="1" max="60" step="1" onchange="autoSaveSettings()">
+          <div class="num-stepper">
+            <button type="button" class="num-step-btn" onclick="stepNum('cfgTimeout',-1)" aria-label="decrease">−</button>
+            <input type="number" id="cfgTimeout" value="10" min="1" max="60" step="1" onchange="autoSaveSettings()">
+            <button type="button" class="num-step-btn" onclick="stepNum('cfgTimeout',1)" aria-label="increase">+</button>
+          </div>
           <div class="help-text" id="helpTimeout" style="display:none" data-i18n="dns_timeout_help"></div>
         </div>
         <div class="form-group">

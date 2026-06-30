@@ -179,6 +179,49 @@ function filterChannels() {
   });
 }
 
+// Reveal/hide the channel search box on demand (it's hidden by default — a
+// header toggle button drives it, like the log button). Shared by Feed and
+// Mirror; closing clears the filter so nothing stale lingers across modes.
+function toggleChannelSearch() {
+  var header = document.querySelector('.sidebar-header');
+  if (!header) return;
+  var open = header.classList.toggle('search-open');
+  var input = document.getElementById('channelSearch');
+  document.querySelectorAll('.channel-search-toggle').forEach(function (b) {
+    b.classList.toggle('active', open);
+  });
+  if (open) {
+    if (input) setTimeout(function () { input.focus(); }, 0);
+  } else if (input) {
+    input.value = '';
+    filterChannels();
+  }
+}
+// Close + clear the search when the user leaves the current list (e.g. switching
+// Feed↔Mirror) so a leftover query doesn't silently filter the other list.
+function closeChannelSearch() {
+  var header = document.querySelector('.sidebar-header');
+  if (!header || !header.classList.contains('search-open')) return;
+  toggleChannelSearch();
+}
+
+// +/- stepper for numeric fields: big tap targets replacing the tiny native
+// spin arrows. Honors the input's min/max/step and fires its change handler so
+// the value persists (autoSaveSettings etc.).
+function stepNum(id, dir) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var step = parseFloat(el.getAttribute('step')) || 1;
+  var minA = el.getAttribute('min'), maxA = el.getAttribute('max');
+  var min = (minA !== null && minA !== '') ? parseFloat(minA) : -Infinity;
+  var max = (maxA !== null && maxA !== '') ? parseFloat(maxA) : Infinity;
+  var v = (parseFloat(el.value) || 0) + dir * step;
+  if (v < min) v = min;
+  if (v > max) v = max;
+  el.value = String(v);
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 // ===== INIT =====
 async function init() {
   loadTheme();
@@ -437,6 +480,12 @@ function askRescan(count) {
       done(true);
     };
   });
+  // MUST return the promise: without this askRescan() returns undefined, so
+  // `skipCheck = await askRescan()` becomes undefined → JSON.stringify drops the
+  // key → the server defaults skipCheck to false → it rescans immediately,
+  // before the user even touches the prompt. (Regression from the single-
+  // instance refactor.)
+  return _rescanPromptPromise;
 }
 function showRescanPrompt(count) { return askRescan(count); } // legacy alias
 function showConfirmDialog(msg, yesText, noText) {
