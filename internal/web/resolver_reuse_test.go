@@ -2,10 +2,10 @@ package web
 
 import "testing"
 
-// TestUsableBankResolvers covers the score-based filtering used when a config
-// switch/boot reuses the resolver bank without scanning (#2): known-dead
-// resolvers are dropped, the rest are best-score-first, and a freshly imported
-// config (no score history) keeps its whole bank.
+// TestUsableBankResolvers covers which bank resolvers are reused WITHOUT a scan
+// on config switch/boot: only VALIDATED entries (a recorded success), ordered
+// best-score-first. A freshly imported config (no score history) reuses nothing
+// so the caller scans it instead of activating unproven resolvers.
 func TestUsableBankResolvers(t *testing.T) {
 	mk := func(success, failure, totalMs int64) *SavedResolverScore {
 		return &SavedResolverScore{Success: success, Failure: failure, TotalMs: totalMs}
@@ -20,15 +20,14 @@ func TestUsableBankResolvers(t *testing.T) {
 		}
 	})
 
-	t.Run("fresh import with no scores keeps the whole bank", func(t *testing.T) {
+	t.Run("fresh import with no scores reuses nothing (triggers a scan)", func(t *testing.T) {
 		pl := &ProfileList{ResolverBank: []string{"a", "b", "c", "d"}}
-		got := usableBankResolvers(pl)
-		if len(got) != 4 {
-			t.Fatalf("want all 4 kept, got %d (%v)", len(got), got)
+		if got := usableBankResolvers(pl); got != nil {
+			t.Fatalf("unvalidated bank must not be reused, got %v", got)
 		}
 	})
 
-	t.Run("drops known-dead resolvers when enough survive", func(t *testing.T) {
+	t.Run("drops known-dead resolvers, keeps validated ones", func(t *testing.T) {
 		pl := &ProfileList{
 			ResolverBank: []string{"good1", "dead", "good2", "good3", "good4"},
 			ResolverScores: map[string]*SavedResolverScore{
@@ -41,7 +40,7 @@ func TestUsableBankResolvers(t *testing.T) {
 		}
 		got := usableBankResolvers(pl)
 		if len(got) != 4 {
-			t.Fatalf("want 4 survivors, got %d (%v)", len(got), got)
+			t.Fatalf("want 4 validated survivors, got %d (%v)", len(got), got)
 		}
 		for _, r := range got {
 			if r == "dead" {
@@ -50,7 +49,7 @@ func TestUsableBankResolvers(t *testing.T) {
 		}
 	})
 
-	t.Run("keeps the whole bank when too few would survive the filter", func(t *testing.T) {
+	t.Run("returns only the validated resolver even if just one", func(t *testing.T) {
 		pl := &ProfileList{
 			ResolverBank: []string{"good", "dead1", "dead2"},
 			ResolverScores: map[string]*SavedResolverScore{
@@ -60,28 +59,29 @@ func TestUsableBankResolvers(t *testing.T) {
 			},
 		}
 		got := usableBankResolvers(pl)
-		if len(got) != 3 {
-			t.Fatalf("only 1 would survive (<3) → keep all 3, got %d (%v)", len(got), got)
+		if len(got) != 1 || got[0] != "good" {
+			t.Fatalf("want only [good] (dead dropped, unproven not reused), got %v", got)
 		}
 	})
 
-	t.Run("orders best score first", func(t *testing.T) {
+	t.Run("orders best score first, excludes unscored", func(t *testing.T) {
 		pl := &ProfileList{
 			ResolverBank: []string{"slow", "fast", "mid", "noscore"},
 			ResolverScores: map[string]*SavedResolverScore{
 				"slow": mk(10, 0, 100000), // 100% success but very slow
 				"fast": mk(100, 0, 50000), // 100% success and quick → best
 				"mid":  mk(50, 0, 100000),
-				// "noscore" intentionally absent → neutral default
+				// "noscore" intentionally absent → never validated
 			},
 		}
 		got := usableBankResolvers(pl)
-		if len(got) == 0 || got[0] != "fast" {
-			t.Fatalf("want 'fast' ranked first, got %v", got)
+		if len(got) != 3 || got[0] != "fast" {
+			t.Fatalf("want [fast, mid, slow] best-first, got %v", got)
 		}
-		// The unscored resolver (neutral 0.2) must rank below the fast/mid/slow.
-		if got[len(got)-1] != "noscore" {
-			t.Fatalf("want 'noscore' ranked last, got %v", got)
+		for _, r := range got {
+			if r == "noscore" {
+				t.Fatalf("unvalidated 'noscore' must be excluded, got %v", got)
+			}
 		}
 	})
 }

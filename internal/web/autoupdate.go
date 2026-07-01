@@ -235,14 +235,15 @@ func (s *Server) armFirstHealthyEarlyLoad(checker *client.ResolverChecker) {
 
 // reuseKnownResolvers applies an already-known resolver set WITHOUT scanning,
 // honoring the user's "skip rescan". Priority: the caller's live (currently
-// active) set → last scan → resolver bank (known-dead dropped, best first).
-// Returns false only when no resolvers exist anywhere, so the caller can scan.
+// active) set → last scan → resolver bank (only VALIDATED entries, best first).
+// Returns false when nothing reusable exists, so the caller scans.
 // Keeps the fetcher's pool and active set in sync (pool == active == reuse) so a
 // later periodic check validates exactly these resolvers.
 //
-// The bank fallback matters: a user who imported a config (resolvers land in the
-// bank) but never ran a scan has an empty last_scan; without it a config switch
-// would wrongly rescan and flash "0 active resolvers".
+// The bank fallback only reuses resolvers that have proven themselves (a recorded
+// success). A freshly imported config drops ~hundreds of UNVALIDATED resolvers
+// into the bank; those must be scanned, not activated blindly — so
+// usableBankResolvers returns nil for them and we fall through to a scan.
 func (s *Server) reuseKnownResolvers(live []string) bool {
 	s.mu.RLock()
 	fetcher := s.fetcher
@@ -283,12 +284,11 @@ func (s *Server) reuseKnownResolvers(live []string) bool {
 	return true
 }
 
-// usableBankResolvers returns the resolver bank with clearly-dead entries
-// (history of only failures, never a success) dropped and the rest ordered
-// best-score-first, so reusing the bank without a scan doesn't activate
-// known-bad resolvers. Falls back to the whole bank when filtering would leave
-// too few — e.g. a freshly imported config with no score history yet (all
-// neutral, none dropped).
+// usableBankResolvers returns the bank resolvers that have been VALIDATED as
+// working — at least one recorded success — ordered best-score-first. Resolvers
+// with no score history (a freshly imported config) or only failures are
+// excluded. When nothing in the bank is validated it returns nil, so the caller
+// scans the bank instead of activating unproven resolvers.
 func usableBankResolvers(pl *ProfileList) []string {
 	if pl == nil || len(pl.ResolverBank) == 0 {
 		return nil
@@ -296,33 +296,24 @@ func usableBankResolvers(pl *ProfileList) []string {
 	type ranked struct {
 		addr  string
 		score float64
-		dead  bool
 	}
-	all := make([]ranked, 0, len(pl.ResolverBank))
+	good := make([]ranked, 0, len(pl.ResolverBank))
 	for _, addr := range pl.ResolverBank {
-		r := ranked{addr: addr, score: 0.2} // neutral default (matches computeResolverScore)
-		if sc := pl.ResolverScores[addr]; sc != nil {
-			r.score = computeResolverScore(sc.Success, sc.Failure, sc.TotalMs)
-			r.dead = sc.Success == 0 && sc.Failure > 0
+		sc := pl.ResolverScores[addr]
+		if sc == nil || sc.Success == 0 {
+			continue // never validated (fresh import) or known-dead → don't reuse
 		}
-		all = append(all, r)
+		good = append(good, ranked{addr: addr, score: computeResolverScore(sc.Success, sc.Failure, sc.TotalMs)})
 	}
-	sort.SliceStable(all, func(i, j int) bool { return all[i].score > all[j].score })
-	live := make([]string, 0, len(all))
-	for _, r := range all {
-		if !r.dead {
-			live = append(live, r.addr)
-		}
+	if len(good) == 0 {
+		return nil
 	}
-	if len(live) >= 3 {
-		return live
+	sort.SliceStable(good, func(i, j int) bool { return good[i].score > good[j].score })
+	out := make([]string, len(good))
+	for i, r := range good {
+		out[i] = r.addr
 	}
-	// Too few survivors (or no score history) — keep the whole bank, best first.
-	full := make([]string, 0, len(all))
-	for _, r := range all {
-		full = append(full, r.addr)
-	}
-	return full
+	return out
 }
 
 // skipCheckerUseSaved reuses known resolvers (live → last scan → bank) without a

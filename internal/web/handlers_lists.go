@@ -142,8 +142,13 @@ func (s *Server) migrateActiveLists(pl *ProfileList) bool {
 	var seed []string
 	if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
 		seed = ls.Resolvers
-	} else if len(pl.ResolverBank) > 0 {
-		seed = pl.ResolverBank
+	} else {
+		// Seed only from VALIDATED bank resolvers. A freshly imported config
+		// drops ~hundreds of unproven resolvers into the bank; seeding them into
+		// a "Default" list would let applySelectedList activate them without a
+		// scan (bypassing the scan-on-fresh-import path). usableBankResolvers
+		// returns nil when nothing is validated → no list → the caller scans.
+		seed = usableBankResolvers(pl)
 	}
 	if len(seed) == 0 {
 		return false

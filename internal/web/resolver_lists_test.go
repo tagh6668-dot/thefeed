@@ -121,12 +121,16 @@ func TestSanitizeListName(t *testing.T) {
 }
 
 // TestMigrateActiveLists verifies that legacy installs (no ActiveLists,
-// non-empty ResolverBank) get a "Default" list seeded from the bank
-// when migrateActiveLists runs. We exercise it via a fake Server with
-// just enough wiring.
+// non-empty ResolverBank) get a "Default" list seeded from the VALIDATED
+// bank resolvers when migrateActiveLists runs. We exercise it via a fake
+// Server with just enough wiring.
 func TestMigrateActiveListsFromBank(t *testing.T) {
 	pl := &ProfileList{
 		ResolverBank: []string{"1.1.1.1:53", "8.8.8.8:53"},
+		ResolverScores: map[string]*SavedResolverScore{
+			"1.1.1.1:53": {Success: 5, Failure: 0, TotalMs: 500},
+			"8.8.8.8:53": {Success: 3, Failure: 0, TotalMs: 400},
+		},
 	}
 	s := &Server{} // dataDir empty → loadLastScan returns nil
 	if !s.migrateActiveLists(pl) {
@@ -140,6 +144,25 @@ func TestMigrateActiveListsFromBank(t *testing.T) {
 	}
 	if len(pl.ActiveLists[0].Resolvers) != 2 {
 		t.Errorf("Default list resolvers = %v", pl.ActiveLists[0].Resolvers)
+	}
+}
+
+// TestMigrateActiveListsUnvalidatedBank guards the fresh-import fix: a bank of
+// resolvers with no success history (a just-imported config) must NOT be seeded
+// into a "Default" list — that would let applySelectedList activate hundreds of
+// unproven resolvers without a scan. Migration is a no-op → the boot/import path
+// falls through to a scan instead.
+func TestMigrateActiveListsUnvalidatedBank(t *testing.T) {
+	pl := &ProfileList{
+		ResolverBank: []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"},
+		// no ResolverScores → nothing validated
+	}
+	s := &Server{}
+	if s.migrateActiveLists(pl) {
+		t.Fatal("unvalidated bank must not seed a Default list (should scan)")
+	}
+	if len(pl.ActiveLists) != 0 {
+		t.Errorf("ActiveLists = %v, want empty", pl.ActiveLists)
 	}
 }
 
