@@ -329,7 +329,8 @@
     .media-lightbox {
       position: fixed;
       inset: 0;
-      z-index: 1000;
+      /* Above the floating nav (9300) so the opened image covers it. */
+      z-index: 9600;
       background: rgba(0, 0, 0, .92);
       display: flex;
       align-items: center;

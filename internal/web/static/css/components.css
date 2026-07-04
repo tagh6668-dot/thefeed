@@ -291,7 +291,11 @@
       position: fixed;
       inset: 0;
       background: rgba(0, 0, 0, .65);
-      z-index: 100;
+      /* Above the floating nav (9300): every modal must cover it, otherwise a
+         dialog created without an explicit lift (e.g. the update prompt) slides
+         UNDER the nav. Specific modals may still raise themselves further
+         (editor 9500, startup prompts 9600, confirm dialogs 99990). */
+      z-index: 9400;
       justify-content: center;
       align-items: center
     }
