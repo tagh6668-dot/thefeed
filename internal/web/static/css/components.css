@@ -1278,3 +1278,13 @@
       background: var(--accent);
       color: #fff
     }
+
+    /* Extra in-app action (open channel / go to post) — same look as the
+       telemirror sheet's add-channel button. */
+    .link-goto {
+      width: 100%;
+      margin-top: 8px;
+      border: 1px dashed var(--accent);
+      background: transparent;
+      color: var(--accent)
+    }

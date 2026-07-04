@@ -598,9 +598,24 @@ function triggerDownload(blob, filename) {
   setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
 }
 
+// openExternal opens a URL in a new tab/window without leaking the opener.
+// window.open returns null when 'noopener' is in the features EVEN ON
+// SUCCESS, so pass no features and sever the opener on the handle instead —
+// the old null-check fallback fired on every successful open and loaded the
+// URL in the current tab too. A real null (popup blocked, or a WebView
+// without a window factory) falls back to navigating the current view; the
+// native shells intercept external URLs and hand them to the system browser.
+function openExternal(url) {
+  var w = null;
+  try { w = window.open(url, '_blank'); } catch (e) { }
+  if (w) { try { w.opener = null; } catch (e) { } }
+  else { window.location.href = url; }
+}
+
 // showLinkSheet displays a bottom-sheet with the full URL, copy and
-// open-in-browser buttons. Used by the main feed and telemirror.
-function showLinkSheet(url) {
+// open-in-browser buttons. The optional extra {label, action} adds a
+// full-width in-app button (the feed uses it for open-channel/go-to-post).
+function showLinkSheet(url, extra) {
   var old = document.getElementById('linkSheetOverlay');
   if (old) old.remove();
   var overlay = document.createElement('div');
@@ -612,10 +627,18 @@ function showLinkSheet(url) {
     + '<div class="link-actions">'
     + '<button class="link-btn link-copy">' + esc(t('telemirror_copy_link') || 'Copy link') + '</button>'
     + '<button class="link-btn link-open">' + esc(t('telemirror_open_link') || 'Open in browser') + '</button>'
-    + '</div></div>';
+    + '</div>'
+    + (extra ? '<button class="link-btn link-goto">' + esc(extra.label) + '</button>' : '')
+    + '</div>';
   overlay.addEventListener('click', function (e) {
     if (e.target === overlay) overlay.remove();
   });
+  if (extra) {
+    overlay.querySelector('.link-goto').onclick = function () {
+      overlay.remove();
+      extra.action();
+    };
+  }
   overlay.querySelector('.link-copy').onclick = function () {
     try {
       if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
@@ -625,9 +648,8 @@ function showLinkSheet(url) {
     overlay.remove();
   };
   overlay.querySelector('.link-open').onclick = function () {
-    var w = window.open(url, '_blank', 'noopener,noreferrer');
-    if (!w) window.location.href = url;
     overlay.remove();
+    openExternal(url);
   };
   document.body.appendChild(overlay);
 }

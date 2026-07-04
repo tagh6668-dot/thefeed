@@ -120,6 +120,23 @@
       border-color: var(--border)
     }
 
+    /* Jump-to-post highlight — an accent ring that holds, then fades.
+       Class-based (not an inline style) so renderMessages can re-apply it
+       when a background refresh rebuilds the DOM mid-highlight. */
+    @keyframes msg-highlight {
+      0%, 60% {
+        box-shadow: 0 0 0 2px var(--accent)
+      }
+
+      100% {
+        box-shadow: 0 0 0 2px transparent
+      }
+    }
+
+    .msg-highlight {
+      animation: msg-highlight 2.2s ease-out
+    }
+
     .msg a.mention {
       color: var(--accent);
       font-weight: 600;

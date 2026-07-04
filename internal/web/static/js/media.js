@@ -1508,5 +1508,17 @@ function renderMessages(msgs, gaps) {
       el.scrollTop = prevScrollTop;
     }
   }
+  // A jump-to-post highlight may have just been wiped by this re-render
+  // (the refresh that selectChannel starts lands seconds after the jump).
+  // While the highlight window is open, re-anchor on the post and restart
+  // its ring on the fresh element. Doesn't extend the window, so repeated
+  // refreshes can't pin the view forever.
+  if (_msgHighlight && _msgHighlight.ch === selectedChannel && Date.now() < _msgHighlight.until) {
+    var hlEl = findMsgEl(_msgHighlight.id);
+    if (hlEl) {
+      hlEl.scrollIntoView({ block: 'center' });
+      highlightMsgEl(hlEl);
+    }
+  }
 }
 
