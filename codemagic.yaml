@@ -19,6 +19,21 @@ definitions:
   go_version: &go_version "1.26.1"
 
   scripts:
+    - &derive_version
+      name: Derive marketing version from the app-v tag
+      script: |
+        set -e
+        VER="${CM_TAG#app-v}"
+        if [ -z "$CM_TAG" ]; then
+          VER="0.0.1"   # manual run without a tag — debug builds only
+          echo "WARNING: no tag; using fallback version $VER"
+        else
+          case "$VER" in
+            *[!0-9.]*|"") echo "Tag must be app-vX.Y.Z (got: $CM_TAG)"; exit 1;;
+          esac
+        fi
+        echo "APP_MARKETING_VERSION=$VER" >> "$CM_ENV"
+        echo "Marketing version: $VER"
     - &install_go
       name: Install Go + gomobile
       script: |
@@ -42,6 +57,19 @@ workflows:
     name: iOS · TestFlight
     max_build_duration: 90
     instance_type: mac_mini_m2
+    # Store builds run on their own tag namespace: `app-vX.Y.Z`. The GitHub and
+    # GitLab pipelines trigger on `v*` only, so an app-v tag builds HERE and
+    # nowhere else (and a plain v release never burns Codemagic minutes).
+    # Pre-release tags (any hyphen, e.g. app-v1.2.0-rc1) are excluded.
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - include: true
+          pattern: 'app-v*'
+        - include: false
+          pattern: '*-*'
+      cancel_previous_builds: true
     # The name below must match the App Store Connect API key you add under
     # Codemagic → Teams → Integrations → Developer Portal. See the doc.
     integrations:
@@ -58,14 +86,12 @@ workflows:
         BUNDLE_ID: "com.thefeed.ios"
         XCODE_PROJECT: "ios/Thefeed.xcodeproj"
         XCODE_SCHEME: "Thefeed"
-        # Bump this for each App Store / TestFlight *version* (CFBundleShortVersionString).
-        # The build number (CFBundleVersion) is set automatically below.
-        APP_MARKETING_VERSION: "1.0.0"
     cache:
       cache_paths:
         - $HOME/go/pkg/mod
         - $HOME/Library/Caches/go-build
     scripts:
+      - *derive_version
       - *install_go
       - name: Build Mobile.xcframework (gomobile)
         script: |
@@ -113,6 +139,15 @@ workflows:
     name: Android · Google Play
     max_build_duration: 90
     instance_type: mac_mini_m2
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - include: true
+          pattern: 'app-v*'
+        - include: false
+          pattern: '*-*'
+      cancel_previous_builds: true
     environment:
       # These groups hold the secrets you add in Codemagic → App settings →
       # Environment variables (see the doc). Mark them all "Secure".
@@ -129,6 +164,7 @@ workflows:
         - $HOME/Library/Caches/go-build
         - $HOME/.gradle/caches
     scripts:
+      - *derive_version
       - *install_go
       - name: Build gomobile AAR
         script: |
@@ -144,7 +180,7 @@ workflows:
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # -s -w strips symbols (~12 MB/ABI); max-page-size=16384 keeps the
           # .so loadable on Android 15+ 16 KB-page devices.
-          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384"
+          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=v${APP_MARKETING_VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384"
           mkdir -p android/app/libs
           gomobile bind -target=android/arm,android/arm64,android/386,android/amd64 -androidapi 24 \
             -ldflags="${LDFLAGS}" -o android/app/libs/mobile.aar ./mobile
@@ -167,7 +203,7 @@ workflows:
           cd android
           [ -x ./gradlew ] || gradle wrapper --gradle-version 8.10.2
           ./gradlew --no-daemon bundleRelease \
-            -PversionCode=$VC -PversionName=1.0.$VC
+            -PversionCode=$VC -PversionName="$APP_MARKETING_VERSION"
     artifacts:
       - android/app/build/outputs/**/*.aab
       - android/app/build/outputs/**/mapping.txt
