@@ -140,6 +140,8 @@ workflows:
     environment:
       android_signing:
         - "TheFeed Keystore"
+      groups:
+        - google_credentials
       vars:
         PACKAGE_NAME: "com.thefeed.android"
         # JDK 17 is the version AGP needs (jlink breaks on JDK 24+).
