@@ -15,13 +15,28 @@ import (
 )
 
 const (
-	proxyHost          = "t-me.translate.goog"
 	minRequestInterval = 1500 * time.Millisecond
 	maxBodySize        = 5 << 20
 	dialTimeout        = 8 * time.Second
 	tlsTimeout         = 8 * time.Second
 	requestTimeout     = 20 * time.Second
 )
+
+// proxyHosts are the Google-Translate proxy hostnames for Telegram's
+// public web preview, tried in order. Google dropped t.me
+// (t-me.translate.goog) from the Translate proxy — it now returns 404
+// worldwide — so we use Telegram's alias domains, which serve the
+// identical /s/<channel> widget HTML and are still proxied. If Google
+// blocks one, the fetch falls through to the next.
+var proxyHosts = []string{
+	"telegram-me.translate.goog",  // telegram.me
+	"telegram-dog.translate.goog", // telegram.dog
+}
+
+// sniUseHost is a proxyAttempt.sni sentinel meaning "use the request's
+// own host as the TLS SNI" — for the non-fronted and direct paths, where
+// the SNI must match the host actually being addressed.
+const sniUseHost = ""
 
 // fingerprint identifies a TLS ClientHello shape. Restrictive DPI
 // systems fail to match Go's stock fingerprint; we have to mimic
@@ -65,8 +80,9 @@ type proxyAttempt struct {
 
 // SNI host used for domain fronting. www.google.com is widely
 // reachable from restricted networks while translate.google.com /
-// t-me.translate.goog may be filtered — fronting via www.google.com
-// is the only path that passes TLS-SNI inspection on those networks.
+// the *.translate.goog proxy host may be filtered — fronting via
+// www.google.com is the only path that passes TLS-SNI inspection on
+// those networks.
 const frontSNI = "www.google.com"
 
 var proxyAttempts = []proxyAttempt{
@@ -77,13 +93,13 @@ var proxyAttempts = []proxyAttempt{
 	{ip: "142.250.184.196", sni: frontSNI, fp: fingerprints[2], sl: "ru", tl: "en"},  // firefox + front
 	{ip: "142.250.74.14", sni: frontSNI, fp: fingerprints[1], sl: "ar", tl: "en"},    // chrome + front
 
-	// 2) Pure (non-fronted) — for environments where t-me.translate.goog SNI is allowed.
-	{ip: "216.239.38.120", sni: proxyHost, fp: fingerprints[0], sl: "auto", tl: "fa"},
-	{ip: "216.239.38.120", sni: proxyHost, fp: fingerprints[1], sl: "auto", tl: "fa"},
+	// 2) Pure (non-fronted) — for environments where the translate.goog SNI is allowed.
+	{ip: "216.239.38.120", sni: sniUseHost, fp: fingerprints[0], sl: "auto", tl: "fa"},
+	{ip: "216.239.38.120", sni: sniUseHost, fp: fingerprints[1], sl: "auto", tl: "fa"},
 
 	// 3) Direct (DNS lookup) with Chrome — the path that's known to work
 	// with VPN. Sits last because it depends on DNS.
-	{ip: "", sni: proxyHost, fp: fingerprints[1], sl: "auto", tl: "fa"},
+	{ip: "", sni: sniUseHost, fp: fingerprints[1], sl: "auto", tl: "fa"},
 }
 
 // User-Agent list copied verbatim from the reference's `this.userAgents`.
@@ -179,33 +195,64 @@ func (c *Client) fetchHTMLWithBefore(ctx context.Context, username string, befor
 		return "", ErrEmptyUsername
 	}
 	var lastErr error
-	for i, ap := range c.orderedAttempts() {
-		if i > 0 {
-			select {
-			case <-ctx.Done():
-				return "", ctx.Err()
-			case <-time.After(1 * time.Second):
-			}
-		}
-		if err := c.waitForRate(ctx); err != nil {
-			return "", err
-		}
-		ua := userAgents[mrand.IntN(len(userAgents))]
-		body, status, err := c.do(ctx, ap, username, ua, beforeID)
-		if err != nil {
-			lastErr = fmt.Errorf("attempt %d (%s): %w", i+1, ap.label(), err)
-			continue
-		}
-		if status == http.StatusOK && body != "" {
-			c.markSuccess(attemptIndex(ap))
+	for _, host := range proxyHosts {
+		body, edgeBlocked, err := c.fetchHTMLFromHost(ctx, host, username, beforeID)
+		if err == nil {
 			return body, nil
 		}
-		lastErr = fmt.Errorf("attempt %d (%s) status %d", i+1, ap.label(), status)
+		lastErr = err
+		// A 404 from Google's edge means this proxy host is no longer
+		// served; another alias may still work, so try the next host. Any
+		// other failure is transport-level — a different host on the same
+		// network won't fare better, so stop.
+		if !edgeBlocked {
+			break
+		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("telemirror: all attempts exhausted")
 	}
 	return "", lastErr
+}
+
+// fetchHTMLFromHost walks the transport attempts for a single proxy host.
+// edgeBlocked is true when Google's edge answered but returned 404 (the
+// host is no longer proxied), signalling the caller to try the next host.
+func (c *Client) fetchHTMLFromHost(ctx context.Context, host, username string, beforeID int) (body string, edgeBlocked bool, err error) {
+	var lastErr error
+	for i, ap := range c.orderedAttempts() {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return "", false, ctx.Err()
+			case <-time.After(1 * time.Second):
+			}
+		}
+		if err := c.waitForRate(ctx); err != nil {
+			return "", false, err
+		}
+		ua := userAgents[mrand.IntN(len(userAgents))]
+		b, status, err := c.do(ctx, ap, host, username, ua, beforeID)
+		if err != nil {
+			lastErr = fmt.Errorf("attempt %d (%s) host %s: %w", i+1, ap.label(), host, err)
+			continue
+		}
+		if status == http.StatusOK && b != "" {
+			c.markSuccess(attemptIndex(ap))
+			return b, false, nil
+		}
+		if status == http.StatusNotFound {
+			// Google's edge routes by Host header before applying the
+			// per-host 404, so every transport attempt would return the
+			// same 404 — no point walking the rest for this host.
+			return "", true, fmt.Errorf("host %s not served (status 404)", host)
+		}
+		lastErr = fmt.Errorf("attempt %d (%s) host %s status %d", i+1, ap.label(), host, status)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("telemirror: all attempts exhausted for host %s", host)
+	}
+	return "", false, lastErr
 }
 
 func attemptIndex(target proxyAttempt) int {
@@ -223,7 +270,7 @@ func (ap proxyAttempt) label() string {
 		ip = "direct"
 	}
 	suffix := ""
-	if ap.sni != proxyHost {
+	if ap.sni == frontSNI {
 		suffix = " front=" + ap.sni
 	}
 	return ip + "/" + ap.fp.name + suffix
@@ -333,7 +380,7 @@ func (c *Client) waitForRate(ctx context.Context) error {
 // dialTLSFor returns a DialTLSContext closure preconfigured for the given
 // proxy attempt. Connect → uTLS handshake with the chosen fingerprint and
 // SNI (which may differ from the request Host for domain fronting).
-func dialTLSFor(ap proxyAttempt) func(ctx context.Context, network, addr string) (net.Conn, error) {
+func dialTLSFor(ap proxyAttempt, host string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		d := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
 		target := addr
@@ -344,8 +391,12 @@ func dialTLSFor(ap proxyAttempt) func(ctx context.Context, network, addr string)
 		if err != nil {
 			return nil, err
 		}
+		sni := ap.sni
+		if sni == sniUseHost {
+			sni = host
+		}
 		cfg := &utls.Config{
-			ServerName:         ap.sni,
+			ServerName:         sni,
 			InsecureSkipVerify: true,
 			NextProtos:         []string{"http/1.1"},
 		}
@@ -374,10 +425,12 @@ func dialTLSFor(ap proxyAttempt) func(ctx context.Context, network, addr string)
 	}
 }
 
-// transportFor returns a one-shot http.Transport for an attempt.
-func transportFor(ap proxyAttempt) *http.Transport {
+// transportFor returns a one-shot http.Transport for an attempt against
+// the given host (used to resolve the SNI sentinel and, when non-fronted,
+// as the TLS SNI).
+func transportFor(ap proxyAttempt, host string) *http.Transport {
 	return &http.Transport{
-		DialTLSContext:        dialTLSFor(ap),
+		DialTLSContext:        dialTLSFor(ap, host),
 		ResponseHeaderTimeout: requestTimeout,
 		ForceAttemptHTTP2:     false,
 		MaxIdleConns:          1,
@@ -404,16 +457,16 @@ func setBrowserHeaders(req *http.Request, ua string, fronted bool) {
 	}
 }
 
-func (c *Client) do(ctx context.Context, ap proxyAttempt, username, ua string, beforeID int) (string, int, error) {
+func (c *Client) do(ctx context.Context, ap proxyAttempt, host, username, ua string, beforeID int) (string, int, error) {
 	url := fmt.Sprintf(
 		"https://%s/s/%s?_x_tr_sl=%s&_x_tr_tl=%s&_x_tr_hl=en&_x_tr_pto=wapp",
-		proxyHost, username, ap.sl, ap.tl,
+		host, username, ap.sl, ap.tl,
 	)
 	if beforeID > 0 {
 		url += fmt.Sprintf("&before=%d", beforeID)
 	}
 
-	transport := transportFor(ap)
+	transport := transportFor(ap, host)
 	defer transport.CloseIdleConnections()
 	httpClient := &http.Client{Transport: transport, Timeout: requestTimeout}
 
@@ -421,7 +474,7 @@ func (c *Client) do(ctx context.Context, ap proxyAttempt, username, ua string, b
 	if err != nil {
 		return "", 0, err
 	}
-	req.Host = proxyHost
+	req.Host = host
 	setBrowserHeaders(req, ua, ap.ip != "")
 
 	resp, err := httpClient.Do(req)
@@ -481,7 +534,7 @@ func (c *Client) FetchURL(ctx context.Context, rawURL string) ([]byte, string, e
 }
 
 func (c *Client) fetchOnce(ctx context.Context, ap proxyAttempt, rawURL, hostHeader string) ([]byte, string, int, error) {
-	transport := transportFor(ap)
+	transport := transportFor(ap, hostHeader)
 	defer transport.CloseIdleConnections()
 	httpClient := &http.Client{Transport: transport, Timeout: requestTimeout}
 
