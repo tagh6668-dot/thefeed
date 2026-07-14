@@ -601,9 +601,11 @@
     }
     [data-bg-pattern] > * { position: relative; z-index: 1 }
 
-    /* Telemirror: pattern is on .tm-body; make .tm-content transparent so
-       the pattern shows through between the cards. */
-    [data-bg-pattern] > .tm-content { background: transparent }
+    /* Telemirror: the pattern is hosted on .chat-area (reparented shell), and
+       .tm-content is a grandchild (.chat-area > #tmPane > .tm-content), so use a
+       descendant selector to make it transparent and let the pattern show
+       through between the cards. */
+    [data-bg-pattern] .tm-content { background: transparent }
 
     [data-bg-pattern="pattern-1"]::before { background-image: url('/static/img/patterns/pattern-1.svg') }
     [data-bg-pattern="pattern-10"]::before { background-image: url('/static/img/patterns/pattern-10.svg') }

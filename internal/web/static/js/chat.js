@@ -27,10 +27,10 @@ var chatState = {
   sending: false,
   sendProg: null,   // {done,total} of the in-flight send, so a mid-send thread
                     // re-render can repaint the progress bar it destroys
-  polling: false,
-  fgTimer: null,    // foreground poll while the messenger is open
+  polling: false,   // a manual refresh is in flight (drives the ⟳ spinner)
   cdTimer: null,    // 1s ticker for the "next check in Ns" countdown
-  nextPollAt: 0,    // epoch ms of the next foreground poll
+  nextPollAt: 0,    // epoch ms of the next BACKEND poll (pushed over SSE)
+  pollIntervalMs: 20000, // backend's current cadence, for the ring's full sweep
   vvBound: false,   // visualViewport listener attached
   notifyReady: false,
   promptCb: null,    // pending chatPrompt callback
@@ -58,14 +58,12 @@ var CHAT_AVAIL_TIMEOUT_MS = 12000; // hard cap per probe — the DNS round trip 
                                    // slow (esp. Android); without it the "checking
                                    // servers" overlay could hang the whole UI
 
-// While the messenger is OPEN, poll the server for new messages and delivery
-// (✓✓) updates. When the messenger is closed the Go background loop polls every
-// 3 min. Each poll is ~1 query when the inbox is empty. The cadence is adaptive:
-// fast right after a message is sent/received, relaxing back to the idle rate
-// once the conversation goes quiet for CHAT_FG_ACTIVE_MS.
-var CHAT_FG_POLL_MS = 15000;       // idle cadence
-var CHAT_FG_POLL_FAST_MS = 5000;   // cadence during an active conversation
-var CHAT_FG_ACTIVE_MS = 60000;     // a send/receive keeps us "active" for this long
+// Polling is owned ENTIRELY by the Go backend loop now — the frontend never
+// polls on a timer (that would multiply server queries with every open tab).
+// The backend polls every 20s (10s right after a send/receive) while a UI is
+// connected, 90s in the background, and pushes its next-poll time over SSE so
+// the countdown ring stays in sync. The only client-initiated poll is the
+// manual ⟳ refresh button (chatPollNow). See chatOnSSE's 'nextpoll' handler.
 
 // Pull-to-refresh (mobile): drag the message list / thread down past
 // CHAT_PULL_TRIGGER px to poll for new mail. CHAT_REFRESH_MIN_MS throttles it —
@@ -165,13 +163,21 @@ var chatHistoryPushed = false; // messenger modal layer pushed
 var chatThreadPushed = false;  // conversation (thread) layer pushed
 var chatSuppressPopstate = 0;  // swallow the popstates our own history.go fires
 
-function openMessenger() {
-  document.getElementById('chatModal').classList.add('active');
+function openMessenger(adopt) {
+  // Chat is reparented into the shell: list → #chatSidebar, thread → #chatPane.
+  // The section state (not a modal) drives the pane swap, like Mirror.
+  document.documentElement.classList.add('chat-section');
   chatState.open = true;
-  if (!chatHistoryPushed) {
+  // `adopt` = we're switching from another section (Mirror), which left its
+  // single history entry in place rather than popping it. Reuse that entry
+  // instead of pushing a new one — avoids history.go() popstate cross-talk.
+  if (adopt) {
+    chatHistoryPushed = true;
+  } else if (!chatHistoryPushed) {
     try { history.pushState({ view: 'chatMessenger' }, ''); chatHistoryPushed = true; } catch (e) { }
   }
   chatRenderList();
+  if (chatState.view !== 'thread' || !chatState.peer) chatRenderContentEmpty();
   chatLoadInfo();
   chatLoadThreads();
   chatRequestNotifyPermission();
@@ -188,7 +194,31 @@ function chatTeardown() {
   chatState.open = false;
   chatState.view = 'list';
   chatState.peer = null;
-  document.getElementById('chatModal').classList.remove('active');
+  document.documentElement.classList.remove('chat-section');
+  document.documentElement.classList.remove('chat-thread');
+  var app = document.getElementById('app'); if (app) app.classList.remove('chat-open');
+  var sb = document.getElementById('chatSidebar'); if (sb) sb.innerHTML = '';
+  var pane = document.getElementById('chatPane'); if (pane) pane.innerHTML = '';
+}
+
+// chatCloseForNav tears chat down for a nav SECTION SWITCH (→ Mirror) without
+// the history.go() unwind — that unwind fires popstates the other section's
+// handler misreads. Returns whether chat owned a history entry so the next
+// section can adopt it (keeping a single section entry on the stack).
+window.chatCloseForNav = function () {
+  var had = chatHistoryPushed || chatThreadPushed;
+  chatHistoryPushed = false;
+  chatThreadPushed = false;
+  chatTeardown();
+  return had;
+};
+
+// Placeholder shown in the content pane while no conversation is open
+// (desktop two-pane), so it isn't blank next to the chat list.
+function chatRenderContentEmpty() {
+  var pane = document.getElementById('chatPane');
+  if (pane) pane.innerHTML = '<div class="chat-content-empty">' +
+    esc(chatT('chat_pick_conversation')) + '</div>';
 }
 
 // closeMessenger is the explicit close (the list-view back arrow, the
@@ -199,6 +229,7 @@ function closeMessenger() {
   chatHistoryPushed = false;
   chatThreadPushed = false;
   chatTeardown();
+  document.documentElement.classList.remove('chat-thread');
   if (steps > 0) {
     chatSuppressPopstate += steps;
     try { history.go(-steps); } catch (e) { }
@@ -221,68 +252,53 @@ window.addEventListener('popstate', function () {
 });
 
 function chatStopForegroundTimer() {
-  if (chatState.fgTimer) { clearTimeout(chatState.fgTimer); chatState.fgTimer = null; }
   if (chatState.cdTimer) { clearInterval(chatState.cdTimer); chatState.cdTimer = null; }
 }
 
-// chatPollDelay picks the foreground poll cadence: fast while the conversation
-// is active (a message in the last CHAT_FG_ACTIVE_MS), idle otherwise.
-function chatPollDelay() {
-  var active = (Date.now() - (chatState.lastActivity || 0)) < CHAT_FG_ACTIVE_MS;
-  return active ? CHAT_FG_POLL_FAST_MS : CHAT_FG_POLL_MS;
-}
-
-// chatScheduleNextPoll arms a single timer for the next poll at the current
-// cadence (re-armed after each poll, and on chatBumpActivity to tighten it).
-function chatScheduleNextPoll() {
-  if (chatState.fgTimer) { clearTimeout(chatState.fgTimer); chatState.fgTimer = null; }
-  var delay = chatPollDelay();
-  chatState.nextPollAt = Date.now() + delay;
-  chatState.fgTimer = setTimeout(function () {
-    chatForegroundPoll();
-    if (chatState.open) chatScheduleNextPoll();
-  }, delay);
-}
-
-// chatBumpActivity marks a send/receive and tightens the poll cadence at once.
+// chatBumpActivity records local activity (a send/receive). The poll CADENCE is
+// owned by the backend now — the frontend never polls on a timer — so this only
+// keeps the local stamp for any UI that reads it.
 function chatBumpActivity() {
   chatState.lastActivity = Date.now();
-  if (chatState.fgTimer) chatScheduleNextPoll();
 }
 
-// chatStartForegroundTimer keeps the open messenger live: it pulls new incoming
-// messages and, in a conversation, re-checks delivery (✓✓). Runs in both the
-// list and thread views. A 1s ticker drives the "next check in Ns" countdown.
+// chatStartForegroundTimer drives the "next check in Ns" countdown ring while
+// the messenger is open. The backend is the sole poller and pushes its schedule
+// over SSE (chatOnSSE 'nextpoll'); here we just animate toward chatState.
+// nextPollAt. NO polling happens on a frontend timer — that would multiply
+// server queries with every open tab.
 function chatStartForegroundTimer() {
   chatStopForegroundTimer();
-  chatScheduleNextPoll();
   chatState.cdTimer = setInterval(chatUpdateCountdown, 1000);
   chatUpdateCountdown();
 }
 
-function chatForegroundPoll() {
-  if (!chatState.open) { chatStopForegroundTimer(); return; }
-  if (chatState.polling) return;
-  if (chatState.info && chatState.info.exists && !chatAvailable()) chatCheckAvailability();
-  var peer = chatState.peer;
-  if (chatState.view === 'thread' && peer && !chatState.sending) chatRefreshStatus(peer);
-  chatState.polling = true;
-  fetch('/api/chat/poll', { method: 'POST' }).then(function (r) { return r.json(); }).then(function (d) {
-    chatHidePollProgress();
-    if (d && d.ok && d.got > 0) {
-      chatBumpActivity();
-      chatNotifyNew(d.got);
-      chatLoadThreads();
-      if (chatState.view === 'thread' && chatState.peer === peer) chatRenderThread();
-    }
-  }).catch(function () { chatHidePollProgress(); }).finally(function () { chatState.polling = false; });
+// Circular next-poll timer (a depleting ring with the seconds inside). Lives in
+// the topbar corner; tapping it shows the full "next check in N sec" as a toast.
+function chatTimerBtnHTML() {
+  return '<button class="chat-icon-btn chat-timer-btn" onclick="chatToastNextPoll()" ' +
+    'aria-label="' + escAttr(chatT('chat_next_check').replace('{n}', '')) + '">' +
+    '<span class="chat-timer-ring"><span class="chat-timer-num"></span></span></button>';
 }
-
+window.chatToastNextPoll = function () {
+  showToast(chatState._nextPollText || chatT('chat_next_check').replace('{n}', '?'));
+};
 function chatUpdateCountdown() {
-  var el = document.getElementById('chatNextPoll');
-  if (!el) return;
   var secs = Math.max(0, Math.ceil((chatState.nextPollAt - Date.now()) / 1000));
-  el.textContent = chatT('chat_next_check').replace('{n}', secs);
+  var text = chatT('chat_next_check').replace('{n}', secs);
+  chatState._nextPollText = text;
+  var total = ((chatState.pollIntervalMs || 20000) / 1000) || 1;
+  var deg = Math.round(Math.max(0, Math.min(1, secs / total)) * 360);
+  var rings = document.querySelectorAll('.chat-timer-btn');
+  for (var i = 0; i < rings.length; i++) {
+    rings[i].title = text;
+    var ring = rings[i].querySelector('.chat-timer-ring');
+    if (ring) ring.style.background = 'conic-gradient(var(--accent) ' + deg + 'deg, var(--border) ' + deg + 'deg)';
+    var num = rings[i].querySelector('.chat-timer-num');
+    if (num) num.textContent = secs;
+  }
+  var el = document.getElementById('chatNextPoll'); // back-compat if any view keeps it
+  if (el) el.textContent = text;
 }
 
 // chatBindViewport keeps the input above the on-screen keyboard on mobile:
@@ -314,7 +330,16 @@ function chatViewportFit() {
   var m = document.getElementById('chatModal');
   if (!vv || !m) return;
   var kb = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+  // Note whether the thread was pinned to the bottom BEFORE we resize for the
+  // keyboard (measure first — the padding change alters clientHeight).
+  var body = document.getElementById('chatMsgsBody');
+  var wasAtBottom = body && (body.scrollHeight - body.scrollTop - body.clientHeight < 80);
   m.style.paddingBottom = kb ? ('calc(var(--safe-bottom) + ' + kb + 'px)') : '';
+  // Keyboard just opened while reading the latest messages → keep them visible
+  // instead of letting the shrunk viewport hide them behind the keyboard.
+  if (kb > 0 && wasAtBottom && body) {
+    requestAnimationFrame(function () { body.scrollTop = body.scrollHeight; });
+  }
 }
 
 // ---- new-message notification (foreground only) ----
@@ -463,6 +488,9 @@ async function chatCheckAvailability(force) {
   if (!chatState.open) return;
   if (chatState.view === 'list') chatRenderList();
   else chatRenderThread();
+  // If the server picker is open (showing disk-backed "checking" rows), refresh
+  // it in place now that the live per-server status has landed.
+  if (document.querySelector('.chat-server-sheet')) chatServerSheet();
 }
 
 // chatShowCheckingServers / chatHideCheckingServers: the first-run "probing all
@@ -514,7 +542,10 @@ async function chatLoadThreads() {
     contacts.forEach(function (c) { chatState.contacts[c.addr] = c.name });
   } catch (e) { }
   chatUpdateBadge();
-  if (chatState.open && chatState.view === 'list') chatRenderList();
+  // Refresh the sidebar list whenever chat is open — in the two-pane shell it's
+  // visible alongside an open thread (desktop) or hidden behind it (mobile), so
+  // keepView keeps the thread in place while the list updates.
+  if (chatState.open) chatRenderList(chatState.view === 'thread');
 }
 
 function chatUpdateBadge() {
@@ -582,7 +613,28 @@ function chatQuotaIcon() {
   return { svg: chatQuotaSvg(frac), detail: detail, low: frac <= 0.2 };
 }
 
-function chatShowQuotaDetail() {
+// chatQuotaCircleHTML renders the compose-row quota ring: a circle showing the
+// remaining-sends count with a progress ring. Tap shows the full detail.
+function chatQuotaCircleHTML() {
+  var q = chatState.quota;
+  var lim = chatState.avail && chatState.avail.limits;
+  var cap = (lim && lim.sendPerHour) || 0;
+  if (!cap) return '';
+  var rem = (q && q.remaining != null) ? q.remaining : cap;
+  var frac = Math.max(0, Math.min(1, rem / cap));
+  var low = frac <= 0.2;
+  var r = 15.5, c = 2 * Math.PI * r, off = c * (1 - frac);
+  var col = low ? 'var(--error)' : 'var(--accent)';
+  var ring = '<svg class="chat-quota-ring" viewBox="0 0 38 38" aria-hidden="true">'
+    + '<circle cx="19" cy="19" r="' + r + '" fill="none" stroke="var(--border)" stroke-width="2.5"/>'
+    + '<circle cx="19" cy="19" r="' + r + '" fill="none" stroke="' + col + '" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + off.toFixed(1) + '" transform="rotate(-90 19 19)"/></svg>';
+  return '<button type="button" class="chat-quota-btn' + (low ? ' low' : '') + '" title="' + escAttr((chatQuotaIcon() || {}).detail || '') + '" onclick="chatShowQuota(event)" aria-label="' + escAttr(chatT('chat_quota_label')) + '">'
+    + ring + '<span class="chat-quota-num">' + rem + '</span></button>';
+}
+
+// chatShowQuota surfaces the full "N left · resets HH:MM" line on demand.
+function chatShowQuota(e) {
+  if (e) e.stopPropagation();
   var qi = chatQuotaIcon();
   if (qi) showToast(qi.detail);
 }
@@ -606,9 +658,8 @@ function chatClearSendError() {
 function chatRenderIntro() {
   var html = '';
   html += '<div class="chat-topbar">';
-  html += '<button class="chat-back" onclick="closeMessenger()" aria-label="close">' + icon('arrowLeft') + '</button>';
-  html += '<div class="chat-topbar-title"><div class="chat-peer-name">' + esc(chatT('chat_title')) +
-    ' <span class="chat-exp-tag">' + esc(chatT('chat_experimental')) + '</span></div></div>';
+  html += '<button class="chat-back chat-back-close" onclick="closeMessenger()" aria-label="close">' + icon('arrowLeft') + '</button>';
+  html += '<div class="chat-topbar-title"><div class="chat-peer-name">' + esc(chatT('chat_title')) + '</div></div>';
   html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_log')) + '" onclick="chatOpenLog()">' + icon('log') + '</button>';
   html += '</div>';
   html += '<div class="chat-body" id="chatBody">';
@@ -618,7 +669,7 @@ function chatRenderIntro() {
     '<div class="chat-banner-actions"><button class="chat-btn-primary" onclick="chatEnableMessenger()">' +
     esc(chatT('chat_enable_btn')) + '</button></div></div>';
   html += '</div>';
-  document.getElementById('chatModal').innerHTML = html;
+  document.getElementById('chatSidebar').innerHTML = html;
 }
 
 // chatOverlayOpen reports whether any chat popup (action sheet, rename prompt,
@@ -627,8 +678,15 @@ function chatRenderIntro() {
 // rebuild the list/thread innerHTML while one is open — that would wipe the
 // popup and steal keyboard focus. Such a render is deferred (renderPending)
 // and flushed when the popup closes.
+//
+// Also covers the expanded recovery-code panel (#chatRecoveryBox): it lives
+// inside the rendered list, so a re-render triggered by an incoming message
+// would otherwise erase the recovery code while the user is reading it.
 function chatOverlayOpen() {
-  return !!document.querySelector('#chatModal .chat-sheet-overlay');
+  if (document.querySelector('#chatModal .chat-sheet-overlay')) return true;
+  var rec = document.getElementById('chatRecoveryBox');
+  if (rec && rec.style.display === 'block') return true;
+  return false;
 }
 
 // chatFlushPendingRender re-renders the current view if a render was deferred
@@ -643,10 +701,17 @@ function chatFlushPendingRender() {
   }, 0);
 }
 
-function chatRenderList() {
+// chatRenderList renders the conversation list into #chatSidebar. keepView=true
+// refreshes the sidebar WITHOUT switching away from an open thread — needed in
+// the desktop two-pane shell where the sidebar and the thread are visible at
+// once (e.g. a new conversation must appear in the list while you're in it).
+function chatRenderList(keepView) {
   if (chatOverlayOpen()) { chatState.renderPending = true; return; }
   chatState.renderPending = false;
-  chatState.view = 'list';
+  if (!keepView) {
+    chatState.view = 'list';
+    document.documentElement.classList.remove('chat-thread');
+  }
   var info = chatState.info || {};
   var avail = chatState.avail; // null = still checking
 
@@ -655,26 +720,25 @@ function chatRenderList() {
 
   var html = '';
   html += '<div class="chat-topbar">';
-  html += '<button class="chat-back" onclick="closeMessenger()" aria-label="close">' + icon('arrowLeft') + '</button>';
+  html += '<button class="chat-back chat-back-close" onclick="closeMessenger()" aria-label="close">' + icon('arrowLeft') + '</button>';
   // The title doubles as the server picker: tap it (or the antenna button) to
   // see and toggle which servers the messenger is on for.
   // Subtitle: the live probe's usable count once it lands; before that, if a
   // server is already set up, the disk-backed enabled count (instant, from
   // /api/chat/info) so a known-good setup never shows "checking…" on every open.
-  var sub = avail ? chatT('chat_servers_active').replace('{n}', chatUsableServers().length)
-    : (info.anyEnabled ? chatT('chat_servers_active').replace('{n}', info.enabledCount || 0)
-      : chatT('chat_checking'));
-  html += '<div class="chat-topbar-title chat-servers-link" onclick="chatServerSheet()">' +
-    '<div class="chat-peer-name">' + esc(chatT('chat_title')) + '</div>' +
-    '<div class="chat-peer-sub"><span class="chat-exp-tag">' + esc(chatT('chat_experimental')) + '</span> ' +
-    esc(sub) + ' ' + icon('chevronDown') + '</div></div>';
+  // Clean title — just "Chat". The server picker (and the live "N servers
+  // active / checking…" status) moved into the ⋮ menu.
+  html += '<div class="chat-topbar-title">' +
+    '<div class="chat-peer-name">' + esc(chatT('chat_title')) + '</div></div>';
+  if (chatAvailable()) html += chatTimerBtnHTML();
   if (chatAvailable()) {
     html += '<button id="chatRefreshBtn" class="chat-icon-btn' + (chatState.polling ? ' spinning' : '') + '" ' +
       (chatState.polling ? 'disabled ' : '') + 'title="' + escAttr(chatT('chat_refresh')) + '" onclick="chatPollNow()">' + icon('refresh') + '</button>';
   }
-  html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_menu')) + '" aria-label="' + escAttr(chatT('chat_menu')) + '" onclick="chatListMenu()">' + icon('more') + '</button>';
+  // ⋮ shows a red dot until the recovery code has been backed up (the breadcrumb
+  // leads the user: ⋮ → Recovery → "I saved it").
+  html += '<button class="chat-icon-btn' + (info.address && info.backedUp === false ? ' chat-dot' : '') + '" title="' + escAttr(chatT('chat_menu')) + '" aria-label="' + escAttr(chatT('chat_menu')) + '" onclick="chatListMenu()">' + icon('more') + '</button>';
   html += '</div>';
-  if (chatAvailable()) html += '<div class="chat-nextpoll-bar"><span id="chatNextPoll" class="chat-next-poll"></span></div>';
 
   html += '<div class="chat-body" id="chatBody">';
 
@@ -709,37 +773,45 @@ function chatRenderList() {
     }
   }
 
-  // My address card (always shown once identity is known).
+  // My address — slim single row: label + FULL address (wraps on narrow
+  // screens, never truncated) + eye + copy. The whole row copies; the eye
+  // masks the address against shoulder-surfing (persisted; copy keeps
+  // working while masked).
   if (info.address) {
-    html += '<div class="chat-card chat-myaddr">' +
-      '<div class="chat-myaddr-label">' + esc(chatT('chat_my_address')) + '</div>' +
-      '<div class="chat-myaddr-row"><code class="chat-addr">' + esc(info.address) + '</code>' +
-      '<button class="chat-btn-soft" onclick="chatCopy(\'' + escAttr(info.address) + '\')">' + esc(chatT('chat_copy')) + '</button>' +
-      '<button class="chat-btn-soft" onclick="chatShowRecovery()">' + esc(chatT('chat_recovery_title')) + '</button></div>';
-    if (!info.backedUp) {
-      html += '<div class="chat-myaddr-hint">' + esc(chatT('chat_backup_hint')) + '</div>';
-    }
-    html += '</div>';
+    var addrMasked = false;
+    try { addrMasked = localStorage.getItem('thefeed_chat_addr_mask') === '1'; } catch (e) { }
+    html += '<div class="chat-addr-row" onclick="chatCopy(\'' + escAttr(info.address) + '\')">' +
+      '<span class="chat-addr-label">' + esc(chatT('chat_my_address')) + '</span>' +
+      '<button type="button" class="chat-icon-btn chat-addr-info" title="' + escAttr(chatT('chat_addr_info_btn')) + '" aria-label="' + escAttr(chatT('chat_addr_info_btn')) +
+      '" onclick="event.stopPropagation();showInfoDialog(chatT(\'chat_addr_info\'))">' + icon('info') + '</button>' +
+      (addrMasked
+        ? '<span class="chat-addr-mask">••••</span>'
+        : '<code class="chat-addr" dir="ltr">' + esc(info.address) + '</code>') +
+      '<button type="button" class="chat-icon-btn chat-addr-eye" title="' + escAttr(chatT('chat_addr_mask')) + '" aria-label="' + escAttr(chatT('chat_addr_mask')) +
+      '" onclick="event.stopPropagation();chatToggleAddrMask()">' + icon(addrMasked ? 'eyeOff' : 'views') + '</button>' +
+      '<button type="button" class="chat-icon-btn chat-addr-copy" title="' + escAttr(chatT('chat_copy')) + '" aria-label="' + escAttr(chatT('chat_copy')) +
+      '" onclick="event.stopPropagation();chatCopy(\'' + escAttr(info.address) + '\')">' + icon('copy') + '</button>' +
+      '</div>';
   }
 
   html += '<div id="chatRecoveryBox" style="display:none"></div>';
 
-  // Compose row only when chat is actually usable.
-  if (chatAvailable()) {
-    html += '<div class="chat-card chat-add-row">' +
-      '<input id="chatAddAddr" placeholder="' + escAttr(chatT('chat_add_contact_ph')) + '" autocapitalize="off" autocomplete="off" spellcheck="false">' +
-      '<button class="chat-btn-primary" onclick="chatStartNew()">' + esc(chatT('chat_new_chat')) + '</button></div>';
-  }
-
+  var chatComposeReady = chatAvailable() || chatEnabledServers().length;
   if (!chatState.threads.length) {
     if (chatAvailable()) html += '<div class="chat-empty">' + esc(chatT('chat_no_threads')) + '</div>';
+    // First use: a visible labeled button — the FAB alone is not
+    // discoverable enough for an empty list.
+    if (chatComposeReady) {
+      html += '<div class="chat-empty-cta"><button type="button" class="chat-btn-primary" onclick="chatOpenNewChatSheet()">' +
+        icon('pencil') + ' ' + esc(chatT('chat_new_chat')) + '</button></div>';
+    }
   } else {
     html += '<div class="chat-threads">';
     chatState.threads.forEach(function (th) {
       var nm = th.name || chatName(th.addr);
       var pinMark = th.pinned ? ('<span class="chat-pin-mark">' + icon('pinned') + '</span> ') : '';
       html += '<div class="chat-thread-item" onclick="openChatThread(\'' + escAttr(th.addr) + '\')">' +
-        chatAvatarHTML(nm, 38) +
+        chatAvatarHTML(nm, 44) + // match the feed (.ch-avatar) and mirror list avatars (44px)
         '<div class="chat-thread-main"><div class="chat-thread-name">' + pinMark + esc(nm) + '</div>' +
         '<div class="chat-thread-last">' + esc(th.lastText || '') + '</div></div>' +
         (th.unread ? '<span class="chat-unread-badge">' + th.unread + '</span>' : '') +
@@ -752,7 +824,14 @@ function chatRenderList() {
   html += '<div class="chat-progress-wrap"><div class="chat-progress" id="chatPollProgress"><div class="chat-progress-fill" id="chatPollProgressFill"></div></div><span class="chat-progress-label" id="chatPollProgressLabel"></span></div>';
   html += '</div>';
 
-  document.getElementById('chatModal').innerHTML = html;
+  // New chat: pencil FAB above the floating nav — replaces the old inline
+  // add-contact card (the thread list now starts right below the address row).
+  if (chatComposeReady) {
+    html += '<button type="button" class="chat-fab" onclick="chatOpenNewChatSheet()" aria-label="' +
+      escAttr(chatT('chat_new_chat')) + '" title="' + escAttr(chatT('chat_new_chat')) + '">' + icon('pencil') + '</button>';
+  }
+
+  document.getElementById('chatSidebar').innerHTML = html;
   chatBindPullRefresh(document.getElementById('chatBody'));
   chatUpdateCountdown();
 }
@@ -811,7 +890,6 @@ async function chatForwardToSaved(btn) {
     if (r.ok) {
       var data = await r.json();
       var wasRemoved = data && data.toggled === 'removed';
-      if (wasRemoved) btn.classList.remove('saved'); else btn.classList.add('saved');
       if (typeof showToast === 'function') {
         showToast(wasRemoved ? (t('unsaved_toast') || 'Removed from Saved') : (t('saved_toast') || 'Forwarded to Saved'));
       }
@@ -829,7 +907,9 @@ window.chatForwardToSaved = chatForwardToSaved;
 async function chatShowRecovery() {
   var box = document.getElementById('chatRecoveryBox');
   if (!box) return;
-  if (box.style.display === 'block') { box.style.display = 'none'; return; }
+  // Closing it lifts the render guard — flush any list update that arrived
+  // (and was deferred) while the recovery code was on screen.
+  if (box.style.display === 'block') { box.style.display = 'none'; chatFlushPendingRender(); return; }
   try {
     var r = await fetch('/api/chat/seed');
     var d = await r.json();
@@ -839,7 +919,7 @@ async function chatShowRecovery() {
       '<div class="chat-recovery-code">' + esc(d.recovery) + '</div>' +
       '<div class="chat-banner-actions">' +
       '<button class="chat-btn-soft" onclick="chatCopy(\'' + escAttr(d.recovery) + '\')">' + esc(chatT('chat_copy')) + '</button>' +
-      '<button class="chat-btn-soft" onclick="chatMarkBackedUp()">' + esc(chatT('chat_backup_saved')) + '</button>' +
+      '<button class="chat-btn-soft' + ((chatState.info && chatState.info.backedUp === false) ? ' chat-dot' : '') + '" onclick="chatMarkBackedUp()">' + esc(chatT('chat_backup_saved')) + '</button>' +
       '<button class="chat-btn-soft" onclick="chatImportPrompt()">' + esc(chatT('chat_import')) + '</button>' +
       '</div></div>';
   } catch (e) { }
@@ -848,6 +928,10 @@ async function chatShowRecovery() {
 async function chatMarkBackedUp() {
   await fetch('/api/chat/seed', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'backedup' }) });
   if (chatState.info) chatState.info.backedUp = true;
+  // Collapse the recovery panel first so the list re-render isn't blocked by the
+  // open-overlay guard (chatOverlayOpen treats the visible box as an overlay).
+  var box = document.getElementById('chatRecoveryBox');
+  if (box) box.style.display = 'none';
   chatRenderList();
 }
 
@@ -878,13 +962,33 @@ function chatUsableServers() {
   return chatAvailServers().filter(function (s) { return s.enabled });
 }
 
+// chatEnabledServers: servers the user has turned on. Prefers the live probe
+// (reachable + enabled); before it lands, falls back to the disk-backed
+// /api/chat/info list so the compose field and "new chat" work on first open
+// without waiting for the slow availability probe.
+function chatEnabledServers() {
+  var usable = chatUsableServers();
+  if (usable.length) return usable;
+  var info = chatState.info || {};
+  return (info.servers || []).filter(function (s) { return s.enabled });
+}
+
 // chatServerSheet lists every chat-capable server with its state and an on/off
 // toggle, so the user controls exactly which servers learn their address.
 function chatServerSheet() {
   chatCloseMenu();
-  var servers = (chatState.avail && chatState.avail.servers) || [];
+  // Prefer the live probe; before it lands, show the disk-backed server list
+  // (from /api/chat/info) with each row marked "checking" so the user sees ALL
+  // their servers — active and inactive — instead of a blank "checking…" screen.
+  var probed = (chatState.avail && chatState.avail.servers) || [];
+  var servers = probed;
+  if (!probed.length) {
+    servers = ((chatState.info && chatState.info.servers) || []).map(function (s) {
+      return { key: s.key, name: s.name, domain: s.domain, enabled: s.enabled, checking: true };
+    });
+  }
   var sheet = document.createElement('div');
-  sheet.className = 'chat-sheet-overlay';
+  sheet.className = 'chat-sheet-overlay chat-server-sheet';
   sheet.id = 'chatSheet';
   sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
   var items = '<div class="chat-sheet-title">' + esc(chatT('chat_servers_title')) + '</div>' +
@@ -894,7 +998,8 @@ function chatServerSheet() {
   }
   servers.forEach(function (sv) {
     var label = sv.name ? (sv.name + ' — ' + sv.domain) : sv.domain;
-    var state = !sv.available ? chatT('chat_server_unreachable')
+    var state = sv.checking ? chatT('chat_checking')
+      : !sv.available ? chatT('chat_server_unreachable')
       : (sv.enabled ? chatT('chat_server_on') : chatT('chat_server_off'));
     var action = sv.enabled ? chatT('chat_server_turn_off') : chatT('chat_server_turn_on');
     // No button for a chatless server; busy state while a toggle is in flight;
@@ -989,12 +1094,66 @@ async function chatRecheckServer(key) {
 }
 window.chatRecheckServer = chatRecheckServer;
 
+// chatToggleAddrMask flips the shoulder-surfing mask on the my-address row.
+function chatToggleAddrMask() {
+  try {
+    var k = 'thefeed_chat_addr_mask';
+    localStorage.setItem(k, localStorage.getItem(k) === '1' ? '0' : '1');
+  } catch (e) { }
+  chatRenderList();
+}
+
+// chatOpenNewChatSheet is the new-conversation bottom sheet (opened by the
+// pencil FAB): a large address field with a paste helper — easier than
+// long-press paste — and one primary start action. Uses .chat-sheet-overlay
+// so the render guard defers list re-renders while it's open.
+function chatOpenNewChatSheet() {
+  chatCloseMenu();
+  var ov = document.createElement('div');
+  ov.className = 'chat-sheet-overlay';
+  ov.id = 'chatSheet';
+  ov.onclick = function (e) { if (e.target === ov) chatCloseMenu(); };
+  ov.innerHTML = '<div class="chat-sheet" dir="' + chatDir() + '">' +
+    '<div class="chat-sheet-title">' + esc(chatT('chat_new_chat')) + '</div>' +
+    '<div class="chat-newchat-row">' +
+    '<input id="chatAddAddr" placeholder="' + escAttr(chatT('chat_add_contact_ph')) +
+    '" autocapitalize="off" autocomplete="off" spellcheck="false" onkeydown="if(event.key===\'Enter\')chatStartNew()">' +
+    '<button type="button" class="chat-btn-soft" onclick="chatPasteAddr()">' + esc(chatT('chat_paste')) + '</button></div>' +
+    '<button type="button" class="chat-btn-primary chat-newchat-start" onclick="chatStartNew()">' + esc(chatT('chat_start_chat')) + '</button>' +
+    '<button type="button" class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>' +
+    '</div>';
+  document.getElementById('chatModal').appendChild(ov);
+  setTimeout(function () {
+    var i = document.getElementById('chatAddAddr');
+    if (i) try { i.focus(); } catch (e) { }
+  }, 60);
+}
+
+// chatPasteAddr fills the new-chat field from the clipboard; WebViews and
+// non-secure contexts may lack readText — then just focus so the user
+// pastes manually.
+function chatPasteAddr() {
+  var inp = document.getElementById('chatAddAddr');
+  if (!inp) return;
+  if (navigator.clipboard && navigator.clipboard.readText) {
+    navigator.clipboard.readText().then(function (v) {
+      if (v) inp.value = v.trim();
+      inp.focus();
+    }, function () { inp.focus(); });
+    return;
+  }
+  inp.focus();
+}
+
 function chatStartNew() {
   var inp = document.getElementById('chatAddAddr');
   var addr = chatCanonAddr(inp.value);
   if (!addr) { showToast(chatT('chat_bad_address')); return }
-  if (addr === (chatState.info && chatState.info.address)) { showToast(chatT('chat_bad_address')); return }
-  var servers = chatUsableServers();
+  // A valid address that's your own — say so, don't call it "invalid".
+  if (addr === (chatState.info && chatState.info.address)) { showToast(chatT('chat_self_address')); return }
+  // Enabled servers, falling back to the disk-backed list so starting a chat
+  // works on first open before the availability probe lands.
+  var servers = chatEnabledServers();
   if (!servers.length) { chatServerSheet(); return; } // turn on a server first
   if (servers.length === 1) {
     chatState.pendingServer[addr] = servers[0].key;
@@ -1036,14 +1195,30 @@ async function openChatThread(addr) {
   // (server picker, the first-run "checking servers" spinner, a stray prompt) so
   // the render guard can't defer it and a full-screen overlay can't eat the tap.
   document.querySelectorAll('#chatModal .chat-sheet-overlay').forEach(function (o) { o.remove(); });
+  // The expanded recovery-code panel also trips chatOverlayOpen(), which would
+  // defer BOTH the list and thread render and leave a blank "select a
+  // conversation" pane. Collapse it too.
+  var _rec = document.getElementById('chatRecoveryBox'); if (_rec) _rec.style.display = 'none';
   chatState.guideAfterAvail = false; // don't re-pop the guide over the thread
   chatState.renderPending = false;
   chatState.view = 'thread';
   chatState.peer = addr;
   chatState.draft = ''; // each conversation starts with an empty compose box
   chatState.safetyOpen = false; // collapse the safety explainer per conversation
+  // Clear this conversation's unread badge immediately. The messages fetch in
+  // chatRenderThread uses markRead=1 (clears it server-side); reflect it locally
+  // now so the sidebar list row + global badge update without waiting for the
+  // next thread reload. In the desktop two-pane the list stays visible next to
+  // the open thread, so a stale "1" would otherwise linger by the name.
+  (chatState.threads || []).forEach(function (th) { if (th.addr === addr) th.unread = 0; });
+  chatUpdateBadge();
+  if (chatState.open) chatRenderList(true); // keepView: don't leave the thread
   if (!chatThreadPushed) {
     try { history.pushState({ view: 'chatThread' }, ''); chatThreadPushed = true; } catch (e) { }
+  }
+  // Mobile: swap to the content pane (reuse the feed's pane-swap).
+  if (typeof mobileQuery !== 'undefined' && mobileQuery.matches) {
+    var app = document.getElementById('app'); if (app) app.classList.add('chat-open');
   }
   await chatRenderThread();
   // ✓✓ + safety emojis arrive async (it's a DNS round trip). The foreground
@@ -1065,6 +1240,30 @@ async function chatThreadRefresh() {
 function chatToggleSafety(el) {
   chatState.safetyOpen = !chatState.safetyOpen;
   if (el) el.classList.toggle('open', chatState.safetyOpen);
+}
+
+// chatMsgMenu is the per-message action sheet (copy / save-to-Saved) —
+// opened by tapping a bubble or its ⋮. Reply joins this menu when the
+// reply feature lands.
+function chatMsgMenu(msgEl) {
+  if (!msgEl || !msgEl.classList || !msgEl.classList.contains('chat-msg')) return;
+  // Don't eat a click that ends a text selection.
+  try { if (window.getSelection && String(window.getSelection())) return; } catch (e) { }
+  chatCloseMenu();
+  var sheet = document.createElement('div');
+  sheet.className = 'chat-sheet-overlay';
+  sheet.id = 'chatSheet';
+  sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+  sheet.innerHTML = '<div class="chat-sheet" dir="' + chatDir() + '">' +
+    '<button class="chat-sheet-item" id="chatMsgMenuCopy">' + icon('copy') + ' ' + esc(chatT('chat_copy')) + '</button>' +
+    '<button class="chat-sheet-item" id="chatMsgMenuSave">' + icon('bookmark') + ' ' + esc(t('forward_to_saved')) + '</button>' +
+    '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>' +
+    '</div>';
+  document.getElementById('chatModal').appendChild(sheet);
+  // closest('.chat-msg') matches the element itself, so the existing
+  // button-based helpers work unchanged with the bubble as the anchor.
+  sheet.querySelector('#chatMsgMenuCopy').onclick = function () { chatCloseMenu(); chatCopyMsg(msgEl); };
+  sheet.querySelector('#chatMsgMenuSave').onclick = function () { chatCloseMenu(); chatForwardToSaved(msgEl); };
 }
 
 // chatRowMenu shows an action sheet (pin/unpin + delete) for a list row.
@@ -1162,28 +1361,8 @@ async function chatClearMessages(addr) {
   chatLoadThreads();
 }
 
-// chatThreadMenu is the ⋮ overflow in the conversation header: clear just the
-// messages (keep the chat), or delete the whole conversation.
-function chatThreadMenu() {
-  var addr = chatState.peer;
-  if (!addr) return;
-  chatCloseMenu();
-  var nm = chatState.contacts[addr] || chatName(addr);
-  var sheet = document.createElement('div');
-  sheet.className = 'chat-sheet-overlay';
-  sheet.id = 'chatSheet';
-  sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
-  sheet.innerHTML =
-    '<div class="chat-sheet">' +
-    '<div class="chat-sheet-title">' + esc(nm) + '</div>' +
-    '<button class="chat-sheet-item" onclick="chatClearMessages(\'' + escAttr(addr) + '\')">' +
-    icon('eraser') + ' ' + esc(chatT('chat_clear')) + '</button>' +
-    '<button class="chat-sheet-item chat-sheet-danger" onclick="chatDelete(\'' + escAttr(addr) + '\')">' +
-    icon('delete') + ' ' + esc(chatT('chat_delete')) + '</button>' +
-    '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('cancel')) + '</button>' +
-    '</div>';
-  document.getElementById('chatModal').appendChild(sheet);
-}
+// (chatThreadMenu removed — the thread ⋮ now opens the merged chatContactInfo
+// panel, which includes Clear messages / Delete.)
 
 // chatListMenu is the ⋮ overflow on the chat list: sound toggle and log.
 function chatListMenu() {
@@ -1192,8 +1371,21 @@ function chatListMenu() {
   sheet.className = 'chat-sheet-overlay';
   sheet.id = 'chatSheet';
   sheet.onclick = function (e) { if (e.target === sheet) chatCloseMenu(); };
+  // Server picker + live status, moved out of the (cluttered) topbar.
+  var info = chatState.info || {};
+  var srvCount = chatState.avail ? chatUsableServers().length : (info.anyEnabled ? (info.enabledCount || 0) : null);
+  var srvLabel = (srvCount === null)
+    ? chatT('chat_checking')
+    : chatT('chat_servers_active').replace('{n}', srvCount);
+  // Recovery code lives here now (out of the address card). Red dot until the
+  // user backs it up — and chatShowRecovery puts the dot on its "I saved it".
+  var recoveryDot = (info.address && info.backedUp === false) ? ' chat-dot' : '';
   sheet.innerHTML =
     '<div class="chat-sheet">' +
+    '<button class="chat-sheet-item" onclick="chatCloseMenu();chatServerSheet()">' +
+    icon('antenna') + ' ' + esc(srvLabel) + '</button>' +
+    '<button class="chat-sheet-item' + recoveryDot + '" onclick="chatCloseMenu();chatShowRecovery()">' +
+    icon('bookmark') + ' ' + esc(chatT('chat_recovery_title')) + '</button>' +
     '<button class="chat-sheet-item" onclick="chatToggleSound();chatListMenu()">' +
     icon('music') + ' ' + esc(chatT(chatSoundOff() ? 'chat_sound_off' : 'chat_sound_on')) + '</button>' +
     '<button class="chat-sheet-item" onclick="chatCloseMenu();chatOpenLog()">' +
@@ -1234,7 +1426,10 @@ function chatCellSizeSheet() {
           if (sc.errors >= 0.5) label += ' · ' + Math.round(sc.errors) + chatT('chat_size_err');
           var rate = sc.queries > 0 ? (1 - sc.errors / sc.queries) : 1;
           label += ' · ' + chatT('chat_size_score') + (rate * 10).toFixed(1);
-          score = '<span class="chat-score">' + esc(label) + '</span>';
+          // The chat thread is laid out LTR (.chat-modal), so without an explicit
+          // dir this mixed number+label badge renders LTR and the query count is
+          // flung to the wrong side in Persian. Pin it to the language direction.
+          score = '<span class="chat-score" dir="' + chatDir() + '">' + esc(label) + '</span>';
         }
       }
       items += '<button class="chat-sheet-item' + (on ? ' chat-sheet-on' : '') +
@@ -1280,6 +1475,7 @@ function chatSetCellSize(mode) {
 async function chatRenderThread() {
   var addr = chatState.peer;
   if (!addr) return;
+  document.documentElement.classList.add('chat-thread');
   // A popup is open (rename prompt, menu, …): don't rebuild the thread — defer.
   if (chatOverlayOpen()) { chatState.renderPending = true; return; }
   chatState.renderPending = false;
@@ -1302,11 +1498,20 @@ async function chatRenderThread() {
   var keepScroll = prevBody && (prevBody.scrollHeight - prevBody.scrollTop - prevBody.clientHeight > 40);
   var prevScroll = prevBody ? prevBody.scrollTop : 0;
   var firstRender = prevInput == null;
-  var data = { msgs: [] };
+  var data = null;
   try {
     var r = await fetch('/api/chat/messages?peer=' + encodeURIComponent(addr) + '&markRead=1');
-    data = await r.json();
+    if (r.ok) data = await r.json();
   } catch (e) { }
+  // A failed/non-OK fetch (a transient local-server hiccup — e.g. right after a
+  // config switch or app resume) must NOT blank an already-open conversation:
+  // rendering an empty list here made the user's messages appear to vanish. Keep
+  // the current view and let the next tick retry; only the very first render has
+  // nothing to preserve and may fall through to the empty state.
+  if (data == null) {
+    if (!firstRender) return;
+    data = { msgs: [] };
+  }
   var msgs = data.msgs || []; // server may omit / null for an empty thread
   // Per-server ✓/✓✓ high-water seq (seq numbering is per server). Merge the
   // persisted thread counters (fresh: a just-committed send is bumped here)
@@ -1331,12 +1536,18 @@ async function chatRenderThread() {
   html += '<div class="chat-topbar-title" onclick="chatContactInfo()" style="cursor:pointer">' +
     chatAvatarHTML(nm, 36) +
     '<div class="chat-topbar-name-wrap"><div class="chat-peer-name">' + esc(nm) + '</div></div></div>';
+  // Circular next-poll timer lives in the topbar; the rate-limit/quota moved
+  // into the contact panel (⋮) so the topbar isn't cramped next to the name.
+  if (chatAvailable()) html += chatTimerBtnHTML();
   html += '<button id="chatRefreshBtn" class="chat-icon-btn' + (chatState.polling ? ' spinning' : '') + '" ' +
     (chatState.polling ? 'disabled ' : '') + 'title="' + escAttr(chatT('chat_refresh')) + '" onclick="chatThreadRefresh()">' + icon('refresh') + '</button>';
+  // ⋮ opens the SAME merged contact panel as tapping the name.
   html += '<button class="chat-icon-btn" title="' + escAttr(chatT('chat_menu')) +
-    '" aria-label="' + escAttr(chatT('chat_menu')) + '" onclick="chatThreadMenu()">' + icon('more') + '</button>';
+    '" aria-label="' + escAttr(chatT('chat_menu')) + '" onclick="chatContactInfo()">' + icon('more') + '</button>';
   html += '</div>';
-  html += '<div class="chat-nextpoll-bar"><span id="chatNextPoll" class="chat-next-poll"></span>' +
+  // Thin receive-progress strip under the floating topbar (countdown moved to
+  // the circular timer above; this only fills during a receive).
+  html += '<div class="chat-nextpoll-bar">' +
     '<div class="chat-progress chat-progress-inline" id="chatRecvProgress"><div class="chat-progress-fill" id="chatRecvProgressFill"></div></div>' +
     '<span class="chat-progress-label" id="chatRecvProgressLabel"></span></div>';
 
@@ -1346,7 +1557,8 @@ async function chatRenderThread() {
   if (st.emojis) {
     html += '<div class="chat-sysmsg chat-safety-sep' + (chatState.safetyOpen ? ' open' : '') +
       '" onclick="chatToggleSafety(this)">' +
-      '<span dir="auto">' + esc(st.emojis.join(' ')) + ' · ' + esc(chatT('chat_safety_code')) + '</span>' +
+      '<span dir="auto">' + esc(st.emojis.join(' ')) + ' · ' + esc(chatT('chat_safety_code')) +
+      '<span class="chat-safety-i" aria-hidden="true">' + icon('info') + '</span></span>' +
       '<div class="chat-safety-explain" dir="auto">' + esc(chatT('chat_safety_explain')) + '</div></div>';
   }
   if (!msgs.length) {
@@ -1392,15 +1604,14 @@ async function chatRenderThread() {
       // probes them too — otherwise ✓✓ never lands after switching servers.
       if (sk && del < m.seq) pending[sk] = true;
     }
-    html += '<div class="chat-msg ' + (m.dir === 'in' ? 'in' : 'out') + '" dir="auto">' +
+    // Bubble actions live in a sheet (chatMsgMenu) — opened by tapping the
+    // bubble or the ⋮ pinned at the block's bottom edge, outside the box.
+    html += '<div class="chat-msg ' + (m.dir === 'in' ? 'in' : 'out') + '" dir="auto" onclick="chatMsgMenu(this)">' +
       '<span class="chat-msg-text">' + esc(m.text).replace(/🇮🇷/g, '<img src="/static/lion-sun.svg" alt="\u{1F981}☀️" style="height:1.1em;vertical-align:middle">') + '</span>' +
       '<span class="chat-msg-meta">' +
-      '<button type="button" class="chat-msg-copy"' +
-      ' onclick="event.stopPropagation();chatCopyMsg(this)">' + esc(chatT('chat_copy')) + '</button>' +
-      '<button type="button" class="chat-msg-save" title="' + escAttr(t('forward_to_saved')) +
-      '" aria-label="' + escAttr(t('forward_to_saved')) +
-      '" onclick="event.stopPropagation();chatForwardToSaved(this)">' + icon('bookmark') + '</button>' +
-      '<span class="chat-msg-time">' + chatFmtTime(m.ts) + ticks + '</span></span></div>' +
+      '<span class="chat-msg-time">' + chatFmtTime(m.ts) + ticks + '</span></span>' +
+      '<button type="button" class="chat-msg-more" title="" aria-label="' + escAttr(chatT('chat_msg_actions')) +
+      '" onclick="event.stopPropagation();chatMsgMenu(this.parentNode)">' + icon('more') + '</button></div>' +
       '<div class="chat-clearfix"></div>';
   });
   chatState.pendingServers[addr] = Object.keys(pending);
@@ -1418,16 +1629,17 @@ async function chatRenderThread() {
   html += '</div>'; // .chat-body
   html += '<button id="chatScrollDown" class="chat-scroll-down hidden" aria-label="' +
     escAttr(chatT('chat_scroll_bottom')) + '" title="' + escAttr(chatT('chat_scroll_bottom')) +
-    '" onclick="chatScrollToBottom()">' + icon('chevronDown') +
+    '" onclick="chatScrollToBottom()">' + icon('arrowDown') +
     '<span class="chat-scroll-down-badge" id="chatScrollDownBadge"></span></button>';
   html += '</div>'; // .chat-body-wrap
 
   html += '<div class="chat-footer">';
-  var qi = chatQuotaIcon();
-  if (qi) html += '<span class="chat-quota-dot" id="chatQuotaDot" onclick="chatShowQuotaDetail()" title="' + escAttr(qi.detail) + '">' + qi.svg + '</span>';
   html += '<div class="chat-send-error" id="chatSendError"></div>';
   html += '<div class="chat-progress-wrap"><div class="chat-progress" id="chatSendProgress"><div class="chat-progress-fill" id="chatSendProgressFill"></div></div><span class="chat-progress-label" id="chatSendProgressLabel"></span></div>';
+  // Compose row: three SEPARATE pills — quota ring (start) · text pill · send
+  // circle. The quota ring shows remaining sends; tap it for the full detail.
   html += '<div class="chat-input-row">' +
+    chatQuotaCircleHTML() +
     '<textarea id="chatInput" dir="auto" placeholder="' + escAttr(chatT('chat_send_ph')) + '" rows="1" oninput="chatInputResize()" onkeydown="chatInputKey(event)"></textarea>' +
     '<button class="chat-send-btn" id="chatSendBtn" onclick="sendChatMessage()" aria-label="' + escAttr(chatT('chat_send')) + '">' + icon('send') + '</button></div>';
   html += '<div class="chat-charcount" id="chatCharCount"></div>';
@@ -1435,7 +1647,7 @@ async function chatRenderThread() {
 
   // A popup may have opened during the await above — don't wipe it.
   if (chatOverlayOpen()) { chatState.renderPending = true; return; }
-  var modal = document.getElementById('chatModal');
+  var modal = document.getElementById('chatPane'); // thread renders into the content pane
   var liveFooter = hadFocus && !firstRender ? modal.querySelector('.chat-footer') : null;
   if (liveFooter) {
     var tmp = document.createElement('div');
@@ -1497,7 +1709,14 @@ async function chatRenderThread() {
   }
   chatInputResize();
   chatUpdateCountdown();
-  if (inp && !liveFooter && (firstRender || (hadFocus && !keepScroll))) {
+  // Auto-focus the compose box on first open only on DESKTOP. On mobile that
+  // popped the keyboard immediately, which shrank the viewport and pushed the
+  // newest messages (just scrolled into view) back under the keyboard. Like
+  // Telegram, mobile waits for the user to tap the box. Focus is still preserved
+  // across the periodic re-renders (hadFocus) so typing isn't interrupted.
+  var isMobile = (typeof mobileQuery !== 'undefined' && mobileQuery.matches);
+  var allowFirstFocus = firstRender && !isMobile;
+  if (inp && !liveFooter && (allowFirstFocus || (hadFocus && !keepScroll))) {
     try { inp.focus({ preventScroll: true }); } catch (e) { inp.focus(); }
   }
   if (inp && !liveFooter) inp.addEventListener('blur', chatFlushPendingRender);
@@ -1662,6 +1881,9 @@ function chatInputKey(e) {
 function chatShowList() {
   chatState.view = 'list';
   chatState.peer = null;
+  // Mobile: swap back to the sidebar (content pane shows the placeholder).
+  var app = document.getElementById('app'); if (app) app.classList.remove('chat-open');
+  chatRenderContentEmpty();
   chatRenderList();
   chatLoadThreads();
 }
@@ -1693,14 +1915,24 @@ function chatContactInfo() {
   // Safety code, next to the address — tap to expand the explainer.
   if (st.emojis) {
     h += '<div class="chat-info-field chat-info-safety-wrap" onclick="this.classList.toggle(\'open\')">' +
-      '<div class="chat-info-label">' + esc(chatT('chat_safety_code')) + '</div>' +
+      '<div class="chat-info-label">' + esc(chatT('chat_safety_code')) +
+      '<span class="chat-safety-i" aria-hidden="true">' + icon('info') + '</span></div>' +
       '<div class="chat-info-value chat-info-safety">' + esc(st.emojis.join(' ')) + '</div>' +
       '<div class="chat-safety-explain" dir="auto">' + esc(chatT('chat_safety_explain')) + '</div></div>';
   }
   h += '<div class="chat-info-field"><div class="chat-info-label">' + esc(chatT('chat_info_server')) + '</div>' +
     '<div class="chat-info-value" dir="auto"><bdi>' + esc(chatServerLabel(chatState.curServer)) + '</bdi></div>' +
     '<button class="chat-btn-soft" onclick="chatCloseMenu();chatSwitchServerSheet()">' + esc(chatT('chat_change_server')) + '</button></div>';
+  // Rate-limit / quota — moved here out of the cramped topbar.
+  var qi = chatQuotaIcon();
+  if (qi) {
+    h += '<div class="chat-info-field"><div class="chat-info-label">' + esc(chatT('chat_quota_label')) + '</div>' +
+      '<div class="chat-info-value' + (qi.low ? ' chat-info-quota-low' : '') + '" dir="auto">' + esc(qi.detail) + '</div></div>';
+  }
   h += '<button class="chat-sheet-item" onclick="chatContactRename()">' + icon('edit') + ' ' + esc(chatT('chat_rename')) + '</button>';
+  // Merged in from the old thread ⋮ menu: clear / delete the conversation.
+  h += '<button class="chat-sheet-item" onclick="chatClearMessages(\'' + escAttr(addr) + '\')">' + icon('eraser') + ' ' + esc(chatT('chat_clear')) + '</button>';
+  h += '<button class="chat-sheet-item chat-sheet-danger" onclick="chatDelete(\'' + escAttr(addr) + '\')">' + icon('delete') + ' ' + esc(chatT('chat_delete')) + '</button>';
   h += '<button class="chat-sheet-item chat-sheet-cancel" onclick="chatCloseMenu()">' + esc(chatT('close')) + '</button></div>';
   sheet.innerHTML = h;
   document.getElementById('chatModal').appendChild(sheet);
@@ -1807,7 +2039,8 @@ async function chatFetchPeerStatus(addr, server) {
             var sep = document.createElement('div');
             sep.className = 'chat-sysmsg chat-safety-sep';
             sep.onclick = function () { chatToggleSafety(sep); };
-            sep.innerHTML = '<span dir="auto">' + esc(d.emojis.join(' ')) + ' · ' + esc(chatT('chat_safety_code')) + '</span>' +
+            sep.innerHTML = '<span dir="auto">' + esc(d.emojis.join(' ')) + ' · ' + esc(chatT('chat_safety_code')) +
+              '<span class="chat-safety-i" aria-hidden="true">' + icon('info') + '</span></span>' +
               '<div class="chat-safety-explain" dir="auto">' + esc(chatT('chat_safety_explain')) + '</div>';
             mb0.insertBefore(sep, mb0.firstChild);
           }
@@ -1874,6 +2107,13 @@ async function sendChatMessage() {
       if (d.remaining != null) chatState.quota = { remaining: d.remaining, resetUnix: d.resetUnix };
       delete chatState.pendingServer[peerAddr];
       chatBumpActivity();
+      // First send to a NEW peer creates the thread server-side: reload so it
+      // appears in the sidebar list (the foreground poll used to do this).
+      chatLoadThreads();
+      // A send proves the server is reachable — probe availability if we don't
+      // have it yet so the timer + quota (which need avail.limits) populate
+      // without a manual page refresh.
+      if (!chatAvailable()) chatCheckAvailability();
       var stillViewing = chatState.view === 'thread' && chatState.peer === peerAddr;
       if (stillViewing) {
         chatState.draft = '';
@@ -1915,20 +2155,24 @@ async function chatPollNow() {
   if (chatState.polling) return;
   chatState.polling = true;
   chatSetRefreshBusy(true);
-  chatState.nextPollAt = Date.now() + CHAT_FG_POLL_MS; // reset the countdown
   chatShowPollProgress(0, 1);
   try {
     var r = await fetch('/api/chat/poll', { method: 'POST' });
     var d = await r.json();
     if (!d.ok) showToast(chatT(d.error || 'chat_err_generic'));
     else if (d.got > 0) showToast(chatT('chat_new_messages').replace('{n}', d.got));
-  } catch (e) { }
-  chatState.polling = false;
-  chatSetRefreshBusy(false);
-  chatHidePollProgress();
-  chatLoadThreads().then(function () {
-    if (chatState.view === 'thread') chatRenderThread();
-  });
+  } catch (e) {
+  } finally {
+    // ALWAYS clear the spinner, even on a thrown error — otherwise the ⟳ button
+    // spins forever. Drop polling BEFORE the re-render so the rebuilt button
+    // isn't recreated with the 'spinning' class.
+    chatState.polling = false;
+    chatSetRefreshBusy(false);
+    chatHidePollProgress();
+    chatLoadThreads().then(function () {
+      if (chatState.view === 'thread') chatRenderThread();
+    });
+  }
 }
 
 // chatSetRefreshBusy toggles the refresh button's spinner/disabled state (it
@@ -2021,7 +2265,10 @@ function chatShowHandshakeProgress(done) {
   var fill = document.getElementById('chatSendProgressFill');
   if (fill) fill.style.width = '100%';
   var label = document.getElementById('chatSendProgressLabel');
-  if (label) label.textContent = chatT('chat_connecting') + ' ' + done + '↑';
+  // Isolate the count+arrow in an LTR bidi run so it stays a unit at the START
+  // of the line; as bare text inside RTL (Persian) the number was reordered to
+  // the end. chat_connecting is trusted i18n text (no HTML), done is a number.
+  if (label) label.innerHTML = '<bdi dir="ltr">' + (done | 0) + '↑</bdi> ' + chatT('chat_connecting');
 }
 
 // Receive/poll progress can be shown in either view (list has chatPollProgress,
@@ -2038,6 +2285,17 @@ function chatHidePollProgress() {
 // Called by sse.js on "chat" events.
 function chatOnSSE(data) {
   if (!data || typeof data !== 'object') return;
+  if (data.type === 'nextpoll') {
+    // Backend announced when its next poll lands — drive the countdown ring from
+    // its real schedule (handled even when chat is closed so the value is fresh
+    // on open).
+    if (data.ms > 0) {
+      chatState.pollIntervalMs = data.ms;
+      chatState.nextPollAt = Date.now() + data.ms;
+      if (chatState.open) chatUpdateCountdown();
+    }
+    return;
+  }
   if (data.type === 'progress') {
     if (data.op === 'handshake') {
       clearTimeout(chatState.sendConnTimer);

@@ -1,5 +1,8 @@
     /* ===== SETTINGS SECTIONS ===== */
-    .settings-section {
+    /* :not(:root) so this component class never matches the <html> state class
+       of the same name (html.settings-section) — otherwise the root element
+       inherits this spacing and shows an empty bar above the whole app. */
+    .settings-section:not(:root) {
       margin-top: 14px;
       padding-top: 12px;
       border-top: 1px solid var(--border)
@@ -288,13 +291,26 @@
       position: fixed;
       inset: 0;
       background: rgba(0, 0, 0, .65);
-      z-index: 100;
+      /* Above the floating nav (9300): every modal must cover it, otherwise a
+         dialog created without an explicit lift (e.g. the update prompt) slides
+         UNDER the nav. Specific modals may still raise themselves further
+         (editor 9500, startup prompts 9600, confirm dialogs 99990). */
+      z-index: 9400;
       justify-content: center;
       align-items: center
     }
 
     .modal-overlay.active {
-      display: flex
+      display: flex;
+      /* Fade just the backdrop in (the .modal does its own modalIn scale). A
+         one-shot animation, not a state transition, so nothing can freeze
+         halfway; animating background-color keeps modal content fully opaque. */
+      animation: overlayFade var(--motion) var(--ease)
+    }
+
+    @keyframes overlayFade {
+      from { background-color: rgba(0, 0, 0, 0) }
+      to   { background-color: rgba(0, 0, 0, .65) }
     }
 
     .modal {
@@ -774,6 +790,59 @@
       transform: scale(0.97)
     }
 
+    /* Numeric stepper: a small centred field flanked by big + / − buttons,
+       with the browser's default spin arrows removed. */
+    .num-stepper {
+      display: flex;
+      align-items: stretch;
+      gap: 6px;
+      /* Fixed width so every stepper is identical regardless of label length
+         or value — keeps the column tidy. */
+      width: 150px;
+      flex: 0 0 auto;
+    }
+
+    .num-stepper input[type="number"] {
+      flex: 1 1 auto;
+      min-width: 0;
+      width: auto;
+      text-align: center;
+      -moz-appearance: textfield;
+      appearance: textfield;
+    }
+
+    .num-stepper input[type="number"]::-webkit-outer-spin-button,
+    .num-stepper input[type="number"]::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+
+    .num-step-btn {
+      flex: 0 0 auto;
+      width: 40px;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+      color: var(--text);
+      border-radius: var(--radius-md);
+      font-size: 19px;
+      font-weight: 600;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .num-step-btn:hover {
+      background: var(--hover);
+    }
+
+    .num-step-btn:active {
+      transform: scale(0.94);
+    }
+
     .btn:focus-visible {
       outline: none;
       box-shadow: var(--focus-ring)
@@ -795,6 +864,12 @@
 
     .btn-primary:hover {
       background: var(--accent-hover)
+    }
+
+    .btn:disabled {
+      opacity: .45;
+      cursor: default;
+      pointer-events: none
     }
 
     .btn-danger {
@@ -1136,4 +1211,109 @@
     #toast.show {
       opacity: 1;
       transform: translateX(-50%) translateY(0)
+    }
+
+    /* ===== LINK SHEET ===== */
+    .link-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: rgba(0,0,0,.45);
+      display: flex;
+      align-items: flex-end;
+      justify-content: center
+    }
+
+    .link-sheet {
+      position: relative;
+      background: var(--bg-elevated, var(--bg));
+      border-radius: 14px 14px 0 0;
+      width: 100%;
+      max-width: 480px;
+      padding: 18px 16px calc(env(safe-area-inset-bottom, 12px) + 12px);
+      box-shadow: 0 -4px 24px rgba(0,0,0,.25)
+    }
+
+    /* Small close button, top-left of the sheet (matches the mirror sheet).
+       Physical left regardless of text direction. */
+    .link-sheet-close {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      width: 28px;
+      height: 28px;
+      border: none;
+      border-radius: 50%;
+      background: var(--bg);
+      color: var(--text-dim);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center
+    }
+
+    .link-sheet-close .icon svg {
+      width: 16px;
+      height: 16px
+    }
+
+    .link-sheet-close:hover {
+      color: var(--text)
+    }
+
+    .link-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 10px;
+      padding-left: 32px;
+      color: var(--text)
+    }
+
+    .link-url {
+      font-size: 13px;
+      color: var(--text-dim);
+      word-break: break-all;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 14px;
+      user-select: all;
+      -webkit-user-select: all
+    }
+
+    .link-actions {
+      display: flex;
+      gap: 8px
+    }
+
+    .link-btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer
+    }
+
+    .link-copy {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text)
+    }
+
+    .link-open {
+      background: var(--accent);
+      color: #fff
+    }
+
+    /* Extra in-app action (open channel / go to post) — same look as the
+       telemirror sheet's add-channel button. */
+    .link-goto {
+      width: 100%;
+      margin-top: 8px;
+      border: 1px dashed var(--accent);
+      background: transparent;
+      color: var(--accent)
     }

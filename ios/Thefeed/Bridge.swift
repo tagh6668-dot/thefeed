@@ -23,7 +23,25 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         case "shareMedia": share(body)
         case "openMedia": share(body)  // iOS treats open and share via the same picker
         case "setLang": setLang(body)
+        case "setSystemBars": setSystemBars(body)
         default: break
+        }
+    }
+
+    // MARK: - System bars (status bar + safe-area appearance)
+
+    // Force the window's appearance to the web theme so the status-bar icons and
+    // the SwiftUI safe-area fill (driven by @Environment(\.colorScheme)) both
+    // follow it — otherwise the notch / home-indicator bands stay dark in light
+    // theme. The WebView content keeps its own CSS theme; this is only chrome.
+    private func setSystemBars(_ body: [String: Any]) {
+        let dark = (body["dark"] as? Bool) ?? true
+        DispatchQueue.main.async { [weak self] in
+            let style: UIUserInterfaceStyle = dark ? .dark : .light
+            let window = self?.webView?.window
+                ?? UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+                ?? UIApplication.shared.windows.first
+            window?.overrideUserInterfaceStyle = style
         }
     }
 
@@ -110,15 +128,30 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     private func requestPhotoAdd(_ handler: @escaping (Bool) -> Void) {
-        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-        if status == .authorized || status == .limited {
-            handler(true); return
-        }
-        if status == .denied || status == .restricted {
-            handler(false); return
-        }
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { st in
-            DispatchQueue.main.async { handler(st == .authorized || st == .limited) }
+        // The add-only access level (.addOnly) and .limited status are iOS 14+;
+        // iOS 13 only has the all-or-nothing authorization.
+        if #available(iOS 14.0, *) {
+            let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+            if status == .authorized || status == .limited {
+                handler(true); return
+            }
+            if status == .denied || status == .restricted {
+                handler(false); return
+            }
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { st in
+                DispatchQueue.main.async { handler(st == .authorized || st == .limited) }
+            }
+        } else {
+            let status = PHPhotoLibrary.authorizationStatus()
+            if status == .authorized {
+                handler(true); return
+            }
+            if status == .denied || status == .restricted {
+                handler(false); return
+            }
+            PHPhotoLibrary.requestAuthorization { st in
+                DispatchQueue.main.async { handler(st == .authorized) }
+            }
         }
     }
 
@@ -165,21 +198,29 @@ final class Bridge: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     private func present(url: URL, save: Bool) {
         DispatchQueue.main.async { [weak self] in
-            guard
-                let scene = UIApplication.shared.connectedScenes
-                    .compactMap({ $0 as? UIWindowScene })
-                    .first,
-                let root = scene.windows.first?.rootViewController
-            else { return }
-            let activities: [UIActivity]? = nil
+            // We run a non-scene UIKit lifecycle (see AppDelegate), so
+            // UIApplication.connectedScenes is empty — find the key window
+            // directly and walk to the top-most presented controller.
+            guard let top = Self.topViewController() else { return }
             let vc = UIActivityViewController(
                 activityItems: [url],
-                applicationActivities: activities
+                applicationActivities: nil
             )
             // iPad popover anchor.
             vc.popoverPresentationController?.sourceView = self?.webView
-            root.present(vc, animated: true)
+            top.present(vc, animated: true)
         }
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let windows = UIApplication.shared.windows
+        let root = windows.first(where: { $0.isKeyWindow })?.rootViewController
+            ?? windows.first?.rootViewController
+        var top = root
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        return top
     }
 
     private func safeName(_ s: String) -> String? {

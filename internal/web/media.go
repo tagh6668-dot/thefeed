@@ -20,6 +20,9 @@ import (
 type mediaDLProgress struct {
 	completed int32
 	total     int32
+	// byteBased: completed/total are BYTES (relay path), not blocks (DNS path).
+	// Set once at creation, before the record is published under dlMu.
+	byteBased bool
 }
 
 // mediaProgressKey is the join of (channel, blockCount, crc) the frontend
@@ -47,6 +50,7 @@ func (s *Server) handleMediaProgress(w http.ResponseWriter, r *http.Request) {
 		"active":    true,
 		"completed": int(atomic.LoadInt32(&prog.completed)),
 		"total":     int(atomic.LoadInt32(&prog.total)),
+		"bytes":     prog.byteBased,
 	})
 }
 

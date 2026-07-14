@@ -3,10 +3,12 @@ package telemirror
 import (
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 )
 
 // ParseHTML extracts channel info and recent posts from a t.me/s/ widget.
@@ -107,6 +109,7 @@ func parseSinglePost(wrap *html.Node) *Post {
 				Type:  "photo",
 				URL:   rewriteTranslateLink(attrOf(n, "href")),
 				Thumb: extractBgImage(attrOf(n, "style")),
+				Ratio: extractPhotoRatio(n),
 			})
 		case hasClass(n, "tgme_widget_message_video_player"):
 			m := Media{Type: "video", URL: rewriteTranslateLink(attrOf(n, "href"))}
@@ -415,6 +418,47 @@ func extractBgImage(style string) string {
 	return ""
 }
 
+var (
+	cssWidthRe  = regexp.MustCompile(`(?:^|[;\s])width:\s*([0-9.]+)px`)
+	cssHeightRe = regexp.MustCompile(`(?:^|[;\s])height:\s*([0-9.]+)px`)
+	cssPadTopRe = regexp.MustCompile(`padding-top:\s*([0-9.]+)%`)
+	dataRatioRe = regexp.MustCompile(`^[0-9.]+$`)
+)
+
+func cssNum(re *regexp.Regexp, s string) float64 {
+	m := re.FindStringSubmatch(s)
+	if len(m) == 2 {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil {
+			return v
+		}
+	}
+	return 0
+}
+
+// extractPhotoRatio returns a photo's aspect ratio (width/height) from the
+// Telegram markup so the UI can reserve the exact box and never reflow (no
+// scroll jump). Album/grouped photos carry width+height (and data-ratio) in the
+// wrap style; single photos carry it as a padding-top:% spacer child.
+func extractPhotoRatio(n *html.Node) float64 {
+	style := attrOf(n, "style")
+	w, h := cssNum(cssWidthRe, style), cssNum(cssHeightRe, style)
+	if w > 0 && h > 0 {
+		return w / h
+	}
+	if child := findFirstByClass(n, "tgme_widget_message_photo"); child != nil {
+		// padding-top:% = height/width*100, so width/height = 100/%.
+		if pt := cssNum(cssPadTopRe, attrOf(child, "style")); pt > 0 {
+			return 100.0 / pt
+		}
+	}
+	if dr := attrOf(n, "data-ratio"); dataRatioRe.MatchString(dr) {
+		if v, err := strconv.ParseFloat(dr, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
 // Google Translate proxy URLs come in two forms; we rewrite hrefs
 // back to the originals so links work when Translate is blocked / the
 // site is region-locked. Image src attributes are left alone since
@@ -518,23 +562,102 @@ func sanitizeAndRewriteTree(n *html.Node) {
 		kept := n.Attr[:0]
 		for _, a := range n.Attr {
 			key := strings.ToLower(a.Key)
-			// Drop inline event handlers (onclick, onerror, onload, …).
 			if strings.HasPrefix(key, "on") {
 				continue
 			}
 			if key == "href" {
+				// Telegram double-encodes & as &amp;amp; in embed hrefs.
+				// html.Parse decodes one level → &amp; remains; fix it.
+				a.Val = html.UnescapeString(a.Val)
 				if isDangerousURL(a.Val) {
-					continue // drop javascript:/vbscript:/data: links entirely
+					continue
 				}
 				a.Val = rewriteTranslateLink(a.Val)
 			}
 			kept = append(kept, a)
 		}
 		n.Attr = kept
+		// Google Translate splits URLs at "&" — the <a> wraps only
+		// the first query param and the rest leaks as sibling text
+		// nodes ("&port=443", "&secret=…"). Stitch them back.
+		if n.DataAtom == atom.A {
+			stitchSplitURL(n)
+		}
 	}
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		sanitizeAndRewriteTree(c)
 	}
+}
+
+// paramContRe matches "&key=value" fragments that Google Translate
+// leaves as text-node siblings after the <a> tag.
+var paramContRe = regexp.MustCompile(`^&[A-Za-z0-9_]+=\S*`)
+
+// stitchSplitURL absorbs trailing "&key=value" text/inline siblings into
+// the <a> element's href attribute and display text. Google Translate
+// often breaks URLs at "&" boundaries, wrapping only the first query
+// param in the <a> and emitting the rest as bare text.
+func stitchSplitURL(a *html.Node) {
+	var hrefAttr *html.Attribute
+	for i := range a.Attr {
+		if strings.ToLower(a.Attr[i].Key) == "href" {
+			hrefAttr = &a.Attr[i]
+			break
+		}
+	}
+	if hrefAttr == nil {
+		return
+	}
+	for sib := a.NextSibling; sib != nil; {
+		var text string
+		if sib.Type == html.TextNode {
+			text = sib.Data
+		} else if sib.Type == html.ElementNode && sib.DataAtom != atom.Br {
+			text = innerText(sib)
+		} else {
+			break
+		}
+		m := paramContRe.FindString(text)
+		if m == "" {
+			break
+		}
+		hrefAttr.Val += m
+		// Append to the <a> tag's display text too.
+		if last := a.LastChild; last != nil && last.Type == html.TextNode {
+			last.Data += m
+		} else {
+			a.AppendChild(&html.Node{Type: html.TextNode, Data: m})
+		}
+		// Remove consumed portion from sibling.
+		leftover := text[len(m):]
+		next := sib.NextSibling
+		if sib.Type == html.TextNode {
+			if leftover == "" {
+				sib.Parent.RemoveChild(sib)
+			} else {
+				sib.Data = leftover
+				break
+			}
+		} else {
+			sib.Parent.RemoveChild(sib)
+			if leftover != "" {
+				break
+			}
+		}
+		sib = next
+	}
+}
+
+// innerText returns the concatenated text content of a node tree.
+func innerText(n *html.Node) string {
+	if n.Type == html.TextNode {
+		return n.Data
+	}
+	var b strings.Builder
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		b.WriteString(innerText(c))
+	}
+	return b.String()
 }
 
 // isDangerousURL reports whether a URL uses a scheme that executes script or

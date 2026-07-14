@@ -141,13 +141,10 @@ function mediaTryRestoreVisibleCards() {
       mediaShowQueued(card);
       continue;
     }
-    // Disk-cache restore only makes sense for DNS-channel media because
-    // the cache is keyed off the DNS channel number; GH-only files are
-    // re-fetched on demand.
-    var ch = parseInt(card.getAttribute('data-ch'), 10);
-    if (ch >= 10000 && ch <= 60000) {
-      mediaRestoreFromCache(msgID);
-    }
+    // Restore from the content-addressed IndexedDB cache (keyed by size+crc,
+    // not channel — see mediaCacheKey). Applies to both DNS- and GitHub-relay
+    // media; a cache miss safely no-ops.
+    mediaRestoreFromCache(msgID);
   }
 }
 
@@ -575,7 +572,9 @@ async function mediaRunDownload(domID, opts) {
     loaded: 0,
     total: parseInt(size, 10) || 0,
     completed: 0,
-    blocks: source === 'slow' ? (parseInt(blk, 10) || 0) : 0
+    blocks: source === 'slow' ? (parseInt(blk, 10) || 0) : 0,
+    // Relay (fast) is a single HTTP download, tracked in BYTES — never blocks.
+    byteOnly: source === 'fast'
   };
 
   var pollUrl = '/api/media/progress?ch=' + encodeURIComponent(ch)
@@ -587,9 +586,12 @@ async function mediaRunDownload(domID, opts) {
       if (!pr.ok) return;
       var pj = await pr.json();
       if (pj.active === false) return;
-      mediaApplyBlockProgress(card, pj.completed | 0, pj.total | 0);
+      // Relay reports bytes (pj.bytes); DNS reports blocks. Route each to its
+      // own monotonic channel so the bar reflects the right unit.
+      if (pj.bytes) mediaUpdateProgress(card, pj.completed | 0, pj.total | 0);
+      else mediaApplyBlockProgress(card, pj.completed | 0, pj.total | 0);
     } catch (e) { }
-  }, 500);
+  }, source === 'fast' ? 300 : 500);
 
   mediaInflight[msgID] = { ctrl: ctrl };
   mediaShowProgress(card);
@@ -610,7 +612,10 @@ function mediaShowProgress(card) {
   var domID = card.id;
   var totalSize = parseInt(card.getAttribute('data-size'), 10) || 0;
   var blocks = parseInt(card.getAttribute('data-blk'), 10) || 0;
-  var blocksSuffix = blocks > 0 ? ' &middot; 0/' + blocks + ' ' + (t('blocks_label') || 'blocks') : '';
+  // Relay (byteOnly) downloads aren't block-based — never show a block count.
+  var st0 = mediaProgressState[card.getAttribute('data-msg')];
+  var blocksSuffix = (blocks > 0 && !(st0 && st0.byteOnly))
+    ? ' &middot; 0/' + blocks + ' ' + (t('blocks_label') || 'blocks') : '';
   var initialText = (totalSize > 0 ? '0 / ' + formatBytes(totalSize) : (t('downloading') || 'Downloading...')) + blocksSuffix;
   card.classList.add('downloading');
   if (mediaIsImageTag(card.getAttribute('data-tag'))) {
@@ -692,7 +697,7 @@ function mediaRenderProgressState(card) {
   var head = s.total > 0
     ? formatBytes(s.loaded) + ' / ' + formatBytes(s.total) + ' (' + pct + '%)'
     : (s.loaded > 0 ? formatBytes(s.loaded) : (t('downloading') || 'Downloading...'));
-  var blocksSuffix = s.blocks > 0
+  var blocksSuffix = (s.blocks > 0 && !s.byteOnly)
     ? ' &middot; ' + s.completed + '/' + s.blocks + ' ' + (t('blocks_label') || 'blocks')
     : '';
   txt.innerHTML = head + blocksSuffix;
@@ -763,57 +768,54 @@ var androidBridge = (typeof window !== 'undefined' && window.Android) ? window.A
 // back into the bridge for "minimize"/"kill" if the user picks one
 // of those from the close-confirmation dialog.
 window.handleAndroidBack = async function () {
-  if (closeMediaLightbox()) return;
-  // Telemirror layered back: lightbox → mobile sidebar reopen →
-  // drawer close → modal close. Mirrors the popstate flow used on
-  // platforms that fire popstate naturally.
+  // Unwind ONE layer per press, matching the in-app back buttons (which the
+  // hardware key can't reach because MainActivity routes here instead of
+  // firing popstate). Order: transient overlays first, then the reparented
+  // shell sections, then the feed; at the feed root, confirm before closing.
+  var de = document.documentElement;
+  var app = document.getElementById('app');
+
+  // --- transient overlays (most-nested first) ---
+  if (typeof closeMediaLightbox === 'function' && closeMediaLightbox()) return;
+
   var tmLb = document.getElementById('tmLightbox');
   if (tmLb) {
     if (typeof tmCloseLightbox === 'function') tmCloseLightbox();
     else tmLb.remove();
     return;
   }
-  var tmModal = document.getElementById('telemirrorModal');
-  if (tmModal && tmModal.classList.contains('active')) {
-    var tmSb = document.getElementById('tmSidebar');
-    var tmMenu = document.querySelector('.tm-menu');
-    var tmIsMobile = !!(tmMenu && getComputedStyle(tmMenu).display !== 'none');
-    // Mobile + drawer closed (channel view): reopen drawer instead
-    // of leaving telemirror.
-    if (tmIsMobile && tmSb && !tmSb.classList.contains('open')) {
-      tmSb.classList.add('open');
-      return;
-    }
-    if (tmSb && tmSb.classList.contains('open') && !tmIsMobile) {
-      tmSb.classList.remove('open');
-      return;
-    }
-    if (typeof closeTelemirror === 'function') closeTelemirror();
-    else tmModal.classList.remove('active');
-    return;
-  }
+
+  var chatSheet = document.querySelector('.chat-sheet-overlay');
+  if (chatSheet && chatSheet.parentNode) { chatSheet.parentNode.removeChild(chatSheet); return; }
+
+  // Link sheets (feed + mirror "open this link?"). Own overlay classes, not
+  // .modal-overlay, so they need their own back-button hook.
+  var linkSheet = document.getElementById('linkSheetOverlay') || document.getElementById('tmLinkSheet');
+  if (linkSheet && linkSheet.parentNode) { linkSheet.parentNode.removeChild(linkSheet); return; }
+
+  // Any open modal dialog (profiles, link sheet, info dialog, close-confirm…).
   var openModal = document.querySelector('.modal-overlay.active');
   if (openModal) { openModal.classList.remove('active'); return; }
-  // Messenger (#chatModal): close a layered chat sheet first, then thread →
-  // list, then list → close. Mirrors the in-app back arrows so the hardware
-  // back key behaves the same. (The native back delegates here instead of
-  // firing popstate, so the messenger has to be handled explicitly.)
-  var chatModalEl = document.getElementById('chatModal');
-  if (chatModalEl && chatModalEl.classList.contains('active')) {
-    var chatSheet = document.querySelector('.chat-sheet-overlay');
-    if (chatSheet && chatSheet.parentNode) { chatSheet.parentNode.removeChild(chatSheet); return; }
-    if (typeof chatState !== 'undefined' && chatState.view === 'thread'
-      && typeof chatBackToList === 'function') {
-      chatBackToList();
-    } else if (typeof closeMessenger === 'function') {
-      closeMessenger();
-    }
+
+  // --- in-app sections + feed channel ---
+  // Each section (Mirror/Chat/Resolver/Settings) and the feed channel view
+  // pushes a history entry per layer (section → sub-view), and each owns a
+  // popstate handler that unwinds exactly ONE layer the right way
+  // (sub-view → sidebar → feed). So just step history back and let those run —
+  // the same path desktop/iOS take. Calling the section-close helpers directly
+  // (the old approach) skipped the sidebar step and jumped straight to the feed.
+  var inSection =
+    de.classList.contains('tm-open') ||
+    de.classList.contains('chat-section') ||
+    de.classList.contains('resolver-section') ||
+    de.classList.contains('settings-section') ||
+    (typeof mobileQuery !== 'undefined' && mobileQuery.matches &&
+      app && app.classList.contains('chat-open'));
+  if (inSection) {
+    try { history.back(); } catch (e) { }
     return;
   }
-  if (mobileQuery.matches && document.getElementById('app').classList.contains('chat-open')) {
-    openSidebar();
-    return;
-  }
+
   // At app root — confirm before closing/killing the process.
   var choice = await showCloseConfirm();
   if (choice === 'background' && androidBridge && androidBridge.minimizeApp) {
@@ -831,6 +833,9 @@ function showCloseConfirm() {
     var overlay = document.createElement('div');
     overlay.id = 'closeConfirmModal';
     overlay.className = 'modal-overlay active';
+    // The floating nav sits at z-index 9300; the base .modal-overlay (100) would
+    // render the close prompt underneath it. Lift it above the nav.
+    overlay.style.zIndex = '9600';
     overlay.innerHTML =
       '<div class="modal" style="max-width:380px">'
       + '<p style="font-size:14px;color:var(--text);margin-bottom:18px;line-height:1.6">'
@@ -1506,6 +1511,18 @@ function renderMessages(msgs, gaps) {
       // their position so an in-place re-render doesn't yank them to
       // the top (innerHTML resets scrollTop to 0 by default).
       el.scrollTop = prevScrollTop;
+    }
+  }
+  // A jump-to-post highlight may have just been wiped by this re-render
+  // (the refresh that selectChannel starts lands seconds after the jump).
+  // While the highlight window is open, re-anchor on the post and restart
+  // its ring on the fresh element. Doesn't extend the window, so repeated
+  // refreshes can't pin the view forever.
+  if (_msgHighlight && _msgHighlight.ch === selectedChannel && Date.now() < _msgHighlight.until) {
+    var hlEl = findMsgEl(_msgHighlight.id);
+    if (hlEl) {
+      hlEl.scrollIntoView({ block: 'center' });
+      highlightMsgEl(hlEl);
     }
   }
 }

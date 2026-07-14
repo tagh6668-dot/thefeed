@@ -9,6 +9,21 @@
     tmActive = localStorage.getItem('tm_active') || '';
   } catch (e) { }
 
+  // Titles now come from the backend (persisted server-side, shared across
+  // ports) in the channels list (c.title) and per-channel fetch
+  // (d.channel.title). tmSetTitle just updates the in-memory list entry so the
+  // sidebar shows the latest name immediately; the server already persisted it.
+  function tmSetTitle(username, title) {
+    if (!username || !title) return;
+    var key = username.toLowerCase();
+    for (var i = 0; i < tmChannels.length; i++) {
+      if (tmChannels[i].username && tmChannels[i].username.toLowerCase() === key) {
+        tmChannels[i].title = title;
+        break;
+      }
+    }
+  }
+
   function tmSaveActive() {
     try { localStorage.setItem('tm_active', tmActive || ''); } catch (e) { }
   }
@@ -28,8 +43,8 @@
     return (typeof escAttr === 'function') ? escAttr(s) :
       tmEsc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
-  function tmToast(msg) {
-    if (typeof showToast === 'function') showToast(msg);
+  function tmToast(msg, ms) {
+    if (typeof showToast === 'function') showToast(msg, ms);
   }
 
   function tmInitial(name) {
@@ -71,19 +86,7 @@
     var origLabel = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = tmI18n('loading', 'Loading...'); }
 
-    // Anchor on the post the user is currently viewing (the oldest one shown,
-    // nearest the button) by its real on-screen offset — a scrollHeight delta is
-    // unreliable under content-visibility, which gives off-screen posts estimated
-    // heights. After prepending, put that same post back at the same offset; the
-    // newly-loaded older posts sit above it.
     var scroller = document.getElementById('tmContent');
-    var cur = window._tmCurrentPosts || [];
-    var anchorId = (cur[0] && cur[0].id || '').split('/').pop();
-    var anchorOffset = 0;
-    if (scroller && anchorId) {
-      var a0 = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
-      if (a0) anchorOffset = a0.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-    }
 
     fetch('/api/telemirror/older/' + encodeURIComponent(tmActive) + '?before=' + encodeURIComponent(beforeId))
       .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)); })
@@ -100,15 +103,14 @@
           if (id) seen[id] = true;
           out.push(merged[i]);
         }
+        // Keep the current view fixed while older posts are prepended above it.
+        // With content-visibility gone, scrollHeight is real, so the prepended
+        // block's height = (new scrollHeight - old). Reading scrollHeight forces a
+        // synchronous reflow, so this is accurate the instant after the render.
+        var prevH = scroller ? scroller.scrollHeight : 0;
+        var prevTop = scroller ? scroller.scrollTop : 0;
         tmRenderPosts({ channel: window._tmCurrentChannel, posts: out, keepScroll: true });
-        if (!scroller || !anchorId) return;
-        requestAnimationFrame(function () {
-          var el = scroller.querySelector('.tm-post[data-msgid="' + anchorId + '"]');
-          if (!el) return;
-          el.scrollIntoView();
-          var nowOffset = el.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-          scroller.scrollTop += (nowOffset - anchorOffset);
-        });
+        if (scroller) scroller.scrollTop = prevTop + (scroller.scrollHeight - prevH);
       })
       .catch(function () {
         if (btn) { btn.disabled = false; btn.textContent = origLabel; }
@@ -286,40 +288,75 @@
   };
 
   // ===== open / close =====
-  // Track whether we pushed a history entry on open, so close() can
-  // pop it without leaving phantom states behind. Without this the
-  // Android hardware back button does nothing inside this modal.
+  // Telemirror is reparented INTO the shell: #tmSidebar is a pane in the
+  // shared sidebar and #tmPane is the posts column. "Opening" the Mirror
+  // folder just sets html.tm-open and the CSS swaps the panes in place. The
+  // mobile channel view reuses the feed's .app.chat-open pane-swap. History
+  // layers are still tracked so the Android back button unwinds
+  // list ← channel ← folder one step at a time.
   var tmHistoryPushed = false;
 
-  window.openTelemirror = function () {
-    document.getElementById('telemirrorModal').classList.add('active');
-    document.body.classList.add('tm-no-scroll');
-    if (!tmHistoryPushed) {
+  // Reset the topbar so the last channel's id/avatar doesn't linger when we
+  // drop back to the list.
+  function tmClearTopbar() {
+    var nm = document.getElementById('tmTopbarName');
+    if (nm) nm.textContent = tmI18n('telemirror_title', 'Mirror');
+    var sub = document.getElementById('tmTopbarSub');
+    if (sub) sub.textContent = tmI18n('telemirror_subtitle', 'Custom channels');
+    var av = document.getElementById('tmTopbarAvatar');
+    if (av) av.innerHTML = '';
+  }
+
+  // Back to the channel list (mobile): un-swap the content pane + clear state.
+  function tmBackToList() {
+    document.documentElement.classList.remove('tm-channel');
+    var app = document.getElementById('app');
+    if (app) app.classList.remove('chat-open');
+    tmClearTopbar();
+  }
+
+  window.openTelemirror = function (adopt) {
+    if (typeof closeChannelSearch === 'function') closeChannelSearch();
+    document.documentElement.classList.add('tm-open');
+    // Land on the list, not a half-open channel from a previous session.
+    document.documentElement.classList.remove('tm-channel');
+    var app = document.getElementById('app');
+    if (app) app.classList.remove('chat-open');
+    // adopt = switching from another section (Chat) that left its history entry
+    // in place — reuse it rather than pushing a new one (avoids popstate cross-talk).
+    if (adopt) {
+      tmHistoryPushed = true;
+    } else if (!tmHistoryPushed) {
       try { history.pushState({ view: 'telemirror' }, ''); tmHistoryPushed = true; } catch (e) { }
     }
-    // Defer the layout-mode check until after the modal is rendered, so
-    // getComputedStyle on .tm-menu reflects the actual CSS state.
-    requestAnimationFrame(function () {
-      var sb = document.getElementById('tmSidebar');
-      if (sb && tmIsMobileLayout()) sb.classList.add('open');
-    });
     tmLoadChannels();
   };
 
-  // Suppress N popstate events while we unwind the history layers
-  // ourselves. Without this, history.go(-N) would fire popstates that
-  // re-open the sidebar / lightbox we just closed.
+  // tmCloseForNav tears Mirror down for a nav SECTION SWITCH (→ Chat) without
+  // the history.go() unwind. Returns whether Mirror owned a history entry so the
+  // next section can adopt it.
+  window.tmCloseForNav = function () {
+    var had = tmHistoryPushed || tmChannelViewPushed || tmLightboxPushed;
+    tmHistoryPushed = false; tmChannelViewPushed = false; tmLightboxPushed = false;
+    var lb = document.getElementById('tmLightbox'); if (lb) lb.remove();
+    document.documentElement.classList.remove('tm-open');
+    document.documentElement.classList.remove('tm-channel');
+    var app2 = document.getElementById('app'); if (app2) app2.classList.remove('chat-open');
+    return had;
+  };
+
+  // Suppress N popstate events while we unwind the history layers ourselves.
   var tmSuppressPopstate = 0;
 
   window.closeTelemirror = function () {
-    var modal = document.getElementById('telemirrorModal');
-    if (!modal || !modal.classList.contains('active')) return;
+    if (!document.documentElement.classList.contains('tm-open')) return;
+    if (typeof closeChannelSearch === 'function') closeChannelSearch();
     var lb = document.getElementById('tmLightbox');
     if (lb) lb.remove();
-    modal.classList.remove('active');
-    document.body.classList.remove('tm-no-scroll');
-    var sb = document.getElementById('tmSidebar');
-    if (sb) sb.classList.remove('open');
+    document.documentElement.classList.remove('tm-open');
+    document.documentElement.classList.remove('tm-channel');
+    var app = document.getElementById('app');
+    if (app) app.classList.remove('chat-open');
     var steps = (tmHistoryPushed ? 1 : 0)
       + (tmChannelViewPushed ? 1 : 0)
       + (tmLightboxPushed ? 1 : 0);
@@ -332,13 +369,10 @@
     }
   };
 
-  // Hardware / browser back: if our modal is the top of the history
-  // stack, intercept and close without re-popping (history already
-  // popped us).
+  // Hardware / browser back: unwind lightbox → channel → folder one layer at
+  // a time. Programmatic unwinds from closeTelemirror are swallowed.
   window.addEventListener('popstate', function () {
-    // Programmatic unwind from closeTelemirror — swallow these.
     if (tmSuppressPopstate > 0) { tmSuppressPopstate--; return; }
-    // Layered back: lightbox → mobile sidebar reopen → modal close.
     if (tmLightboxPushed) {
       tmLightboxPushed = false;
       var lb = document.getElementById('tmLightbox');
@@ -347,23 +381,22 @@
     }
     if (tmChannelViewPushed && tmIsMobileLayout()) {
       tmChannelViewPushed = false;
-      var sb1 = document.getElementById('tmSidebar');
-      if (sb1) sb1.classList.add('open');
+      tmBackToList();
       return;
     }
     if (tmHistoryPushed) {
       tmHistoryPushed = false;
-      var modal = document.getElementById('telemirrorModal');
-      if (modal) modal.classList.remove('active');
-      document.body.classList.remove('tm-no-scroll');
-      var sb = document.getElementById('tmSidebar');
-      if (sb) sb.classList.remove('open');
+      document.documentElement.classList.remove('tm-open');
+      document.documentElement.classList.remove('tm-channel');
+      var app = document.getElementById('app');
+      if (app) app.classList.remove('chat-open');
+      if (typeof setActiveTab === 'function') setActiveTab('feed');
     }
   });
 
+  // The topbar back arrow (.tm-menu, mobile only) returns to the channel list.
   window.toggleTmSidebar = function () {
-    var sb = document.getElementById('tmSidebar');
-    if (sb) sb.classList.toggle('open');
+    tmBackToList();
   };
 
   // ===== channel list =====
@@ -415,20 +448,18 @@
   function tmRenderChannels() {
     var box = document.getElementById('tmChannelsList');
     var html = '';
-    // Saved Messages shortcut — navigate to Saved from inside the Telemirror
-    // modal without having to close it first.
-    html += '<div class="tm-channel-item tm-saved-shortcut" onclick="tmCloseThenSaved()">'
-      + '<div class="tm-saved-shortcut-icon">' + window.icon('bookmark') + '</div>'
-      + '<div class="tm-channel-item-meta"><div class="tm-channel-item-name">'
-      + tmEsc(tmI18n('saved_messages', 'Saved Messages'))
-      + '</div></div></div>';
+    // (Saved Messages shortcut removed — it lives in the Feed sidebar only.)
     for (var i = 0; i < tmChannels.length; i++) {
       var c = tmChannels[i];
       var active = (c.username.toLowerCase() === tmActive.toLowerCase()) ? ' active' : '';
+      // Name = backend title (if known) else the username; sub = @username.
+      // Mirrors the feed's name + @handle two-line rows.
+      var title = c.title || c.username;
       html += '<div class="tm-channel-item' + active + '" data-u="' + tmEscAttr(c.username) + '" onclick="tmSelectFromClick(this.dataset.u)">'
-        + tmAvatarHTML(c.username, c.username, 40)
+        + tmAvatarHTML(c.username, title, 44)
         + '<div class="tm-channel-item-meta">'
-        + '<div class="tm-channel-item-name">' + tmEsc(c.username) + (c.pinned ? ' <span class="tm-pin">' + window.icon('pinned') + '</span>' : '') + '</div>'
+        + '<div class="tm-channel-item-name">' + tmEsc(title) + (c.pinned ? ' <span class="tm-pin">' + window.icon('pinned') + '</span>' : '') + '</div>'
+        + '<div class="tm-channel-item-sub">@' + tmEsc(c.username) + '</div>'
         + '</div>';
       if (!c.pinned) {
         html += '<button class="tm-x" data-u="' + tmEscAttr(c.username) + '" onclick="event.stopPropagation();tmRemove(this.dataset.u)">&times;</button>';
@@ -443,10 +474,15 @@
   var tmChannelViewPushed = false;
   window.tmSelectFromClick = function (username) {
     tmSelect(username);
-    var sb = document.getElementById('tmSidebar');
-    if (sb) sb.classList.remove('open');
-    if (tmIsMobileLayout() && !tmChannelViewPushed) {
-      try { history.pushState({ view: 'tmChannel' }, ''); tmChannelViewPushed = true; } catch (e) { }
+    // Mobile: swap to the posts column (reusing the feed's pane-swap) and mark
+    // the channel open so the topbar shows a Back arrow and the nav hides.
+    if (tmIsMobileLayout()) {
+      document.documentElement.classList.add('tm-channel');
+      var app = document.getElementById('app');
+      if (app) app.classList.add('chat-open');
+      if (!tmChannelViewPushed) {
+        try { history.pushState({ view: 'tmChannel' }, ''); tmChannelViewPushed = true; } catch (e) { }
+      }
     }
   };
 
@@ -479,6 +515,7 @@
       var d = await r.json();
       tmLastFetchedAt[username.toLowerCase()] = Date.now();
       tmSaveActive();
+      if (d && d.channel && d.channel.title) { tmSetTitle(username, d.channel.title); tmRenderChannels(); }
       tmRenderTopbar(d && d.channel, username);
       tmRenderPosts(d);
     } catch (e) {
@@ -530,7 +567,9 @@
   // z-index, so it ended up hidden behind our z:9000 modal.
   function tmConfirm(message, yesText, noText) {
     return new Promise(function (resolve) {
-      var modal = document.getElementById('telemirrorModal');
+      // Mount over the posts column (a positioned ancestor) so it sits above
+      // the posts at the right stacking — the standalone modal is gone now.
+      var modal = document.querySelector('.chat-area');
       if (!modal) { resolve(window.confirm(message)); return; }
       var overlay = document.createElement('div');
       overlay.className = 'tm-confirm-overlay';
@@ -594,7 +633,7 @@
         + '<div class="tm-channel-bio-label">'
         + tmEsc(tmI18n('telemirror_about', 'About this channel'))
         + '</div>'
-        + '<div class="tm-channel-bio-body">' + ch.description + '</div>'
+        + '<div class="tm-channel-bio-body" dir="auto">' + ch.description + '</div>'
         + '</div>';
     }
     // Load-older button if we have at least one post — anchored to the
@@ -668,11 +707,11 @@
           + (p.reply.url ? ' style="cursor:pointer"' : '')
           + '>';
         if (rAuth) html += '<div class="tm-post-reply-author">' + rAuth + '</div>';
-        if (rText) html += '<div class="tm-post-reply-text">' + tmStripEmojiSprites(rText) + '</div>';
+        if (rText) html += '<div class="tm-post-reply-text" dir="auto">' + tmStripEmojiSprites(rText) + '</div>';
         html += '</div>';
       }
 
-      if (p.text) html += '<div class="tm-post-text">' + tmStripEmojiSprites(p.text) + '</div>';
+      if (p.text) html += '<div class="tm-post-text" dir="auto">' + tmStripEmojiSprites(p.text) + '</div>';
 
       if (p.media && p.media.length) {
         var photoCount = 0;
@@ -682,7 +721,7 @@
         var gridClass = 'tm-post-media tm-album-' + Math.min(Math.max(photoCount, 1), 3);
         html += '<div class="' + gridClass + '">';
         for (var j = 0; j < p.media.length; j++) {
-          html += tmRenderMedia(p.media[j], i, j);
+          html += tmRenderMedia(p.media[j], i, j, photoCount === 1);
         }
         html += '</div>';
       }
@@ -702,18 +741,20 @@
       // Footer: timestamp + view count.
       html += '<div class="tm-post-foot">';
       if (p.views) html += '<span class="tm-views">' + window.icon('views') + ' ' + tmEsc(p.views) + '</span>';
-      if (when) html += '<span class="tm-post-time">' + tmEsc(when) + '</span>';
+      // <bdi> isolates the localized date so its parts (day / month / year /
+      // time) keep their correct order inside the LTR-forced foot — a Jalali
+      // Persian date otherwise got bidi-scrambled in RTL mode.
+      if (when) html += '<span class="tm-post-time"><bdi>' + tmEsc(when) + '</bdi></span>';
       html += '</div>';
 
       html += '</div>';
     }
     content.innerHTML = html;
     tmNeuterLinks(content);
-    // Jump to the newest (bottom) post. content-visibility gives off-screen
-    // posts estimated heights, so scrollHeight is unreliable — scrollIntoView on
-    // the last post force-renders it and lands accurately. Re-assert once to
-    // absorb the height growth as the newest posts' images load, unless the user
-    // has already scrolled. Skipped for "load older", which keeps its own anchor.
+    // Jump to the newest (bottom) post via scrollIntoView on the last post.
+    // Re-assert a couple of times to absorb the height growth as the newest
+    // posts' images finish loading, unless the user has already scrolled away.
+    // Skipped for "load older", which keeps its own anchor.
     if (!data.keepScroll) {
       requestAnimationFrame(function () {
         var p = content.querySelectorAll('.tm-post');
@@ -773,26 +814,41 @@
   // same HTML we already inject into the live DOM via tm-post-text.
   function tmPostPlainText(p) {
     if (!p.text) return '';
+    // Mark INTENTIONAL breaks (<br> / block ends) with a sentinel that survives
+    // the whitespace collapse below.
+    var BR = String.fromCharCode(1);
     var s = String(p.text)
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li)>/gi, '\n');
+      .replace(/<br\s*\/?>/gi, BR)
+      .replace(/<\/(p|div|li)>/gi, BR);
     var tmp = document.createElement('div');
     tmp.innerHTML = s;
     var raw = (tmp.textContent || tmp.innerText || '');
-    // Collapse HTML-source indentation: trim leading spaces per line,
-    // collapse 3+ consecutive newlines to 2.
-    raw = raw.replace(/^[ \t]+/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+    // The browser collapses source whitespace — including the newlines a channel
+    // puts between inline elements (e.g. one custom-emoji per source line) — to a
+    // single space when rendering; textContent does NOT. Collapse it ourselves so
+    // copy/save matches what's shown. Without this, emoji-heavy posts (e.g.
+    // SoftNetConnect's 🟩 rows) saved with one spurious line break per emoji.
+    // \s doesn't match the BR sentinel, so explicit breaks are preserved.
+    raw = raw.replace(/\s+/g, ' ');
+    raw = raw.split(BR).map(function (ln) { return ln.trim(); }).join('\n');
+    raw = raw.replace(/\n{3,}/g, '\n\n').trim();
     return raw;
   }
 
   // Render one media tile based on its type.
   // postIdx/mediaIdx are used to build a sane filename for downloads.
-  function tmRenderMedia(m, postIdx, mediaIdx) {
+  function tmRenderMedia(m, postIdx, mediaIdx, single) {
     if (m.type === 'photo' && m.thumb) {
       var fname = 'photo-' + (postIdx + 1) + '-' + (mediaIdx + 1) + '.jpg';
-      return '<div class="tm-photo">'
+      // For SINGLE photos we know the real aspect ratio up front (parsed from
+      // Telegram's markup), so reserve the EXACT box — the image loads into a
+      // box that's already its final size, so nothing reflows and the scroll
+      // never jumps. tmPhotoLoaded stays as a fallback for posts without ratio.
+      var ratioStyle = (single && m.ratio > 0) ? ' style="aspect-ratio:' + m.ratio.toFixed(4) + '"' : '';
+      return '<div class="tm-photo tm-photo-loading"' + ratioStyle + '>'
         + '<img src="' + tmEscAttr(m.thumb) + '" loading="lazy" decoding="async" alt=""'
         + ' referrerpolicy="no-referrer"'
+        + ' onload="tmPhotoLoaded(this)"'
         + ' onclick="tmOpenLightbox(\'' + tmEscAttr(m.thumb) + '\')"'
         + ' style="cursor:zoom-in"'
         + ' onerror="this.parentNode.classList.add(\'tm-photo-failed\')">'
@@ -853,6 +909,31 @@
     return '';
   }
 
+  // tmPhotoLoaded runs when a single photo's bytes arrive. It swaps the
+  // placeholder aspect for the image's real one and — crucially — if the photo
+  // sits ABOVE the viewport (the user scrolled up past it), nudges scrollTop by
+  // the height change so the post they're reading doesn't jump. Albums keep
+  // their fixed CSS aspect, so this only touches single photos.
+  window.tmPhotoLoaded = function (img) {
+    var box = img.closest ? img.closest('.tm-photo') : null;
+    if (!box) return;
+    box.classList.remove('tm-photo-loading');
+    if (box.style.aspectRatio) return; // exact box already reserved from the parsed ratio — no reflow
+    if (!box.closest('.tm-album-1')) return; // albums already reserve space
+    if (!img.naturalWidth || !img.naturalHeight) return;
+    var sc = document.getElementById('tmContent');
+    var topBefore = box.getBoundingClientRect().top;
+    var hBefore = box.getBoundingClientRect().height;
+    box.style.aspectRatio = img.naturalWidth + ' / ' + img.naturalHeight;
+    if (!sc) return;
+    var delta = box.getBoundingClientRect().height - hBefore;
+    // Compensate only when the box starts above the visible top — i.e. its
+    // growth pushed the content the user is reading downward.
+    if (delta && topBefore < sc.getBoundingClientRect().top) {
+      sc.scrollTop += delta;
+    }
+  };
+
   // tmDownloadPhoto fetches the bytes and either hands them to the
   // Android bridge (saveMedia) or builds a blob-URL <a download> on
   // desktop. <a download> alone doesn't work on Android WebView for
@@ -900,7 +981,7 @@
   }
 
   function tmFallbackOpen(url) {
-    try { window.open(url, '_blank'); } catch (e) { window.location.href = url; }
+    openExternal(url); // shared impl in core.js — handles blocked popups/WebViews
   }
 
   window.tmCopyPost = function (btn) {
@@ -1012,26 +1093,26 @@
     }
   };
 
-  // tmCloseThenSaved — close the Telemirror modal and open Saved Messages.
-  // Open Saved FIRST (its overlay hides the transition so home never flashes),
-  // then close the modal. closeTelemirror() unwinds history with history.go(),
-  // whose popstate(s) core.js turns into openSidebar() (clearing .chat-open on
-  // mobile, which would collapse Saved back to home). The number of popstates
-  // isn't predictable, so self-heal: for a short window, re-assert .chat-open
-  // whenever a stray unwind popstate clears it while Saved is active.
+  // tmCloseThenSaved — leave the Mirror folder and open Saved Messages.
+  // Saved renders into the feed shell's #messages, so we must drop tm-open.
+  // We switch DIRECTLY (no closeTelemirror history.go(-N) cascade) — those
+  // popstates were what made the view visibly "jump to the feed list" first.
+  // We still reset the tm history flags so a later Back doesn't double-unwind.
   window.tmCloseThenSaved = function () {
-    if (typeof openSavedMessages === 'function') openSavedMessages();
-    window.closeTelemirror();
-    var app = document.getElementById('app');
-    if (!app) return;
-    var start = (window.performance && performance.now) ? performance.now() : Date.now();
-    (function guardChatOpen() {
-      if (window.viewingSaved && !app.classList.contains('chat-open')) {
-        app.classList.add('chat-open');
-      }
-      var now = (window.performance && performance.now) ? performance.now() : Date.now();
-      if (now - start < 500) requestAnimationFrame(guardChatOpen);
-    })();
+    var lb = document.getElementById('tmLightbox'); if (lb) lb.remove();
+    tmHistoryPushed = false; tmChannelViewPushed = false; tmLightboxPushed = false;
+    // Render Saved into the still-hidden feed content FIRST (tm-open keeps
+    // #messages hidden), then drop tm-open to reveal it — so the feed content
+    // never flashes between Mirror and Saved.
+    var reveal = function () {
+      document.documentElement.classList.remove('tm-open');
+      document.documentElement.classList.remove('tm-channel');
+      if (typeof setActiveTab === 'function') setActiveTab('feed');
+    };
+    if (typeof openSavedMessages !== 'function') { reveal(); return; }
+    var p;
+    try { p = openSavedMessages(); } catch (e) { reveal(); return; }
+    if (p && typeof p.then === 'function') p.then(reveal, reveal); else reveal();
   };
   function tmCopyFallback(text, done) {
     var ta = document.createElement('textarea');
@@ -1056,6 +1137,7 @@
       });
       if (!r.ok) { tmToast(tmI18n('telemirror_invalid_user', 'Invalid username')); return; }
       input.value = '';
+      var b = document.getElementById('tmAddBtn'); if (b) b.disabled = true;
       await tmLoadChannels();
     } catch (e) { tmToast((e && e.message) || 'failed'); }
   };
@@ -1076,12 +1158,17 @@
     } catch (e) { tmToast((e && e.message) || 'failed'); }
   };
 
-  // Allow Enter in the add input.
   document.addEventListener('DOMContentLoaded', function () {
     var inp = document.getElementById('tmAddInput');
-    if (inp) inp.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); window.telemirrorAdd(); }
-    });
+    var addBtn = document.getElementById('tmAddBtn');
+    function syncAddBtn() { if (addBtn) addBtn.disabled = !(inp && inp.value.trim()); }
+    if (inp) {
+      inp.addEventListener('input', syncAddBtn);
+      inp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); window.telemirrorAdd(); }
+      });
+      syncAddBtn();
+    }
 
     // Intercept link clicks and long-press inside posts.
     var tmC = document.getElementById('tmContent');
@@ -1122,29 +1209,127 @@
       for (var k = a.attributes.length - 1; k >= 0; k--) {
         if (/^on/i.test(a.attributes[k].name)) a.removeAttribute(a.attributes[k].name);
       }
-      a.setAttribute('data-href', a.href);
+      var url = a.href;
+      // Telegram double-encodes & as &amp;amp; in embed hrefs; the
+      // browser decodes one level → &amp; remains in the resolved URL.
+      url = url.replace(/&amp;/g, '&');
+      var text = (a.textContent || '').trim();
+      if (text && /^https?:\/\//i.test(text) && text.length > url.length) {
+        url = text;
+      }
+      // Google Translate splits URLs at & boundaries — the <a> tag
+      // wraps only the first param and the rest leaks as trailing
+      // text/inline nodes. Stitch them back by consuming siblings
+      // that look like query-param continuations (&key=value...).
+      var sib = a.nextSibling;
+      while (sib) {
+        var chunk = '';
+        if (sib.nodeType === 3) { chunk = sib.textContent || ''; }
+        else if (sib.nodeType === 1 && sib.tagName !== 'BR') { chunk = sib.textContent || ''; }
+        else break;
+        // Must start with & and look like a query param continuation
+        if (/^&[A-Za-z0-9_]+=/.test(chunk)) {
+          // Might contain trailing text after the URL (newline, space, etc.)
+          var paramMatch = chunk.match(/^(&[A-Za-z0-9_]+=[^\s<>]*)/);
+          if (paramMatch) {
+            url += paramMatch[1];
+            var leftover = chunk.substring(paramMatch[1].length);
+            if (leftover) {
+              sib.textContent = leftover;
+              break;
+            }
+            var next = sib.nextSibling;
+            sib.parentNode.removeChild(sib);
+            sib = next;
+            continue;
+          }
+        }
+        break;
+      }
+      a.setAttribute('data-href', url);
       a.removeAttribute('href');
       a.removeAttribute('target');
       a.style.cursor = 'pointer';
     }
   }
 
-  // Parse a t.me URL → { user, postId } or null.
-  function tmParseTgLink(url) {
-    var m = url.match(/^https?:\/\/(?:t\.me|telegram\.me)\/([A-Za-z_][A-Za-z0-9_]{3,31})(?:\/(\d+))?(?:[?#].*)?$/);
-    return m ? { user: m[1], postId: m[2] || '' } : null;
-  }
+  // Parse a t.me URL → { user, postId } or null. Shared impl in ui.js
+  // (handles /s/ links, trailing slashes, queries and special paths).
+  function tmParseTgLink(url) { return parseTgLink(url); }
 
   // Scroll to a post by its numeric message ID. Returns true if found.
+  // Instant jump — a smooth scroll over a long distance eats most of the
+  // 2s highlight before arrival and gets mistargeted when images above
+  // load mid-flight. After the jump, media above the post keeps expanding
+  // and drags it back out of view, so keep re-centering until the layout
+  // settles; any manual scroll from the user cancels that immediately.
+  var _tmSettleGen = 0;
   function tmScrollToPost(msgId) {
     if (!msgId) return false;
     var el = document.querySelector('.tm-post[data-msgid="' + msgId + '"]');
     if (!el) return false;
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    el.scrollIntoView({ block: 'center' });
+    el.classList.remove('tm-post-highlight');
+    void el.offsetWidth; // restart the animation on repeat jumps
     el.classList.add('tm-post-highlight');
-    setTimeout(function () { el.classList.remove('tm-post-highlight'); }, 2000);
+    // A newer jump owns the viewport — bump the generation so an older
+    // settle loop can't tug-of-war against this one for up to 2s.
+    var gen = ++_tmSettleGen;
+    var until = Date.now() + 2000;
+    var cancelled = false;
+    var cancel = function () { cancelled = true; };
+    window.addEventListener('wheel', cancel, { once: true, passive: true });
+    window.addEventListener('touchstart', cancel, { once: true, passive: true });
+    (function settle() {
+      if (cancelled || gen !== _tmSettleGen || Date.now() > until) return;
+      var q = document.querySelector('.tm-post[data-msgid="' + msgId + '"]');
+      var host = document.querySelector('.tm-content');
+      if (!q || !host) return;
+      var r = q.getBoundingClientRect(), h = host.getBoundingClientRect();
+      var mid = (h.top + h.bottom) / 2, c = (r.top + r.bottom) / 2;
+      // Only correct real drift (image loads shift by tens/hundreds of px);
+      // small offsets are left alone so we don't fight normal jitter.
+      if (Math.abs(c - mid) > 48) q.scrollIntoView({ block: 'center' });
+      setTimeout(settle, 200);
+    })();
     return true;
   }
+
+  // Jump used after switching channels from the link sheet: posts render
+  // asynchronously after tmSelect, so retry until the target appears
+  // instead of a single 300ms shot (which often missed on slow loads).
+  function tmGotoPost(msgId) {
+    if (tmScrollToPost(msgId)) return; // already rendered — no toasts
+    // Immediate feedback + a timer-guaranteed verdict: the error must fire
+    // even if a retry step dies, else a lone "finding…" looks like a bug.
+    // The toast is sticky for the whole wait — a 2.2s fade left a silent
+    // gap before the verdict that read as "no error shown". 5s deadline:
+    // tmSelect already fetched the posts, nothing new arrives later.
+    var DEADLINE = 5000;
+    tmToast(tmI18n('finding_post', 'Finding the post…'), DEADLINE + 500);
+    // Bail (silently) if the user switches channels mid-search — both to
+    // skip a stale verdict and because msg numbers are per-channel, so a
+    // late retry could match a same-numbered post in the new channel.
+    var wantCh = tmActive;
+    var done = false;
+    var failT = setTimeout(function () {
+      done = true;
+      if (tmActive === wantCh) tmToast(tmI18n('telemirror_post_not_loaded', 'Post not loaded'));
+      else if (typeof hideToast === 'function') hideToast();
+    }, DEADLINE);
+    (function attempt() {
+      if (done) return;
+      if (tmActive !== wantCh || tmScrollToPost(msgId)) {
+        done = true;
+        clearTimeout(failT);
+        if (typeof hideToast === 'function') hideToast(); // clear the sticky "finding…"
+        return;
+      }
+      setTimeout(attempt, 400);
+    })();
+  }
+  window.tmScrollToPost = tmScrollToPost;
+  window.tmGotoPost = tmGotoPost;
 
   // Central link handler — decides what to do with a URL from a post.
   function tmHandleLink(url) {
@@ -1161,10 +1346,21 @@
     var old = document.getElementById('tmLinkSheet');
     if (old) old.remove();
     var tg = tmParseTgLink(url);
+    // When the linked channel is already in the mirror list the button
+    // opens it instead of re-adding. inList keeps the stored username's
+    // canonical case for tmSelect.
+    var inList = '';
+    if (tg) {
+      for (var ci = 0; ci < tmChannels.length; ci++) {
+        var cu = tmChannels[ci].username || '';
+        if (cu.toLowerCase() === tg.user.toLowerCase()) { inList = cu; break; }
+      }
+    }
     var overlay = document.createElement('div');
     overlay.id = 'tmLinkSheet';
     overlay.className = 'tm-link-overlay';
     var html = '<div class="tm-link-sheet">'
+      + '<button class="tm-link-close" type="button" aria-label="' + tmEsc(tmI18n('close', 'Close')) + '">' + window.icon('x') + '</button>'
       + '<div class="tm-link-title">' + tmEsc(tmI18n('telemirror_open_this_link', 'Open this link?')) + '</div>'
       + '<div class="tm-link-url" dir="ltr">' + tmEsc(url) + '</div>'
       + '<div class="tm-link-actions">'
@@ -1173,7 +1369,9 @@
       + '</div>';
     if (tg) {
       html += '<button class="tm-link-btn tm-link-add-ch">'
-        + tmEsc(tmI18n('telemirror_add_channel', 'Add @{u} to channels').replace('{u}', tg.user))
+        + tmEsc((inList
+          ? tmI18n('telemirror_open_channel', 'Open @{u}')
+          : tmI18n('telemirror_add_channel', 'Add @{u} to channels')).replace('{u}', tg.user))
         + '</button>';
     }
     html += '</div>';
@@ -1181,6 +1379,9 @@
     overlay.addEventListener('click', function (e) {
       if (e.target === overlay) overlay.remove();
     });
+    // Direct handler — a real click targets the svg inside the button, so
+    // target-class matching on the overlay never fires (see core.js note).
+    overlay.querySelector('.tm-link-close').onclick = function () { overlay.remove(); };
     overlay.querySelector('.tm-link-copy').onclick = function () {
       try {
         if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
@@ -1190,26 +1391,30 @@
       overlay.remove();
     };
     overlay.querySelector('.tm-link-open').onclick = function () {
-      window.open(url, '_blank', 'noopener,noreferrer');
       overlay.remove();
+      openExternal(url); // shared impl in core.js — no double-open
     };
     if (tg) {
       overlay.querySelector('.tm-link-add-ch').onclick = async function () {
         overlay.remove();
         try {
-          var r = await fetch('/api/telemirror/channels', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'add', username: tg.user })
-          });
-          if (!r.ok) { tmToast(tmI18n('telemirror_invalid_user', 'Invalid username')); return; }
-          await tmLoadChannels();
+          var user = inList;
+          if (!user) {
+            var r = await fetch('/api/telemirror/channels', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ action: 'add', username: tg.user })
+            });
+            if (!r.ok) { tmToast(tmI18n('telemirror_invalid_user', 'Invalid username')); return; }
+            await tmLoadChannels();
+            user = tg.user;
+          }
           // Switch to that channel and scroll to the post if specified
-          tmActive = tg.user;
+          tmActive = user;
           tmSaveActive();
-          await tmSelect(tg.user);
-          if (tg.postId) setTimeout(function () { tmScrollToPost(tg.postId); }, 300);
-          tmToast(tmI18n('telemirror_channel_added', '@{u} added').replace('{u}', tg.user));
+          await tmSelect(user);
+          if (tg.postId) setTimeout(function () { tmGotoPost(tg.postId); }, 300);
+          if (!inList) tmToast(tmI18n('telemirror_channel_added', '@{u} added').replace('{u}', tg.user));
         } catch (e) { tmToast((e && e.message) || 'failed'); }
       };
     }

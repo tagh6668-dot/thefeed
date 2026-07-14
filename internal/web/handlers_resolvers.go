@@ -10,30 +10,6 @@ import (
 	"github.com/sartoopjj/thefeed/internal/client"
 )
 
-// handleApplySavedResolvers immediately activates the resolvers from the last
-// scan file, letting the UI skip the current scan and start fetching channels.
-func (s *Server) handleApplySavedResolvers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", 405)
-		return
-	}
-	ls := s.loadLastScan()
-	if ls == nil {
-		http.Error(w, "no saved scan", 400)
-		return
-	}
-	s.mu.RLock()
-	fetcher := s.fetcher
-	s.mu.RUnlock()
-	if fetcher == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-	fetcher.SetActiveResolvers(ls.Resolvers)
-	go s.refreshMetadataOnly()
-	writeJSON(w, map[string]any{"ok": true, "count": len(ls.Resolvers)})
-}
-
 func (s *Server) handleActiveResolvers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", 405)

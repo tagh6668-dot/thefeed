@@ -51,7 +51,9 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
-  z-index: 200;
+  /* Above the floating nav (9300) — a long-press menu near the bottom would
+     otherwise open under the nav bar. */
+  z-index: 9400;
   min-width: 160px;
   overflow: hidden;
   animation: ctx-in var(--motion-fast) var(--ease);
@@ -134,6 +136,9 @@
 /* have their own independent scroll regions.                     */
 #messages.saved-mode {
   overflow: hidden;
+  /* No top padding: the floating title header + search bar sit ON TOP of the
+     list (absolute) so messages scroll behind them (Telegram-style). The scroll
+     area itself reserves the top space via padding. */
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -157,6 +162,8 @@
   min-height: 0;
   overflow: hidden;
   font-family: var(--font-ui);
+  /* Anchor for the floating (absolute) search bar. */
+  position: relative;
 }
 html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-saved-root *, .sm-saved-root *::before, .sm-saved-root *::after { box-sizing: border-box; }
@@ -283,18 +290,30 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 @keyframes sm-slide-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
 
 .sm-pinned {
+  /* Stays pinned just under the floating title bar while the list scrolls
+     behind it (Telegram-style), instead of scrolling away with the messages.
+     top:0 sticks it at the scroll's content-box edge (= the padding-top, just
+     below the title bar). */
+  position: sticky;
+  top: 0;
+  z-index: 5;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 16px;
+  gap: 9px;
+  padding: 7px 12px;
+  margin-bottom: 8px;
   flex-shrink: 0;
   cursor: pointer;
-  background: color-mix(in oklab, var(--accent) 7%, var(--surface));
-  border-bottom: 1px solid color-mix(in oklab, var(--accent) 18%, transparent);
+  /* Compact rounded chip. Opaque (not accent-tinted) so messages don't bleed
+     through when it sticks; the accent lives on the pin icon + label only. */
+  border-radius: 12px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .22);
   transition: background 100ms;
   animation: sm-slide-in 200ms cubic-bezier(.4,0,.2,1);
 }
-.sm-pinned:hover { background: color-mix(in oklab, var(--accent) 11%, var(--surface)); }
+.sm-pinned:hover { background: var(--surface); }
 .sm-pinned-icon { color: var(--accent); flex-shrink: 0; line-height: 0; }
 .sm-pinned-icon svg { width: 14px; height: 14px; }
 .sm-pinned-content { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -321,15 +340,54 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-pinned-close:hover { color: var(--text); background: var(--hover); }
 .sm-pinned-close svg { width: 14px; height: 14px; }
 
-/* Search bar */
-.sm-search-bar {
+/* Saved-view title-bar actions (search toggle + lock). While viewing Saved
+   (.chat-header.sm-active) they replace the feed's header actions. */
+.sm-header-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+}
+/* The feed hides .chat-header-actions on mobile (bottom nav owns those); force
+   it back for the saved view so the search/lock buttons show. */
+.chat-header.sm-active .chat-header-actions {
+  display: flex !important;
+  align-items: center;
+}
+.chat-header.sm-active .chat-header-actions > :not(.sm-header-actions) {
+  display: none !important;
+}
+.chat-header.sm-active .sm-header-actions {
   display: flex;
+}
+.sm-header-actions .icon-btn.on {
+  color: var(--accent);
+}
+
+/* Search field floats just below the title bar — but ONLY when toggled open via
+   the title-bar search button (.sm-saved-root.sm-search-open). Hidden otherwise
+   so the saved view isn't a permanent search bar. The lock button moved to the
+   title bar. */
+.sm-search-bar {
+  display: none;
+  position: absolute;
+  top: 66px;
+  inset-inline: 8px;
+  z-index: 8;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
+  background: none;
+  pointer-events: none;
+}
+.sm-saved-root.sm-search-open .sm-search-bar {
+  display: flex;
+}
+/* While searching, drop the pinned chip so the field + results own the top. */
+.sm-saved-root.sm-search-open .sm-pinned {
+  display: none;
+}
+
+.sm-search-bar > * {
+  pointer-events: auto;
 }
 .sm-search-inner {
   flex: 1;
@@ -338,8 +396,9 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
   gap: 8px;
   background: var(--bg2, var(--bg));
   border-radius: 999px;
-  padding: 6px 12px;
+  padding: 8px 14px;
   border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
   transition: border-color 120ms;
 }
 .sm-search-inner:focus-within { border-color: var(--accent); }
@@ -369,15 +428,16 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 
 /* Lock button in search bar */
 .sm-lock-btn {
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
   border-radius: 50%;
-  background: transparent;
+  background: var(--bg2, var(--bg));
+  box-shadow: var(--shadow-md);
   color: var(--text-dim);
   cursor: pointer;
   transition: background 120ms, color 120ms;
@@ -385,11 +445,15 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .sm-lock-btn:hover { background: var(--hover); color: var(--text); }
 .sm-lock-btn .icon svg, .sm-lock-btn svg { width: 16px; height: 16px; }
 
-/* Scrollable items */
+/* Scrollable items. Top padding clears the floating title header (~70px) and
+   the floating search capsule (~52px) so the first item starts below them but
+   scrolls up behind them. */
 .sm-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 10px 12px 8px;
+  /* Top clears only the floating title bar now (search is toggled, not
+     permanent); bottom clears the floating composer. */
+  padding: 66px 12px 78px;
   overscroll-behavior-y: contain;
 }
 .sm-scroll::-webkit-scrollbar { width: 4px; }
@@ -732,22 +796,31 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 
 /* ─── Compose bar ────────────────────────────────────────────── */
 .sm-compose {
+  /* Floats over the list as three separate pills (attach · text · send) so
+     messages scroll behind and peek through the gaps — no enclosing bar. */
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 5;
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  padding: 8px 12px;
-  flex-shrink: 0;
-  background: var(--surface);
-  border-top: 1px solid var(--border);
-  box-shadow: 0 -2px 8px rgba(0,0,0,.08);
-  padding-bottom: max(8px, env(safe-area-inset-bottom, 8px));
+  padding: 8px 12px max(8px, env(safe-area-inset-bottom, 8px));
+  background: none;
+  pointer-events: none;
+}
+
+.sm-compose > * {
+  pointer-events: auto;
 }
 .sm-compose-attach {
   width: 40px;
   height: 40px;
   border: 1px solid var(--border);
   border-radius: 50%;
-  background: transparent;
+  background: var(--bg2, var(--bg));
+  box-shadow: var(--shadow-md);
   color: var(--text-dim);
   display: flex;
   align-items: center;
@@ -764,6 +837,7 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
   background: var(--bg2, var(--bg));
   border: 1.5px solid var(--border);
   border-radius: 20px;
+  box-shadow: var(--shadow-md);
   padding: 9px 14px;
   color: var(--text);
   font-size: 14px;
@@ -790,6 +864,7 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
   align-items: center;
   justify-content: center;
   cursor: pointer;
+  box-shadow: var(--shadow-md);
   transition: filter 120ms, transform 120ms;
 }
 .sm-compose-send:hover { filter: brightness(1.1); }
@@ -801,7 +876,8 @@ html[dir="rtl"] .sm-saved-root, .sm-saved-root[dir="rtl"] { --grad-end: left; }
 .saved-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 500;
+  /* Above the floating nav (9300) — see .modal-overlay in components.css. */
+  z-index: 9400;
   background: rgba(0, 0, 0, 0.45);
   display: flex;
   align-items: center;

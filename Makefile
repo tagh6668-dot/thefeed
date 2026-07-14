@@ -125,11 +125,11 @@ ios-deps:
 
 ios-bind: ios-deps
 	@command -v gomobile >/dev/null 2>&1 || { echo "gomobile not found. Run: go install golang.org/x/mobile/cmd/gomobile@latest && gomobile init"; exit 1; }
-	gomobile bind -iosversion=14.0 -target=ios,iossimulator -ldflags='$(IOS_LDFLAGS)' -o $(IOS_FRAMEWORK) ./mobile
+	gomobile bind -iosversion=13.0 -target=ios,iossimulator -ldflags='$(IOS_LDFLAGS)' -o $(IOS_FRAMEWORK) ./mobile
 
 ios-bind-catalyst: ios-deps
 	@command -v gomobile >/dev/null 2>&1 || { echo "gomobile not found"; exit 1; }
-	gomobile bind -iosversion=14.0 -target=ios,iossimulator,maccatalyst -ldflags='$(IOS_LDFLAGS)' -o $(IOS_FRAMEWORK) ./mobile
+	gomobile bind -iosversion=13.0 -target=ios,iossimulator,maccatalyst -ldflags='$(IOS_LDFLAGS)' -o $(IOS_FRAMEWORK) ./mobile
 
 ios-list-sims:
 	xcrun simctl list devices available

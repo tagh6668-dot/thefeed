@@ -123,6 +123,12 @@ type ProfileList struct {
 	// origin → flag was lost on every restart).
 	ScanPromptOff bool `json:"scanPromptOff,omitempty"`
 
+	// MirrorNoteOff suppresses the Mirror (Telemirror) disclaimer note once the
+	// user dismisses it. Persisted server-side for the same reason as
+	// ScanPromptOff: a fresh client port has empty localStorage and would
+	// otherwise re-show the note on every launch.
+	MirrorNoteOff bool `json:"mirrorNoteOff,omitempty"`
+
 	// ProfilePicsEnabled enables fetching avatars over DNS when the
 	// GitHub relay can't serve them. Off by default.
 	ProfilePicsEnabled bool `json:"profilePicsEnabled,omitempty"`
@@ -258,6 +264,13 @@ type Server struct {
 	refreshMu      sync.Mutex
 	refreshCancels map[int]context.CancelFunc
 
+	// chatAdv caches, per chat server key, the last VERIFIED ChatAvailable bit
+	// read from that config's metadata — populated by BOTH the feed's regular
+	// metadata fetches and the messenger's own, so chat availability rarely needs
+	// a dedicated probe and a "no chat" verdict is always signature-backed.
+	chatAdvMu sync.Mutex
+	chatAdv   map[string]chatAdvEntry
+
 	logMu    sync.RWMutex
 	logLines []string
 
@@ -328,6 +341,11 @@ type Server struct {
 	// notification (the in-app, foreground case is handled by the web UI).
 	newMsgMu      sync.Mutex
 	newMsgHandler func(count int)
+
+	// httpSrv is the running *http.Server, captured in serve() so Shutdown()
+	// (mobile background) can force-close it. Guarded by srvMu.
+	srvMu   sync.Mutex
+	httpSrv *http.Server
 }
 
 // SetNewMessageHandler registers a callback invoked (off the UI path) whenever
@@ -375,6 +393,7 @@ func New(dataDir string, port int, host string, password string) (*Server, error
 		password:       password,
 		messages:       make(map[int][]protocol.Message),
 		clients:        make(map[chan string]struct{}),
+		chatAdv:        make(map[string]chatAdvEntry),
 		refreshCancels: make(map[int]context.CancelFunc),
 		lastMsgIDs:     make(map[int]uint32),
 		lastHashes:     make(map[int]uint32),
@@ -487,7 +506,6 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/cache/clear-one", s.handleCacheClearOne)
 	mux.HandleFunc("/api/cache/budget", s.handleCacheBudget)
 	mux.HandleFunc("/api/bg-image", s.handleBgImage)
-	mux.HandleFunc("/api/resolvers/apply-saved", s.handleApplySavedResolvers)
 	mux.HandleFunc("/api/resolvers/active", s.handleActiveResolvers)
 	mux.HandleFunc("/api/resolvers/remove", s.handleRemoveResolver)
 	mux.HandleFunc("/api/resolvers/reset-stats", s.handleResetResolverStats)
@@ -505,6 +523,7 @@ func (s *Server) serve(ln net.Listener) error {
 	mux.HandleFunc("/api/resolvers/lists/save", s.handleResolverListSave)
 	mux.HandleFunc("/api/resolvers/lists/rename", s.handleResolverListRename)
 	mux.HandleFunc("/api/resolvers/lists/add", s.handleResolverListAdd)
+	mux.HandleFunc("/api/resolvers/lists/remove", s.handleResolverListRemove)
 	// Media (image/file) downloader: assembles a binary blob from a media
 	// channel and streams it back. See internal/web/media.go for the param
 	// contract.
@@ -534,7 +553,6 @@ func (s *Server) serve(ln net.Listener) error {
 	// Chat messenger endpoints — see handlers_chat.go.
 	mux.HandleFunc("/api/chat/info", s.handleChatInfo)
 	mux.HandleFunc("/api/chat/availability", s.handleChatAvailability)
-	mux.HandleFunc("/api/chat/servers", s.handleChatServers)
 	mux.HandleFunc("/api/chat/probe", s.handleChatProbeServer)
 	mux.HandleFunc("/api/chat/enable", s.handleChatEnable)
 	mux.HandleFunc("/api/chat/seed", s.handleChatSeed)
@@ -572,17 +590,10 @@ func (s *Server) serve(ln net.Listener) error {
 		if applied := s.applySelectedList(); applied {
 			s.checker.StartPeriodic(s.fetcherCtx)
 			go s.refreshMetadataOnly()
-		} else if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
-			// Pin the runtime pool to the saved scan and propagate
-			// those resolvers into the selected list and bank when
-			// either is empty — without this, the user sees
-			// counts of "0" in the UI even though the fetcher is
-			// happily using the saved resolvers.
-			s.fetcher.UpdateResolverPool(ls.Resolvers)
-			s.fetcher.SetActiveResolvers(ls.Resolvers)
-			s.persistLastScanToProfiles(ls.Resolvers)
-			s.checker.StartPeriodic(s.fetcherCtx)
-			go s.refreshMetadataOnly()
+		} else if s.reuseKnownResolvers(nil) {
+			// Reused last_scan → resolver bank (best-scored, known-dead dropped)
+			// with no scan — the same path a config switch takes, so boot and
+			// switch behave identically.
 		} else {
 			s.startCheckerThenRefresh()
 		}
@@ -616,10 +627,40 @@ func (s *Server) serve(ln net.Listener) error {
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       30 * time.Minute,
 	}
+	s.srvMu.Lock()
+	s.httpSrv = srv
+	s.srvMu.Unlock()
 	if ln != nil {
 		return srv.Serve(ln)
 	}
 	return srv.ListenAndServe()
+}
+
+// Shutdown stops the server's background goroutines and closes the HTTP
+// listener. It is the clean counterpart to serve() for embedders that
+// reuse the process — notably the iOS/Android bind layer, which calls
+// Shutdown when the app is backgrounded so the fetcher/checker/chat
+// goroutines stop touching profiles.json while suspended. Without this
+// the goroutines leak across every background→foreground cycle and a
+// scan suspended mid-flight can corrupt shared state.
+func (s *Server) Shutdown() {
+	if s == nil {
+		return
+	}
+	// Cancel the active fetcher's goroutine tree (rate limiter, noise,
+	// resolver checker, chat poll loop — they all derive from fetcherCtx).
+	s.mu.Lock()
+	cancel := s.fetcherCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.srvMu.Lock()
+	srv := s.httpSrv
+	s.srvMu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
+	}
 }
 
 // sameOriginGuard blocks cross-site STATE-CHANGING requests, the CSRF/DNS-
@@ -759,6 +800,14 @@ func (s *Server) initFetcher() error {
 		s.addLog(msg)
 	})
 
+	// Cache this config's VERIFIED chat-advertised bit from the feed's regular
+	// metadata fetches, so the messenger needn't re-probe to learn it.
+	if feedKey := chatServerKey(cfg.Domain); feedKey != "" {
+		fetcher.SetOnMetaChatAvail(func(advertised, verified bool) {
+			s.recordChatAdv(feedKey, advertised, verified)
+		})
+	}
+
 	// Create a shared context for this fetcher's lifetime.
 	ctx, cancel := context.WithCancel(context.Background())
 	s.fetcherCtx = ctx
@@ -836,6 +885,9 @@ func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Co
 	f.SetActiveResolvers(resolvers)
 	f.SetNoiseDisabled(true) // the main feed fetcher already emits cover traffic
 	pl, _ := s.loadProfiles()
+	// Respect the global debug toggle so chat cell queries (qname + resolvers)
+	// are logged just like the main feed's queries.
+	f.SetDebug(pl.Debug)
 	qm, rl, sc, to := connectionSettings(pl)
 	if qm == "double" {
 		f.SetQueryMode(protocol.QueryMultiLabel)
@@ -848,6 +900,13 @@ func (s *Server) buildChatFetcher(cfg Config, resolvers []string, ctx context.Co
 	}
 	f.SetTimeout(time.Duration(to * float64(time.Second)))
 	f.SetLogFunc(func(msg string) { s.addLog(msg) })
+	// Cache this config's VERIFIED chat-advertised bit from the messenger's own
+	// metadata fetches too (shared with the feed's, keyed by server).
+	if chatKey := chatServerKey(cfg.Domain); chatKey != "" {
+		f.SetOnMetaChatAvail(func(advertised, verified bool) {
+			s.recordChatAdv(chatKey, advertised, verified)
+		})
+	}
 	if main := s.fetcher; main != nil {
 		f.SetStatsForward(func(resolver string, ok bool, latency time.Duration) {
 			if ok {

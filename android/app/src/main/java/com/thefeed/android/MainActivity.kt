@@ -353,9 +353,24 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // One-time cache flush on app update. The pinned localhost port keeps the
+        // WebView's asset URLs stable, so across an app update it could serve a
+        // STALE cached bundle (old JS vs. the new index.html) — the mismatch that
+        // blanked the screen. Clear it once per version change; normal caching
+        // resumes afterward (media stays cached, no flicker). clearCache does NOT
+        // touch domStorage (settings).
+        run {
+            val prefs = getSharedPreferences(ThefeedService.PREFS_NAME, Context.MODE_PRIVATE)
+            if (prefs.getInt("webCacheVersion", -1) != BuildConfig.VERSION_CODE) {
+                webView.clearCache(true)
+                prefs.edit().putInt("webCacheVersion", BuildConfig.VERSION_CODE).apply()
+            }
+        }
         with(webView.settings) {
             javaScriptEnabled = true
             domStorageEnabled = true
+            // Respect HTTP cache headers: code assets are no-store (always fresh),
+            // media caches normally for smooth scrolling.
             cacheMode = WebSettings.LOAD_DEFAULT
             allowFileAccess = false
             allowContentAccess = false

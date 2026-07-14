@@ -143,6 +143,16 @@ function feedBack() {
 }
 window.feedBack = feedBack;
 window.addEventListener('popstate', function () {
+  // This handles ONLY the feed's channel view. The Mirror/Chat/Resolver/Settings
+  // sections also set #app.chat-open for their channel/thread/pane views and run
+  // their OWN popstate handlers — so skip here, otherwise an unrelated history
+  // pop (e.g. closing a Mirror image lightbox) would call openSidebar() and
+  // collapse the section's view, leaving a broken state with the nav hidden.
+  var de = document.documentElement;
+  if (de.classList.contains('tm-open') || de.classList.contains('chat-section') ||
+      de.classList.contains('resolver-section') || de.classList.contains('settings-section')) {
+    return;
+  }
   if (mobileQuery.matches && document.getElementById('app').classList.contains('chat-open')) {
     openSidebar();
   }
@@ -154,10 +164,62 @@ document.addEventListener('visibilitychange', function () {
 });
 function filterChannels() {
   var q = document.getElementById('channelSearch').value.toLowerCase();
+  // In the Mirror folder the same search box filters the telemirror list.
+  if (document.documentElement.classList.contains('tm-open')) {
+    document.querySelectorAll('#tmChannelsList .tm-channel-item').forEach(function (el) {
+      if (el.classList.contains('tm-saved-shortcut')) return; // keep Saved shortcut visible
+      var hay = ((el.getAttribute('data-u') || '') + ' ' + (el.textContent || '')).toLowerCase();
+      el.style.display = hay.includes(q) ? 'flex' : 'none';
+    });
+    return;
+  }
   document.querySelectorAll('.ch-item').forEach(function (el) {
     var hay = (el.dataset.name + ' ' + (el.dataset.label || '')).toLowerCase();
     el.style.display = hay.includes(q) ? 'flex' : 'none';
   });
+}
+
+// Reveal/hide the channel search box on demand (it's hidden by default — a
+// header toggle button drives it, like the log button). Shared by Feed and
+// Mirror; closing clears the filter so nothing stale lingers across modes.
+function toggleChannelSearch() {
+  var header = document.querySelector('.sidebar-header');
+  if (!header) return;
+  var open = header.classList.toggle('search-open');
+  var input = document.getElementById('channelSearch');
+  document.querySelectorAll('.channel-search-toggle').forEach(function (b) {
+    b.classList.toggle('active', open);
+  });
+  if (open) {
+    if (input) setTimeout(function () { input.focus(); }, 0);
+  } else if (input) {
+    input.value = '';
+    filterChannels();
+  }
+}
+// Close + clear the search when the user leaves the current list (e.g. switching
+// Feed↔Mirror) so a leftover query doesn't silently filter the other list.
+function closeChannelSearch() {
+  var header = document.querySelector('.sidebar-header');
+  if (!header || !header.classList.contains('search-open')) return;
+  toggleChannelSearch();
+}
+
+// +/- stepper for numeric fields: big tap targets replacing the tiny native
+// spin arrows. Honors the input's min/max/step and fires its change handler so
+// the value persists (autoSaveSettings etc.).
+function stepNum(id, dir) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var step = parseFloat(el.getAttribute('step')) || 1;
+  var minA = el.getAttribute('min'), maxA = el.getAttribute('max');
+  var min = (minA !== null && minA !== '') ? parseFloat(minA) : -Infinity;
+  var max = (maxA !== null && maxA !== '') ? parseFloat(maxA) : Infinity;
+  var v = (parseFloat(el.value) || 0) + dir * step;
+  if (v < min) v = min;
+  if (v > max) v = max;
+  el.value = String(v);
+  el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
 // ===== INIT =====
@@ -218,9 +280,9 @@ async function loadFontSize() {
       document.getElementById('fontSizeVal').textContent = s.fontSize;
     }
     if (s.debug) document.getElementById('cfgDebug').checked = true;
-    if (s.theme && (s.theme === 'dark' || s.theme === 'light')) {
+    if (s.theme && (s.theme === 'dark' || s.theme === 'light' || s.theme === 'system')) {
       localStorage.setItem('thefeed_theme', s.theme);
-      document.documentElement.setAttribute('data-theme', s.theme);
+      applyResolvedTheme();
       applyThemeButtons();
     }
     if (s.lang && (s.lang === 'fa' || s.lang === 'en')) {
@@ -237,6 +299,14 @@ async function loadFontSize() {
       localStorage.setItem('thefeed_scan_prompt_off', '1');
     } else if (s.scanPromptOff === false) {
       localStorage.removeItem('thefeed_scan_prompt_off');
+    }
+    // Mirror-note dismissal is server-persisted too (survives a new client
+    // port). Mirror it into localStorage + hide the note if already dismissed.
+    if (s.mirrorNoteOff === true) {
+      try { localStorage.setItem('tm_note_off', '1'); } catch (e) { }
+      if (typeof applyTmNoteState === 'function') applyTmNoteState();
+    } else if (s.mirrorNoteOff === false) {
+      try { localStorage.removeItem('tm_note_off'); } catch (e) { }
     }
     // Populate pinned channels from the server response (per-profile).
     pinnedChannels = new Set();
@@ -294,20 +364,56 @@ function maybeWarnNewVersion() {
 function previewFontSize(v) { document.documentElement.style.setProperty('--font-size', v + 'px'); document.getElementById('fontSizeVal').textContent = v }
 
 // ===== THEME =====
+// Preference is 'system' (default) | 'dark' | 'light'. 'system' follows the
+// device's prefers-color-scheme and tracks live OS changes. The data-theme
+// attribute the CSS reads is always the RESOLVED 'dark'/'light'.
+function themePref() { return localStorage.getItem('thefeed_theme') || 'system'; }
+function resolveTheme(pref) {
+  if (pref === 'dark' || pref === 'light') return pref;
+  return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) ? 'light' : 'dark';
+}
+function applyResolvedTheme() {
+  var resolved = resolveTheme(themePref());
+  document.documentElement.setAttribute('data-theme', resolved);
+  syncNativeSystemBars(resolved);
+}
+// Recolor the native status + gesture/home-indicator bars to match the theme
+// (Android via Android.setSystemBars, iOS via IOS.setSystemBars). The web
+// <meta theme-color> only affects browser chrome, not a native WebView's
+// system bars, so the shell has to do it. No-op in a plain browser.
+function syncNativeSystemBars(resolved) {
+  try {
+    var bg = (getComputedStyle(document.documentElement).getPropertyValue('--bg2') || '').trim()
+      || (resolved === 'light' ? '#f0f2f5' : '#0e1621');
+    var dark = resolved === 'dark';
+    if (typeof Android !== 'undefined' && Android.setSystemBars) Android.setSystemBars(bg, dark);
+    else if (typeof IOS !== 'undefined' && IOS.setSystemBars) IOS.setSystemBars(bg, dark);
+  } catch (e) { }
+}
+var _themeMqlBound = false;
 function loadTheme() {
-  var t = localStorage.getItem('thefeed_theme') || 'dark';
-  document.documentElement.setAttribute('data-theme', t);
+  applyResolvedTheme();
+  // While the preference is 'system', re-apply when the OS theme flips.
+  if (!_themeMqlBound && window.matchMedia) {
+    _themeMqlBound = true;
+    var mql = window.matchMedia('(prefers-color-scheme: light)');
+    var onChange = function () { if (themePref() === 'system') applyResolvedTheme(); };
+    if (mql.addEventListener) mql.addEventListener('change', onChange);
+    else if (mql.addListener) mql.addListener(onChange); // older WebView/Safari
+  }
 }
 function setTheme(t) {
   localStorage.setItem('thefeed_theme', t);
-  document.documentElement.setAttribute('data-theme', t);
+  applyResolvedTheme();
   applyThemeButtons();
   fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ theme: t }) }).catch(function () { });
 }
 function applyThemeButtons() {
-  var cur = localStorage.getItem('thefeed_theme') || 'dark';
+  var cur = themePref();
+  var s = document.getElementById('themeSystem');
   var d = document.getElementById('themeDark');
   var l = document.getElementById('themeLight');
+  if (s) s.classList.toggle('active-theme', cur === 'system');
   if (d) d.classList.toggle('active-theme', cur === 'dark');
   if (l) l.classList.toggle('active-theme', cur === 'light');
 }
@@ -328,13 +434,21 @@ function setLastSeenTimestamp(name, ts) {
 
 // ===== RESCAN PROMPT =====
 // Resolves true → skip rescan. Honors scanPromptOff.
+// Single-instance: if a prompt is already open (e.g. the user tapped a profile
+// several times), return the SAME pending promise instead of stacking a new
+// overlay each time.
+var _rescanPromptPromise = null;
 function askRescan(count) {
-  return new Promise(function (resolve) {
-    if (localStorage.getItem('thefeed_scan_prompt_off') === '1') { resolve(true); return; }
-    if (!count || count <= 0) { resolve(true); return; }
+  if (localStorage.getItem('thefeed_scan_prompt_off') === '1') return Promise.resolve(true);
+  if (!count || count <= 0) return Promise.resolve(true);
+  if (_rescanPromptPromise) return _rescanPromptPromise;
+  _rescanPromptPromise = new Promise(function (resolve) {
     var msg = t('rescan_prompt_msg').replace('{n}', count);
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    // The floating nav sits at z-index 9300; the base .modal-overlay (100) would
+    // render this startup prompt underneath it. Lift it above the nav.
+    overlay.style.zIndex = '9600';
     overlay.innerHTML =
       '<div class="modal" style="max-width:380px">'
       + '<h2 style="margin-top:0">' + esc(t('rescan_prompt_title')) + '</h2>'
@@ -349,6 +463,7 @@ function askRescan(count) {
     document.body.appendChild(overlay);
     var done = function (skip) {
       if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      _rescanPromptPromise = null;
       resolve(skip);
     };
     document.getElementById('rescanPromptSkip').onclick = function () { done(true) };
@@ -365,12 +480,21 @@ function askRescan(count) {
       done(true);
     };
   });
+  // MUST return the promise: without this askRescan() returns undefined, so
+  // `skipCheck = await askRescan()` becomes undefined → JSON.stringify drops the
+  // key → the server defaults skipCheck to false → it rescans immediately,
+  // before the user even touches the prompt. (Regression from the single-
+  // instance refactor.)
+  return _rescanPromptPromise;
 }
 function showRescanPrompt(count) { return askRescan(count); } // legacy alias
 function showConfirmDialog(msg, yesText, noText) {
   return new Promise(function (resolve) {
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    // Float above any open full-screen view (chat modal z9100, etc.) so the
+    // confirm lands on the SAME screen the user clicked from — not behind it.
+    overlay.style.zIndex = '99990';
     overlay.innerHTML = '<div class="modal" style="max-width:380px"><p style="font-size:13px;color:var(--text);margin-bottom:16px;line-height:1.6">' + esc(msg) + '</p><div class="modal-actions"><button class="btn btn-flat" id="confirmNo">' + esc(noText || t('cancel')) + '</button><button class="btn btn-primary" id="confirmYes">' + esc(yesText || t('ok')) + '</button></div></div>';
     document.body.appendChild(overlay);
     document.getElementById('confirmNo').onclick = function () { document.body.removeChild(overlay); resolve(false) };
@@ -388,6 +512,7 @@ function showInputDialog(opts) {
   return new Promise(function (resolve) {
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '99990'; // above full-screen views (see showConfirmDialog)
     var titleHtml = opts.title ? '<h2 style="margin-top:0;margin-bottom:8px;font-size:16px">' + esc(opts.title) + '</h2>' : '';
     var msgHtml = opts.message ? '<p style="font-size:13px;color:var(--text-dim);margin:0 0 12px;line-height:1.6">' + esc(opts.message) + '</p>' : '';
     overlay.innerHTML =
@@ -473,6 +598,67 @@ function triggerDownload(blob, filename) {
   setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 60000);
 }
 
+// openExternal opens a URL in a new tab/window without leaking the opener.
+// window.open returns null when 'noopener' is in the features EVEN ON
+// SUCCESS, so pass no features and sever the opener on the handle instead —
+// the old null-check fallback fired on every successful open and loaded the
+// URL in the current tab too. A real null (popup blocked, or a WebView
+// without a window factory) falls back to navigating the current view; the
+// native shells intercept external URLs and hand them to the system browser.
+function openExternal(url) {
+  var w = null;
+  try { w = window.open(url, '_blank'); } catch (e) { }
+  if (w) { try { w.opener = null; } catch (e) { } }
+  else { window.location.href = url; }
+}
+
+// showLinkSheet displays a bottom-sheet with the full URL, copy and
+// open-in-browser buttons. The optional extra {label, action} adds a
+// full-width in-app button (the feed uses it for open-channel/go-to-post).
+function showLinkSheet(url, extra) {
+  var old = document.getElementById('linkSheetOverlay');
+  if (old) old.remove();
+  var overlay = document.createElement('div');
+  overlay.id = 'linkSheetOverlay';
+  overlay.className = 'link-overlay';
+  overlay.innerHTML = '<div class="link-sheet">'
+    + '<button class="link-sheet-close" type="button" aria-label="' + escAttr(t('close') || 'Close') + '">' + icon('x') + '</button>'
+    + '<div class="link-title">' + esc(t('telemirror_open_this_link') || 'Open this link?') + '</div>'
+    + '<div class="link-url" dir="ltr">' + esc(url) + '</div>'
+    + '<div class="link-actions">'
+    + '<button class="link-btn link-copy">' + esc(t('telemirror_copy_link') || 'Copy link') + '</button>'
+    + '<button class="link-btn link-open">' + esc(t('telemirror_open_link') || 'Open in browser') + '</button>'
+    + '</div>'
+    + (extra ? '<button class="link-btn link-goto">' + esc(extra.label) + '</button>' : '')
+    + '</div>';
+  overlay.addEventListener('click', function (e) {
+    if (e.target === overlay) overlay.remove();
+  });
+  // Direct handler, NOT target-class matching on the overlay: a real click
+  // lands on the svg INSIDE the button, so e.target never carries the
+  // button's class (element.click() in tests masks this).
+  overlay.querySelector('.link-sheet-close').onclick = function () { overlay.remove(); };
+  if (extra) {
+    overlay.querySelector('.link-goto').onclick = function () {
+      overlay.remove();
+      extra.action();
+    };
+  }
+  overlay.querySelector('.link-copy').onclick = function () {
+    try {
+      if (navigator.clipboard) { navigator.clipboard.writeText(url).catch(function () {}); }
+      else { var ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    } catch (e) {}
+    showToast(t('copied') || 'Copied');
+    overlay.remove();
+  };
+  overlay.querySelector('.link-open').onclick = function () {
+    overlay.remove();
+    openExternal(url);
+  };
+  document.body.appendChild(overlay);
+}
+
 // showInfoDialog is the one-button cousin of showConfirmDialog: a small
 // modal with a message and a single OK button. Used for explanatory
 // bits like "this file is too large for the server cache".
@@ -480,9 +666,13 @@ function showInfoDialog(msg, okText) {
   return new Promise(function (resolve) {
     var overlay = document.createElement('div');
     overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '99990'; // above the floating nav (9300) and section panes
     overlay.innerHTML = '<div class="modal" style="max-width:380px"><p style="font-size:13px;color:var(--text);margin-bottom:16px;line-height:1.6;white-space:pre-line">' + esc(msg) + '</p><div class="modal-actions"><button class="btn btn-primary" id="infoOk">' + esc(okText || t('ok') || 'OK') + '</button></div></div>';
     document.body.appendChild(overlay);
-    document.getElementById('infoOk').onclick = function () { document.body.removeChild(overlay); resolve(true) };
+    function close() { if (overlay.parentNode) document.body.removeChild(overlay); resolve(true); }
+    document.getElementById('infoOk').onclick = close;
+    // Tap outside the card (on the backdrop) also dismisses.
+    overlay.onclick = function (e) { if (e.target === overlay) close(); };
   });
 }
 

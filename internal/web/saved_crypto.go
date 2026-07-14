@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -81,6 +82,19 @@ type savedKeyring struct {
 
 func savedCryptoDir(dataDir string) string { return filepath.Join(dataDir, "saved") }
 
+// savedStoreLooksSealed reports whether saved.json exists and is NOT plaintext
+// JSON — i.e. it was sealed with a DEK whose keyring is now missing. Generating
+// a fresh keyring/DEK in that state would orphan the data, so the caller locks
+// (preserving the bytes) instead. A valid-JSON store is legacy plaintext and is
+// safe to migrate; a missing/empty store is a genuine first run.
+func savedStoreLooksSealed(dataDir string) bool {
+	data, err := os.ReadFile(filepath.Join(dataDir, "saved.json"))
+	if err != nil || len(data) == 0 {
+		return false
+	}
+	return !json.Valid(data)
+}
+
 func (sc *savedCrypto) keyringPath() string   { return filepath.Join(sc.dir, "keyring.json") }
 func (sc *savedCrypto) deviceKeyPath() string { return filepath.Join(sc.dir, "devicekey") }
 
@@ -99,7 +113,25 @@ func loadSavedCrypto(dataDir string) (*savedCrypto, error) {
 	}
 	raw, err := os.ReadFile(sc.keyringPath())
 	if err != nil {
-		return sc, sc.initDevice() // first run
+		if !os.IsNotExist(err) {
+			// The keyring file is there but unreadable (transient I/O, permission,
+			// a partial write). DO NOT initDevice — that overwrites the keyring
+			// with a fresh DEK and orphans the sealed store forever. Lock instead;
+			// a later clean read recovers it.
+			log.Printf("saved: keyring unreadable (%v) — locking to preserve store", err)
+			sc.locked = true
+			return sc, nil
+		}
+		// No keyring at all. Normally a genuine first run → init a device key.
+		// But if a SEALED saved.json already exists (keyring lost, e.g. an
+		// inconsistent OS backup-restore), generating a new DEK would orphan that
+		// data. Detect a non-plaintext store and lock instead of destroying it.
+		if savedStoreLooksSealed(dataDir) {
+			log.Printf("saved: keyring missing but a sealed saved.json exists — locking instead of regenerating the key (data preserved)")
+			sc.locked = true
+			return sc, nil
+		}
+		return sc, sc.initDevice() // first run (or legacy plaintext to migrate)
 	}
 	var kr savedKeyring
 	if err := json.Unmarshal(raw, &kr); err != nil {

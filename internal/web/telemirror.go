@@ -50,13 +50,15 @@ func (h *telemirrorHub) handleChannels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		list := h.store.List()
+		titles := h.store.Titles()
 		type entry struct {
 			Username string `json:"username"`
 			Pinned   bool   `json:"pinned"`
+			Title    string `json:"title,omitempty"`
 		}
 		out := make([]entry, 0, len(list))
 		for _, u := range list {
-			out = append(out, entry{Username: u, Pinned: telemirror.IsDefault(u)})
+			out = append(out, entry{Username: u, Pinned: telemirror.IsDefault(u), Title: titles[strings.ToLower(u)]})
 		}
 		writeJSON(w, map[string]any{"channels": out})
 
@@ -107,6 +109,11 @@ func (h *telemirrorHub) handleChannel(w http.ResponseWriter, r *http.Request) {
 	forceRefresh := r.URL.Query().Get("refresh") == "1"
 
 	cached, fresh := h.cache.Get(username)
+	if cached != nil {
+		// Persist the title from cache too — channels cached before titles
+		// were stored (or on a cache-only serve) still get a real name.
+		h.store.SetTitle(username, cached.Channel.Title)
+	}
 	if cached != nil && fresh && !forceRefresh {
 		writeJSON(w, rewriteImageURLs(cached))
 		return
@@ -335,6 +342,9 @@ func (h *telemirrorHub) refresh(username string) (*telemirror.FetchResult, error
 	if chInfo.Username == "" {
 		chInfo.Username = username
 	}
+	// Persist the latest title server-side so every client/port sees a real
+	// name in the channel list (the list API can't fetch titles itself).
+	h.store.SetTitle(username, chInfo.Title)
 	res := &telemirror.FetchResult{Channel: *chInfo, Posts: posts}
 	_ = h.cache.Put(username, res)
 	if h.onUpdate != nil {

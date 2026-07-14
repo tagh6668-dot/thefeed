@@ -142,8 +142,13 @@ func (s *Server) migrateActiveLists(pl *ProfileList) bool {
 	var seed []string
 	if ls := s.loadLastScan(); ls != nil && len(ls.Resolvers) > 0 {
 		seed = ls.Resolvers
-	} else if len(pl.ResolverBank) > 0 {
-		seed = pl.ResolverBank
+	} else {
+		// Seed only from VALIDATED bank resolvers. A freshly imported config
+		// drops ~hundreds of unproven resolvers into the bank; seeding them into
+		// a "Default" list would let applySelectedList activate them without a
+		// scan (bypassing the scan-on-fresh-import path). usableBankResolvers
+		// returns nil when nothing is validated → no list → the caller scans.
+		seed = usableBankResolvers(pl)
 	}
 	if len(seed) == 0 {
 		return false
@@ -218,7 +223,16 @@ func pruneResolversFromLists(pl *ProfileList, removed map[string]bool) bool {
 // sanitizeListName normalises and length-caps user-supplied names.
 // Returns "" if the cleaned name is empty.
 func sanitizeListName(raw string) string {
-	name := strings.TrimSpace(raw)
+	// Drop characters that would break the frontend's inline onclick handlers /
+	// HTML (quotes, backslash, angle brackets) — list names are plain labels.
+	name := strings.Map(func(r rune) rune {
+		switch r {
+		case '\'', '"', '\\', '<', '>', '`':
+			return -1
+		}
+		return r
+	}, raw)
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return ""
 	}
@@ -463,17 +477,22 @@ func (s *Server) handleResolverListSave(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "name required", 400)
 		return
 	}
-	s.mu.RLock()
-	f := s.fetcher
-	s.mu.RUnlock()
-	if f == nil {
-		http.Error(w, "not configured", 400)
-		return
-	}
-	resolvers := append([]string(nil), f.Resolvers()...)
-	if len(resolvers) == 0 {
-		http.Error(w, "no active resolvers to save", 400)
-		return
+	// Mode "empty" creates a brand-new EMPTY list (the user fills it later from
+	// the bank) — it must NOT copy the current active resolvers.
+	var resolvers []string
+	if body.Mode != "empty" {
+		s.mu.RLock()
+		f := s.fetcher
+		s.mu.RUnlock()
+		if f == nil {
+			http.Error(w, "not configured", 400)
+			return
+		}
+		resolvers = append([]string(nil), f.Resolvers()...)
+		if len(resolvers) == 0 {
+			http.Error(w, "no active resolvers to save", 400)
+			return
+		}
 	}
 	pl, err := s.loadProfiles()
 	if err != nil {
@@ -568,6 +587,69 @@ func (s *Server) handleResolverListAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
 	writeJSON(w, map[string]any{"ok": true, "added": added, "count": len(list.Resolvers)})
+}
+
+// handleResolverListRemove removes resolvers from a named list. Body:
+// {name, resolvers:[...]}. If the list is the selected one, the active pool is
+// narrowed to match.
+func (s *Server) handleResolverListRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", 405)
+		return
+	}
+	var body struct {
+		Name      string   `json:"name"`
+		Resolvers []string `json:"resolvers"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64*1024)).Decode(&body); err != nil {
+		http.Error(w, "bad json", 400)
+		return
+	}
+	name := sanitizeListName(body.Name)
+	if name == "" || len(body.Resolvers) == 0 {
+		http.Error(w, "name and resolvers required", 400)
+		return
+	}
+	pl, err := s.loadProfiles()
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	list := findList(pl, name)
+	if list == nil {
+		http.Error(w, "no such list", 404)
+		return
+	}
+	drop := map[string]bool{}
+	for _, r := range body.Resolvers {
+		drop[strings.TrimSpace(r)] = true
+	}
+	kept := list.Resolvers[:0]
+	removed := 0
+	for _, r := range list.Resolvers {
+		if drop[r] {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	list.Resolvers = kept
+	list.LastUsed = time.Now().Unix()
+	if err := s.saveProfiles(pl); err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	if removed > 0 && strings.EqualFold(strings.TrimSpace(pl.SelectedList), name) {
+		s.mu.RLock()
+		f := s.fetcher
+		s.mu.RUnlock()
+		if f != nil {
+			f.UpdateResolverPool(list.Resolvers)
+			f.SetActiveResolvers(list.Resolvers)
+		}
+	}
+	s.broadcast("event: update\ndata: \"resolver-lists\"\n\n")
+	writeJSON(w, map[string]any{"ok": true, "removed": removed, "count": len(list.Resolvers)})
 }
 
 // handleResolverListRename changes a list's display name. Body:

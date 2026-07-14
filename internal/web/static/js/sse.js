@@ -32,9 +32,14 @@ function connectSSE() {
       return;
     }
     if (data === 'resolver-lists') {
-      if (document.getElementById('resolversModal').classList.contains('active')) {
-        try { loadResolverLists(); } catch (e2) { }
-        try { if (typeof _fetchActiveBoard === 'function') _fetchActiveBoard(); } catch (e2) { }
+      // Resolver UI is a reparented section now (not the old modal). Refresh the
+      // lists/sidebar + the visible board when the section is open.
+      if (document.documentElement.classList.contains('resolver-section')) {
+        try { loadResolverLists(); } catch (e2) { } // → renderResolverTabs → renderResolverSidebar
+        try {
+          if (typeof resolverView !== 'undefined' && resolverView === 'bank') { if (typeof _fetchBankBoard === 'function') _fetchBankBoard(); }
+          else if (typeof _fetchActiveBoard === 'function') _fetchActiveBoard();
+        } catch (e2) { }
       }
       return;
     }
@@ -69,6 +74,8 @@ function connectSSE() {
         channels = [];
         document.getElementById('chatName').textContent = 'thefeed';
         document.getElementById('chatSub').textContent = '';
+        if (typeof setChatHeaderAvatar === 'function') setChatHeaderAvatar(null);
+        if (typeof updateFeedHeaderChrome === 'function') updateFeedHeaderChrome();
         openSidebar();
       }
       if (document.getElementById('profilesModal').classList.contains('active')) {

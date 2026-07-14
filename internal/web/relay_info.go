@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sartoopjj/thefeed/internal/client"
@@ -159,7 +160,7 @@ func (s *Server) fetchFromGitHubRelayBytes(ctx context.Context, size int64, crc 
 	url := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s/%s",
 		info.GitHubRepo, domainSeg, objectSeg)
 	const aeadOverhead = protocol.NonceSize + 16
-	encBody, _, err := fetchGitHubRaw(ctx, relayHTTPClient, url, size+int64(aeadOverhead))
+	encBody, _, err := fetchGitHubRaw(ctx, relayHTTPClient, url, size+int64(aeadOverhead), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +237,40 @@ func (s *Server) serveFromGitHubRelay(w http.ResponseWriter, r *http.Request, si
 	// The blob on disk is AES-256-GCM(nonce||ct||tag) over the plaintext.
 	// Cap the fetch at plaintext size + small overhead.
 	const aeadOverhead = protocol.NonceSize + 16 // GCM tag is 16 bytes
-	encBody, _, err := fetchGitHubRaw(ctx, relayHTTPClient, url, size+int64(aeadOverhead))
+	ciphertextSize := size + int64(aeadOverhead)
+
+	// Surface download progress through the same dlProgress store the DNS path
+	// uses, so the client's /api/media/progress poll animates the bar instead of
+	// it jumping 0→100 when the fully-buffered blob finally flushes over loopback.
+	// (GCM must verify the whole ciphertext before we can decrypt, so we can't
+	// stream plaintext to the browser as it arrives.) Relay media is a single
+	// HTTP download, not DNS blocks, so we report BYTES (byteBased) — the client
+	// shows size/percent with no block count. Keyed by the exact (ch, blk, crc)
+	// the client polls with; both are 0 for GitHub-only media, which is fine —
+	// the key only has to match (size>0 is guaranteed by the early return above).
+	ch64, _ := strconv.ParseUint(r.URL.Query().Get("ch"), 10, 16)
+	blk64, _ := strconv.ParseUint(r.URL.Query().Get("blk"), 10, 16)
+	progKey := mediaProgressKey(uint16(ch64), uint16(blk64), crc)
+	prog := &mediaDLProgress{total: int32(size), byteBased: true}
+	s.dlMu.Lock()
+	s.dlProgress[progKey] = prog
+	s.dlMu.Unlock()
+	defer func() {
+		s.dlMu.Lock()
+		delete(s.dlProgress, progKey)
+		s.dlMu.Unlock()
+	}()
+	onProgress := func(read int64) {
+		// Map ciphertext bytes read → plaintext-size scale so the client shows
+		// familiar file-size numbers (loaded / total).
+		done := read * size / ciphertextSize
+		if done > size {
+			done = size
+		}
+		atomic.StoreInt32(&prog.completed, int32(done))
+	}
+
+	encBody, _, err := fetchGitHubRaw(ctx, relayHTTPClient, url, ciphertextSize, onProgress)
 	if err != nil {
 		s.addLog(fmt.Sprintf("relay: fetch %s: %v", url, err))
 		// Rate-limit gets surfaced specifically so the UI can show a
@@ -284,7 +318,29 @@ func (s *Server) serveFromGitHubRelay(w http.ResponseWriter, r *http.Request, si
 	return true
 }
 
-func fetchGitHubRaw(ctx context.Context, hc *http.Client, url string, expectedSize int64) ([]byte, string, error) {
+// progressReader wraps an io.Reader and reports cumulative bytes read via cb.
+// Used to surface GitHub-relay download progress: the encrypted blob must be
+// fully buffered before GCM can decrypt it, so there's no streaming to the
+// browser — progress is reported out-of-band into the dlProgress store that
+// /api/media/progress serves.
+type progressReader struct {
+	r    io.Reader
+	read int64
+	cb   func(read int64)
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	if n > 0 {
+		pr.read += int64(n)
+		if pr.cb != nil {
+			pr.cb(pr.read)
+		}
+	}
+	return n, err
+}
+
+func fetchGitHubRaw(ctx context.Context, hc *http.Client, url string, expectedSize int64, onProgress func(read int64)) ([]byte, string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, "", err
@@ -339,14 +395,21 @@ func fetchGitHubRaw(ctx context.Context, hc *http.Client, url string, expectedSi
 	if target <= 0 && expectedSize > 0 {
 		target = expectedSize
 	}
+	// Count bytes as they arrive (the slow GitHub→server hop) so callers can
+	// drive a progress bar. Preserves the ReadFull / LimitReader semantics
+	// below — it only observes the stream.
+	var src io.Reader = resp.Body
+	if onProgress != nil {
+		src = &progressReader{r: resp.Body, cb: onProgress}
+	}
 	if target > 0 && target <= limit+1 {
 		body := make([]byte, target)
-		if _, err := io.ReadFull(resp.Body, body); err != nil {
+		if _, err := io.ReadFull(src, body); err != nil {
 			return nil, "", err
 		}
 		return body, resp.Header.Get("Content-Type"), nil
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	body, err := io.ReadAll(io.LimitReader(src, limit+1))
 	if err != nil {
 		return nil, "", err
 	}

@@ -84,6 +84,13 @@ type Fetcher struct {
 	noiseDisabled bool // suppress the decoy-DNS noise loop (per-profile chat fetchers)
 	logFunc       LogFunc
 
+	// onMetaChatAvail, if set, is called after every metadata fetch with the
+	// server's ChatAvailable advertisement bit and whether that fetch was
+	// signature-VERIFIED (a pinned key + valid signature). Lets the web layer
+	// cache an authoritative "this config has chat" answer drawn from the feed's
+	// regular metadata fetches, so the messenger needn't re-probe.
+	onMetaChatAvail func(advertised, verified bool)
+
 	// Resolver scoring: per-resolver success/failure counters and latency.
 	stats sync.Map // string (resolver:port) -> *resolverStat
 
@@ -366,6 +373,12 @@ func (f *Fetcher) SetTimeout(d time.Duration) {
 // SetLogFunc sets the debug log callback.
 func (f *Fetcher) SetLogFunc(fn LogFunc) {
 	f.logFunc = fn
+}
+
+// SetOnMetaChatAvail sets the callback invoked after each metadata fetch with
+// the server's ChatAvailable bit and whether that metadata was signature-verified.
+func (f *Fetcher) SetOnMetaChatAvail(fn func(advertised, verified bool)) {
+	f.onMetaChatAvail = fn
 }
 
 // SetDebug enables or disables debug logging of generated query names.
@@ -1091,8 +1104,15 @@ func (f *Fetcher) fetchMetadataExtended(parent context.Context, block0 []byte, c
 		// Verify the server signature over the metadata block concatenation
 		// using the ExtraBlock fetched above. A present-but-invalid signature
 		// is a hard failure; a missing one (old server) is tolerated.
-		if verr := f.verifyExtraBytes(protocol.MetadataChannel, assembled, extraRaw); verr == ErrExtraBlockInvalid {
+		verr := f.verifyExtraBytes(protocol.MetadataChannel, assembled, extraRaw)
+		if verr == ErrExtraBlockInvalid {
 			return nil, fmt.Errorf("metadata: %w", verr)
+		}
+		// Report the chat advertisement bit: verified only when a key is pinned
+		// AND the signature checked out (verr == nil), so the messenger can trust
+		// a "no chat" verdict drawn from the feed's regular metadata fetches.
+		if f.onMetaChatAvail != nil {
+			f.onMetaChatAvail(meta.ChatAvailable, f.serverPubKey != nil && verr == nil)
 		}
 		return meta, nil
 	}
@@ -1107,6 +1127,10 @@ func (f *Fetcher) fetchMetadataLegacy(ctx context.Context, block0 []byte) (*prot
 	meta, err := protocol.ParseMetadata(block0)
 	if err == nil {
 		f.cacheEpoch.Store(meta.NextFetch)
+		// Legacy path never fetches the signature → unverified (verified=false).
+		if f.onMetaChatAvail != nil {
+			f.onMetaChatAvail(meta.ChatAvailable, false)
+		}
 		return meta, nil
 	}
 	allData := make([]byte, len(block0))
@@ -1123,6 +1147,9 @@ func (f *Fetcher) fetchMetadataLegacy(ctx context.Context, block0 []byte) (*prot
 		meta, parseErr := protocol.ParseMetadata(allData)
 		if parseErr == nil {
 			f.cacheEpoch.Store(meta.NextFetch)
+			if f.onMetaChatAvail != nil {
+				f.onMetaChatAvail(meta.ChatAvailable, false)
+			}
 			return meta, nil
 		}
 	}

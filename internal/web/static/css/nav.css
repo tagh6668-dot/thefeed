@@ -1,0 +1,2009 @@
+    /* =====================================================================
+       NAV — Telegram-2026 redesign: floating bottom nav (mobile) / left icon
+       rail (desktop), folder pills, slim feed header, search-hide-on-scroll,
+       rounded channel cards.
+
+       Android-WebView safety (see responsive.css / telemirror.css notes):
+       - NO backdrop-filter on the nav: content scrolls underneath it, so a
+         blur would re-rasterise every frame and jank. Solid bg + shadow only.
+       - NO transitions on the pane-swap; only opacity/colour transitions here.
+       ===================================================================== */
+
+    /* ---- Floating bottom nav (mobile-first) -------------------------------- */
+    .nav-bar {
+      position: fixed;
+      left: 10px;
+      right: 10px;
+      bottom: calc(10px + var(--safe-bottom));
+      height: 52px;
+      display: flex;
+      align-items: stretch;
+      /* Translucent like the floating topbar so content scrolling underneath
+         shows through for a Telegram-ish glass look. Alpha only — NO
+         backdrop-filter (would re-rasterise the scrolling content every frame
+         and jank weak phones). Matches the topbar's 88% mix. */
+      background: color-mix(in srgb, var(--bg2) 88%, transparent);
+      border: 1px solid var(--border);
+      border-radius: 22px;
+      box-shadow: var(--shadow-lg);
+      z-index: 80;
+    }
+
+    /* Catch taps in the strip BELOW the floating nav (the 10px + safe-area gap).
+       Without this, a channel scrolled into that gap behind the nav got tapped
+       by a finger reaching for the bar. Transparent, so the glass look (content
+       showing through around the bar) is preserved; it just absorbs the tap. */
+    .nav-bar::after {
+      content: '';
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      height: calc(12px + var(--safe-bottom));
+    }
+
+    .nav-tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      border: none;
+      background: none;
+      color: var(--text-dim);
+      font-size: 10px;
+      font-weight: 500;
+      cursor: pointer;
+      position: relative;
+      -webkit-tap-highlight-color: transparent;
+      transition: color var(--motion-fast) var(--ease);
+    }
+
+    .nav-tab:hover {
+      color: var(--text);
+    }
+
+    /* Mobile active state: accent colour only — no square/box highlight. */
+    .nav-tab.active {
+      color: var(--accent);
+    }
+
+    .nav-tab .nav-ic {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 23px;
+      height: 23px;
+      transition: transform var(--motion-fast) var(--ease);
+    }
+
+    /* Subtle pop on the selected tab + tactile press feedback. Transform-only
+       (GPU-cheap) and unrelated to the pane-swap state, so there's no
+       compositor-freeze risk. Press rule comes last so it wins while held. */
+    .nav-tab.active .nav-ic {
+      transform: scale(1.12);
+    }
+
+    .nav-tab:active .nav-ic {
+      transform: scale(0.9);
+    }
+
+    .nav-tab .nav-ic .icon,
+    .nav-tab .nav-ic svg {
+      width: 23px;
+      height: 23px;
+    }
+
+    .nav-lb {
+      line-height: 1;
+    }
+
+    .nav-badge {
+      position: absolute;
+      top: 6px;
+      left: 50%;
+      margin-left: 7px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      border-radius: 8px;
+      background: var(--error);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 1.5px solid var(--bg2);
+      box-sizing: border-box;
+    }
+
+    .nav-badge[hidden] {
+      display: none;
+    }
+
+    /* Content clears the floating nav so the last row / empty-state isn't
+       trapped behind the capsule — the nav is a bottom bar on EVERY width. */
+    .channel-list {
+      padding-bottom: calc(82px + var(--safe-bottom)) !important;
+    }
+
+    @media (max-width: 768px) {
+      /* Channel open (full-screen conversation) hides the nav entirely. */
+      .app.chat-open .nav-bar {
+        display: none;
+      }
+    }
+
+    /* ---- Desktop: SAME bottom floating nav, sized to the list column ------
+       (No left rail — Telegram uses the left strip only for folders, which we
+       do with the pills instead.) */
+    @media (min-width: 769px) {
+      .nav-bar {
+        left: 10px;
+        right: auto;
+        width: calc(var(--sidebar-w, 320px) - 20px);
+      }
+    }
+
+    /* No rail spacer — the nav is a bottom bar on every width. */
+    .nav-tab-spacer {
+      display: none;
+    }
+
+    /* =====================================================================
+       SLIM FEED HEADER + FOLDER PILLS
+       ===================================================================== */
+
+    /* Settings now lives in the nav rail/bar, so its header icon is redundant. */
+    #sidebarSettingsBtn {
+      display: none;
+    }
+
+    /* The old toolbar (Find Resolvers / Resolvers / Browse / Messenger) is
+       superseded by the nav tabs and the Mirror folder pill. Hidden, not
+       removed — existing JS still updates its badges, which the nav mirrors. */
+    .sidebar-toolbar {
+      display: none !important;
+    }
+
+    .sidebar-header {
+      gap: 6px;
+      padding-bottom: 4px;
+      /* No divider under the header/folder row — Telegram-clean. */
+      border-bottom: none;
+    }
+
+    .sidebar-header-top {
+      min-height: 0;
+    }
+
+    .search-wrap .sidebar-search {
+      padding: 9px 14px;
+      font-size: var(--text-sm);
+    }
+
+    /* Search is opt-in: the box stays hidden until the header's search toggle is
+       tapped (like the log button), instead of permanently occupying a row. */
+    .search-wrap {
+      display: none;
+    }
+
+    .sidebar-header.search-open .search-wrap {
+      display: block;
+    }
+
+    .channel-search-toggle.active {
+      color: var(--accent);
+      background: var(--hover);
+    }
+
+    /* Float the Feed/Mirror header (profile/add-channel + search) so the channel
+       list scrolls BEHIND it — transparent around the field pills, like the
+       content-pane topbars. Applies on BOTH mobile and desktop so the desktop
+       sidebar column doesn't show a solid header region behind the pills.
+       --feed-header-h is measured in JS so the list padding tracks the header
+       height (incl. the search collapse-on-scroll). */
+    .sidebar {
+      position: relative;
+    }
+    .sidebar-header {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 7;
+      background: transparent;
+      border-bottom: none;
+    }
+    #channelList,
+    #tmSidebar {
+      /* Clear the floating header. For Mirror we pad the whole #tmSidebar pane
+         (not just #tmChannelsList) so the disclaimer note — which sits ABOVE the
+         list — also drops below the header instead of hiding behind it. */
+      padding-top: calc(var(--feed-header-h, 104px) + 4px);
+    }
+
+    @media (max-width: 768px) {
+      /* The header's icon buttons become solid circles (like the messenger
+         composer's round buttons) so they read as discrete controls floating
+         over the list, with the rows visible in the gaps between them. */
+      .sidebar-header .icon-btn {
+        flex: 0 0 auto;
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        background: var(--surface);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+    }
+
+    /* (Folder pills removed — Mirror is now its own bottom-nav tab.) */
+
+    /* =====================================================================
+       CHANNEL ROWS → rounded cards (no divider lines)
+       ===================================================================== */
+    /* Card padding: top + sides only — never set padding-bottom here, or it
+       overrides the mobile rule that keeps rows clear of the floating nav. */
+    .channel-list {
+      padding-top: 4px;
+      padding-inline: 6px;
+    }
+
+    .ch-item {
+      border-radius: 14px;
+    }
+
+    /* Floating capsule; posts scroll behind it (padding-top clears it). */
+    .tm-topbar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 6;
+      margin: 8px;
+      padding: 8px 14px;
+      min-height: 52px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--bg2);
+      box-shadow: var(--shadow-md);
+    }
+
+    .tm-topbar-name {
+      font-size: var(--text-md);
+      font-weight: 600;
+    }
+
+    #tmPane .tm-content {
+      padding-top: 70px;
+    }
+
+    /* Feed header: same floating capsule as the mirror topbar. */
+    .chat-area > .chat-header {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 6;
+      margin: 8px;
+      min-height: 52px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--bg2);
+      box-shadow: var(--shadow-md);
+    }
+
+    .chat-area > .messages {
+      padding-top: var(--ch-header-h, 70px);
+    }
+
+    .chat-area > .msg-search-bar.active {
+      position: absolute;
+      top: 70px;
+      left: 8px;
+      right: 8px;
+      z-index: 6;
+      margin: 0;
+      border: 1px solid var(--border);
+      border-radius: 14px;
+    }
+
+    .chat-area > .floating-date {
+      top: 74px;
+    }
+
+    /* Channel avatar in the feed header — matches the mirror topbar. */
+    .chat-header-avatar {
+      width: 38px;
+      height: 38px;
+      font-size: var(--text-md);
+    }
+
+    .chat-header-avatar:empty {
+      display: none;
+    }
+
+    .chat-header-avatar.is-saved {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .chat-header-avatar.is-saved .icon svg {
+      width: 20px;
+      height: 20px;
+    }
+
+    /* Telemirror panes live in the shared shell (html.tm-open swaps them);
+       chat is still its own modal, forced LTR like the feed. */
+
+    .chat-modal {
+      direction: ltr;
+    }
+
+    .tm-back,
+    .chat-back-close {
+      display: none !important;
+    }
+
+    .nav-bar {
+      z-index: 9300;
+    }
+
+    /* ---- Telemirror panes: hidden until the Mirror folder is open -------- */
+    #tmSidebar,
+    #tmPane {
+      display: none;
+    }
+
+    /* #tmSidebar is a normal flex pane in the sidebar, not the old drawer. */
+    #tmSidebar.tm-sidebar {
+      position: static;
+      width: auto;
+      max-width: none;
+      transform: none;
+      border-right: none;
+      z-index: auto;
+      background: transparent;
+    }
+
+    html.tm-open #channelList {
+      display: none;
+    }
+
+    html.tm-open #tmSidebar {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+      /* #tmSidebar is the single scroller (like the feed's #channelList): the
+         disclaimer note + channel list scroll together BEHIND the floating
+         header, instead of the list scrolling inside its own inner box. */
+      overflow-y: auto;
+    }
+
+    /* Mirror swaps the profile row for the Add-channel row in the same slot. */
+    html.tm-open .sidebar-header-top {
+      display: none;
+    }
+
+    #tmAddHeaderRow {
+      display: none;
+      padding: 0;
+      border-bottom: none;
+    }
+
+    html.tm-open #tmAddHeaderRow {
+      display: flex;
+    }
+
+    #tmAddHeaderRow input {
+      border-radius: var(--radius-pill);
+      padding: 9px 14px;
+      font-size: var(--text-sm);
+    }
+
+    #tmAddHeaderRow .btn {
+      border-radius: var(--radius-pill);
+      padding: 9px 16px;
+    }
+
+    /* Header actions only show with a channel open. */
+    .chat-area > .chat-header:not(.has-channel) .chat-header-actions {
+      display: none;
+    }
+
+    /* No mirror back button on desktop. */
+    @media (min-width: 769px) {
+      #tmPane .tm-menu,
+      #tmPane .tm-back {
+        display: none !important;
+      }
+    }
+
+    html.tm-open .chat-header,
+    html.tm-open #msgSearchBar,
+    html.tm-open #messages,
+    html.tm-open #sendPanel,
+    html.tm-open #scrollDownBtn,
+    html.tm-open #progressPanel,
+    html.tm-open .chat-area > .log-toggle,
+    html.tm-open .chat-area > .log-panel,
+    html.tm-open #floatingDate {
+      display: none !important;
+    }
+
+    #tmPane {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+    }
+
+    html.tm-open #tmPane {
+      display: flex;
+    }
+
+    /* ---- Chat reparent (same pattern as Mirror): list → #chatSidebar pane,
+       thread → #chatPane. `html.chat-section` selects it. ---- */
+    #chatSidebar,
+    #chatPane {
+      display: none;
+    }
+
+    html.chat-section #channelList {
+      display: none;
+    }
+
+    /* The chat list has its own topbar — hide the feed profile/search header. */
+    html.chat-section .sidebar-header {
+      display: none;
+    }
+
+    html.chat-section #chatSidebar {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
+    /* The messenger list header: a rounded floating capsule like the other
+       topbars, not a square full-width bar. Margin around it lets the page show
+       through the cut corners; translucent + no blur (weak-phone safe). */
+    html.chat-section #chatSidebar .chat-topbar {
+      margin: 8px 8px 2px;
+      border-radius: 18px;
+      border: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg2) 88%, transparent);
+    }
+
+    html.chat-section .chat-header,
+    html.chat-section #msgSearchBar,
+    html.chat-section #messages,
+    html.chat-section #sendPanel,
+    html.chat-section #scrollDownBtn,
+    html.chat-section #progressPanel,
+    html.chat-section .chat-area > .log-toggle,
+    html.chat-section .chat-area > .log-panel,
+    html.chat-section #floatingDate {
+      display: none !important;
+    }
+
+    #chatPane {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+    }
+
+    html.chat-section #chatPane {
+      display: flex;
+    }
+
+    /* Open-thread topbar → the SAME floating rounded capsule as the feed/mirror
+       topbar (color, size, alignment). The content below clears it. */
+    #chatPane .chat-topbar {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 6;
+      margin: 8px;
+      min-height: 52px;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: var(--bg2);
+      box-shadow: var(--shadow-md);
+    }
+
+    /* Every floating topbar capsule is semi-transparent so the content (messages
+       / mirror posts / resolver IPs) is visible behind it and through the corner
+       gaps. Deliberately NO backdrop-filter: blurring a bar with a full scrolling
+       list behind it re-composites every frame and janks scrolling on low-end
+       phones (same reason the nav itself avoids it). Plain alpha is GPU-cheap;
+       kept fairly opaque (88%) so the bar text stays readable over moving content. */
+    .tm-topbar,
+    .chat-area > .chat-header,
+    #chatPane .chat-topbar {
+      background: color-mix(in srgb, var(--bg2) 88%, transparent);
+    }
+
+    /* Floats just under the topbar (only fills during a receive) so it doesn't
+       push the message list down — the list must reach up behind the topbar. */
+    #chatPane .chat-nextpoll-bar {
+      position: absolute;
+      top: 62px;
+      inset-inline: 8px;
+      z-index: 5;
+      margin-top: 0;
+      background: transparent;
+      border-bottom: none;
+    }
+
+    /* Composer floats over the message list so chats scroll BEHIND the round
+       pills and peek through the gaps between them. pointer-events let scrolls
+       and taps pass through the gaps to the messages underneath. The floating
+       nav is hidden in a thread (mobile) / sits under the sidebar (desktop), so
+       it never overlaps this content-pane composer — bottom:0 is safe. */
+    #chatPane .chat-footer {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 6;
+      background: transparent;
+      pointer-events: none;
+    }
+
+    #chatPane .chat-footer .chat-quota-btn,
+    #chatPane .chat-footer .chat-send-btn,
+    #chatPane .chat-footer .chat-input-row textarea {
+      pointer-events: auto;
+    }
+
+    #chatPane .chat-body {
+      /* Clear the floating topbar at the top and the floating composer at the
+         bottom — so messages scroll BEHIND both and show in the corner gaps. */
+      padding-top: 64px;
+      padding-bottom: calc(78px + var(--safe-bottom));
+    }
+
+    /* Jump-to-latest button sits just ABOVE the floating composer, aligned with
+       the send button (not overlapping it). */
+    #chatPane .chat-scroll-down {
+      bottom: calc(66px + var(--safe-bottom));
+      inset-inline-end: 10px;
+    }
+
+    /* Desktop two-pane renders BOTH the list (sidebar) and the open thread, each
+       with a next-poll timer. When a thread is open, keep only the thread's
+       timer — hide the sidebar's so it isn't shown twice. */
+    html.chat-thread #chatSidebar .chat-timer-btn {
+      display: none;
+    }
+
+    /* ---- Resolver reparent (Scanner+Bank merged): lists/actions → the sidebar
+       (#resolverSidebar), boards + scanner → #resolverPane. The content reuses
+       the mirror .tm-topbar / .tm-content styling. `html.resolver-section`. ---- */
+    #resolverSidebar,
+    #resolverPane {
+      display: none;
+    }
+
+    html.resolver-section #channelList,
+    html.resolver-section .sidebar-header {
+      display: none;
+    }
+
+    html.resolver-section #resolverSidebar {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
+    html.resolver-section .chat-header,
+    html.resolver-section #msgSearchBar,
+    html.resolver-section #messages,
+    html.resolver-section #sendPanel,
+    html.resolver-section #scrollDownBtn,
+    html.resolver-section .chat-area > .log-toggle,
+    html.resolver-section .chat-area > .log-panel,
+    html.resolver-section #floatingDate {
+      display: none !important;
+    }
+
+    /* Show the REAL rescan progress (the determinate #progressPanel the feed
+       uses) at the bottom of the resolver SIDEBAR (it's moved there at runtime).
+       It sits in normal flow BELOW the scrollable list — never overlapping the
+       Rescan/Reset buttons — and is visible on both desktop and mobile. The
+       sidebar is the mobile-visible pane, so progress shows without opening a
+       list. Auto-hides when empty (.progress-panel:empty). */
+    html.resolver-section #progressPanel {
+      flex: 0 0 auto;
+      /* The nav bar floats over the bottom on BOTH desktop and mobile, so always
+         clear it — otherwise the progress bar hides behind the nav. */
+      margin: 6px 8px calc(72px + var(--safe-bottom));
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow-md);
+      padding: 4px 14px;
+    }
+
+    /* Scan-in-progress indicator. Spin the Find-more magnifier in the resolver
+       sidebar (like the old spinning magnifier)… */
+    .rs-item-find.rs-scanning .rs-ic svg,
+    .rs-item-find.rs-scanning .rs-ic .icon {
+      animation: spin 1s linear infinite;
+      transform-origin: center;
+    }
+
+    /* …and a small spinner on the resolver nav tab so a running scan is visible
+       from any section. */
+    .nav-tab.scanning .nav-ic {
+      position: relative;
+    }
+
+    .nav-tab.scanning .nav-ic::after {
+      content: '';
+      position: absolute;
+      top: -3px;
+      inset-inline-end: -4px;
+      width: 9px;
+      height: 9px;
+      border: 2px solid var(--accent);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin .8s linear infinite;
+    }
+
+    #resolverPane {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+    }
+
+    html.resolver-section #resolverPane {
+      display: flex;
+    }
+
+    #resolverPane .tm-content {
+      /* No top padding here: the scroll boxes below carry the topbar clearance
+         themselves, so the IP list scrolls UP behind the floating topbar. */
+      padding-top: 0;
+      /* The resolver section is a utility view, not a feed — never show the
+         wallpaper pattern behind it (solid base background). */
+      background: var(--bg);
+    }
+
+    /* The scanner view is a form (no scroll-behind) — clear the topbar normally. */
+    #resolverPane #resolverScannerView {
+      padding-top: 70px;
+    }
+
+    /* The topbar copy button copies the shown resolver list — irrelevant (and
+       confusing) in the scanner view, so hide it there. */
+    #resolverPane[data-view="scanner"] .tm-refresh {
+      display: none;
+    }
+
+    /* Scanner: grow the results table to fill the pane so the user sees as many
+       hits as possible, while the action buttons below stay reachable without
+       scrolling. The results box flex-grows (overriding its inline 220px cap);
+       the about/config/progress rows and the action bar keep their natural
+       size. .tm-content is already a flex column, so the scanner view just
+       claims the leftover height and hands it to the results box. */
+    #resolverPane[data-view="scanner"] #resolverScannerView {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    #resolverPane[data-view="scanner"] #scannerResults {
+      flex: 1 1 auto !important;
+      max-height: none !important;
+      min-height: 160px;
+    }
+
+    /* Board views (active list / bank / a named list) fill the pane the same way
+       the scanner results do: the visible panel is a flex column whose scrollable
+       IP box grows to fill the leftover height, while any controls below it (the
+       bank's cleanup + add sections) keep their size and stay reachable without
+       scrolling. The panels are shown via inline display:'' (so this CSS takes
+       over) and hidden via inline display:none (which overrides it). */
+    #resolverPane #resolverBoardsView {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    #resolverPane #resolverPanelActive,
+    #resolverPane #resolverPanelBank,
+    #resolverPane #resolverPanelList {
+      display: flex;
+      flex-direction: column;
+      flex: 1 1 auto;
+      min-height: 0;
+    }
+
+    /* Active list + named-list panels are pure scroll boxes — let them fill and
+       clear the floating topbar so their IPs scroll up behind it. */
+    #resolverPane #resolverPanelActive,
+    #resolverPane #resolverPanelList {
+      overflow-y: auto;
+      max-height: none !important;
+      /* 70px clears the floating topbar (top:8 + min-height:52 ≈ 60px bottom
+         edge) with the same gap mirror/scanner use; 62px left the first IP
+         tucked under the bar. */
+      padding-top: 70px;
+    }
+
+    /* Bank panel: only the IP box grows; cleanup + add rows keep their size. The
+       IP box clears the topbar so its rows scroll up behind it. */
+    #resolverPane #resolverPanelBank > div {
+      flex: 0 0 auto;
+    }
+
+    #resolverPane #resolverBankListEl {
+      padding-top: 70px;
+    }
+
+    #resolverPane #resolverBankListEl {
+      flex: 1 1 auto !important;
+      max-height: none !important;
+      min-height: 140px;
+    }
+
+    /* A little breathing room so the bottom-most control isn't flush against the
+       viewport edge (the nav is hidden over this pane while it's open). */
+    #resolverPane .tm-content {
+      padding-bottom: calc(12px + var(--safe-bottom));
+    }
+
+    @media (min-width: 769px) {
+      #resolverPane .tm-menu,
+      #resolverPane .tm-back {
+        display: none !important;
+      }
+    }
+
+    /* ---- Settings reparent (same pattern): groups → #settingsSidebar,
+       panels → #settingsPane. `html.settings-section`. ---- */
+    #settingsSidebar,
+    #settingsPane {
+      display: none;
+    }
+
+    html.settings-section #channelList,
+    html.settings-section .sidebar-header {
+      display: none;
+    }
+
+    html.settings-section #settingsSidebar {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+      min-height: 0;
+    }
+
+    html.settings-section .chat-header,
+    html.settings-section #msgSearchBar,
+    html.settings-section #messages,
+    html.settings-section #sendPanel,
+    html.settings-section #scrollDownBtn,
+    html.settings-section #progressPanel,
+    html.settings-section .chat-area > .log-toggle,
+    html.settings-section .chat-area > .log-panel,
+    html.settings-section #floatingDate {
+      display: none !important;
+    }
+
+    #settingsPane {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      flex-direction: column;
+    }
+
+    html.settings-section #settingsPane {
+      display: flex;
+    }
+
+    #settingsPane .tm-content {
+      padding-top: 70px;
+      background: var(--bg);
+    }
+
+    @media (min-width: 769px) {
+      #settingsPane .tm-menu,
+      #settingsPane .tm-back {
+        display: none !important;
+      }
+    }
+
+    /* Mobile: a single back button (→ sidebar). Hide the section-close arrow so
+       the topbar doesn't show two overlapping arrows. */
+    @media (max-width: 768px) {
+      #settingsPane .tm-back,
+      #resolverPane .tm-back {
+        display: none !important;
+      }
+    }
+
+    /* Telegram-style colored icon tiles for the settings sections. */
+    .rs-item-set {
+      padding: 11px 12px;
+    }
+
+    #settingsSidebar .rs-ic-tile {
+      width: 30px;
+      height: 30px;
+      min-width: 30px;
+      aspect-ratio: 1 / 1;
+      border-radius: 8px;
+      color: #fff;
+      font-weight: 700;
+      font-size: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 auto;
+    }
+
+    .rs-tile-profiles { background: #06b6d4; }
+
+    /* Active settings section highlight — on desktop both the section list and
+       the open section show, so the open one must be visibly selected. */
+    @media (min-width: 769px) {
+      #settingsSidebar .rs-item-set.rs-item-active {
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+      }
+
+      #settingsSidebar .rs-item-set.rs-item-active .rs-name {
+        color: var(--accent);
+        font-weight: 600;
+      }
+    }
+
+    /* Profiles row: label stays at the start (don't grow to fill), value is
+       pushed to the end — so the label and the profile name don't bunch up in
+       the middle (esp. in RTL where the label was right-aligned in a wide box). */
+    #settingsSidebar .rs-item-profiles .rs-name {
+      flex: 0 1 auto;
+    }
+
+    /* Trailing value (active profile name) — pushed to the end, before chevron. */
+    #settingsSidebar .rs-value {
+      margin-inline-start: auto;
+      max-width: 45%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+
+    #settingsSidebar .rs-ic-tile svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    .rs-tile-display { background: #3b82f6; }
+    .rs-tile-connection { background: #22c55e; }
+    .rs-tile-storage { background: #f59e0b; }
+    .rs-tile-backup { background: #a855f7; }
+    .rs-tile-about { background: #64748b; }
+
+    /* Settings → About: make the version rows prominent. */
+    .settings-version-row {
+      font-size: 15px;
+    }
+
+    .settings-version-row span:last-child {
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    /* External-link affordance (opens outside the app). */
+    .ext-link {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+    }
+
+    .ext-arrow {
+      display: inline-flex;
+      opacity: .65;
+    }
+
+    .ext-arrow svg {
+      width: 13px;
+      height: 13px;
+    }
+
+    /* ---- App-like settings pane ----
+       The settings forms are the reparented modal content, whose labels/inputs
+       are tiny (var(--text-xs/sm)) — it reads like a cramped web form. Scale up
+       type, padding, and spacing inside #settingsPane so each section feels like
+       a native settings page. Scoped to the section so the popup/modal use
+       elsewhere is unaffected. */
+    html.settings-section #settingsPane .tm-content {
+      padding-left: 18px;
+      padding-right: 18px;
+      max-width: 640px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    html.settings-section #settingsPane .form-group {
+      margin-bottom: 20px;
+    }
+
+    html.settings-section #settingsPane .form-group > label,
+    html.settings-section #settingsPane .form-group > .group-label {
+      font-size: 14px;
+      margin-bottom: 8px;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    html.settings-section #settingsPane .form-group input,
+    html.settings-section #settingsPane .form-group textarea,
+    html.settings-section #settingsPane .form-group select {
+      font-size: 15px;
+      padding: 12px 14px;
+      border-radius: 12px;
+    }
+
+    /* Checkbox / toggle rows: bigger label + box, comfortable tap target. */
+    html.settings-section #settingsPane .form-group .row label,
+    html.settings-section #settingsPane .help-row label {
+      font-size: 14px !important;
+      color: var(--text);
+    }
+
+    html.settings-section #settingsPane input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+    }
+
+    /* Action buttons (Set password, Refresh avatars, backup, version checks). */
+    html.settings-section #settingsPane .btn {
+      font-size: 14px;
+      padding: 11px 16px;
+    }
+
+    /* Theme / language pills read as proper segmented buttons. */
+    html.settings-section #settingsPane .theme-btn {
+      font-size: 14px;
+      padding: 11px 10px;
+    }
+
+    /* Helper / note text under fields — readable, not microscopic. */
+    html.settings-section #settingsPane .form-group .help-text,
+    html.settings-section #settingsPane .settings-note,
+    html.settings-section #settingsPane .help-row .help-desc {
+      font-size: 12.5px;
+      line-height: 1.5;
+    }
+
+    /* Persian: force RTL flow on the text-heavy Connection & Backup panels so
+       labels/notes hug the right edge (text-align alone doesn't move the
+       flex-positioned labels). Gated on the RTL document direction. */
+    html[dir="rtl"] #settingsPanelConnection,
+    html[dir="rtl"] #settingsPanelBackup {
+      direction: rtl;
+      text-align: right;
+    }
+
+    html[dir="rtl"] #settingsPanelConnection .help-text,
+    html[dir="rtl"] #settingsPanelBackup .help-text {
+      text-align: right;
+    }
+
+    /* Stepper field: label (right) + the −/+ field (left) share one line when
+       there's room; the help text wraps to its own full-width line below. */
+    .form-group.stepper-field {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      column-gap: 12px;
+      row-gap: 8px;
+    }
+
+    .form-group.stepper-field .help-row {
+      margin-bottom: 0;
+      flex: 0 1 auto;
+    }
+
+    .form-group.stepper-field .num-stepper {
+      flex: 0 0 auto;
+    }
+
+    .form-group.stepper-field .help-text {
+      flex: 1 1 100%;
+    }
+
+    /* ---- Resolver sidebar component ---- */
+    .resolver-sidebar {
+      padding: 8px;
+      /* Clear the floating nav bar that overlays the sidebar's bottom edge
+         (same clearance the feed/chat lists use). */
+      padding-bottom: calc(82px + var(--safe-bottom));
+      overflow-y: auto;
+      gap: 4px;
+    }
+
+    /* In a flex column with overflow, children shrink by default and the bottom
+       ones get squished/clipped instead of scrolling. Pin their size so the
+       container actually overflows and scrolls. */
+    .resolver-sidebar > *,
+    #settingsSidebar > * {
+      flex-shrink: 0;
+    }
+
+    .rs-head {
+      font-size: var(--text-md);
+      font-weight: 700;
+      padding: 6px 8px 10px;
+    }
+
+    .rs-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+      color: var(--text-dim);
+      padding: 12px 8px 4px;
+    }
+
+    .rs-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      text-align: start;
+      padding: 10px 12px;
+      border: none;
+      border-radius: var(--radius-md);
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      font-size: var(--text-sm);
+    }
+
+    .rs-item:hover {
+      background: var(--bg2);
+    }
+
+    .rs-item.active {
+      background: color-mix(in oklab, var(--accent) 16%, transparent);
+      color: var(--text);
+    }
+
+    .rs-item .rs-ic {
+      display: inline-flex;
+      width: 20px;
+      justify-content: center;
+      color: var(--text-dim);
+      flex: 0 0 auto;
+    }
+
+    .rs-item.active .rs-ic {
+      color: var(--accent);
+    }
+
+    .rs-item .rs-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rs-name {
+      unicode-bidi: plaintext;
+      text-align: start;
+    }
+
+    /* Name + description (two-line) item, used for the big entries. */
+    .rs-name-wrap {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .rs-name-wrap .rs-name {
+      flex: none;
+    }
+
+    .rs-sub {
+      font-size: 11px;
+      color: var(--text-dim);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      /* Resolve direction from the text itself (= dir="auto") so Persian
+         subtitles align right and English ones left. */
+      unicode-bidi: plaintext;
+      text-align: start;
+    }
+
+    /* The "Find more resolvers" entry — a clear, bordered, clickable card (NOT a
+       static accent highlight, which read as non-interactive). */
+    .rs-item-lg {
+      padding: 12px;
+      border: 1px solid var(--border);
+      background: var(--bg2);
+    }
+
+    .rs-item-lg .rs-ic {
+      color: var(--accent);
+    }
+
+    .rs-item-lg:hover {
+      border-color: var(--accent);
+      background: var(--bg2);
+    }
+
+    /* Right-facing chevron marking an openable item (flips in RTL). */
+    .rs-chevron {
+      display: inline-flex;
+      flex: 0 0 auto;
+      color: var(--text-dim);
+      margin-inline-start: 2px;
+    }
+
+    .rs-chevron svg {
+      width: 16px;
+      height: 16px;
+    }
+    /* Always points right (toward the content pane), in RTL too — per request. */
+
+    .rs-item-add .rs-name {
+      color: var(--text-dim);
+    }
+
+    /* Bordered nav item (Bank) — reads clearly as a button. */
+    .rs-item-bordered {
+      border: 1px solid var(--border);
+    }
+
+    .rs-item-bordered:hover {
+      border-color: var(--text-dim);
+    }
+
+    .rs-empty {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 6px 12px;
+    }
+
+    .rs-toggle {
+      padding: 12px 10px 4px;
+      font-size: var(--text-sm);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .rs-toggle label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .rs-toggle input {
+      width: auto;
+    }
+
+    /* Small "Details" link explaining the hourly auto-check. */
+    .rs-info-link {
+      flex: 0 0 auto;
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-size: var(--text-sm);
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+
+    .rs-info-link:hover {
+      text-decoration: underline;
+    }
+
+    /* Resolver nav-tab count badge (active/total) — neutral, not the red alert. */
+    .nav-badge-count {
+      background: var(--accent);
+      left: auto;
+      right: 8px;
+      margin-left: 0;
+    }
+
+    .nav-badge-count.nav-badge-warn {
+      background: var(--error);
+    }
+
+    .rs-count {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: var(--bg);
+      border-radius: var(--radius-pill);
+      padding: 1px 8px;
+      flex: 0 0 auto;
+    }
+
+    .rs-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--success);
+      flex: 0 0 auto;
+    }
+
+    .rs-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding: 10px 8px 4px;
+    }
+
+    .rs-actions .btn {
+      flex: 1;
+      min-width: 0;
+    }
+
+    /* Mobile-only sidebar preview of the top active resolvers + scores. */
+    .rs-preview {
+      padding: 6px 8px 2px;
+    }
+
+    .rs-preview-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      font-size: 12px;
+      border-radius: var(--radius-md);
+    }
+
+    .rs-preview-row .rs-pv-addr {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: monospace;
+    }
+
+    .rs-preview-row .rs-pv-ms {
+      color: var(--text-dim);
+    }
+
+    /* Per-list box: header (select) + tools (rename/delete) + top-resolvers preview. */
+    .rs-listbox {
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      margin-bottom: 6px;
+      overflow: hidden;
+      background: var(--bg2);
+      cursor: pointer;
+    }
+
+    .rs-listbox:hover {
+      border-color: var(--text-dim);
+    }
+
+    /* Subtle "you're viewing this list" highlight (≠ the in-use marker). */
+    .rs-listbox.viewing {
+      border-color: var(--accent);
+    }
+
+    /* Green "Active" badge marks the in-use list (replaces the old border). */
+    .rs-active-badge {
+      flex: 0 0 auto;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      color: #fff;
+      background: var(--success);
+      border-radius: var(--radius-pill);
+      padding: 2px 8px;
+    }
+
+    /* "Activate" button on non-active lists. */
+    .rs-activate-btn {
+      flex: 0 0 auto;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--accent);
+      background: transparent;
+      border: 1px solid var(--accent);
+      border-radius: var(--radius-pill);
+      padding: 3px 10px;
+      margin-inline-end: 4px;
+      cursor: pointer;
+    }
+
+    .rs-activate-btn:hover {
+      background: color-mix(in oklab, var(--accent) 14%, transparent);
+    }
+
+    .rs-list-headrow {
+      display: flex;
+      align-items: center;
+    }
+
+    .rs-list-trail {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+    }
+
+    .rs-list-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1;
+      min-width: 0;
+      text-align: start;
+      padding: 10px 12px;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      font-size: var(--text-sm);
+    }
+
+    .rs-list-menu-btn {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 34px;
+      height: 34px;
+      margin-inline-end: 4px;
+      border: none;
+      border-radius: var(--radius-sm, 6px);
+      background: transparent;
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+
+    .rs-list-menu-btn:hover {
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .rs-list-menu-btn svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    .rs-list-head .rs-ic {
+      display: inline-flex;
+      width: 20px;
+      justify-content: center;
+      color: var(--text-dim);
+      flex: 0 0 auto;
+    }
+
+    .rs-listbox.active .rs-list-head .rs-ic {
+      color: var(--accent);
+    }
+
+    .rs-list-head .rs-name {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rs-list-tools {
+      display: flex;
+      gap: 4px;
+      padding: 0 8px 6px;
+    }
+
+    .rs-tool {
+      flex: 1;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm, 6px);
+      background: var(--bg);
+      color: var(--text-dim);
+      cursor: pointer;
+    }
+
+    .rs-tool:hover {
+      color: var(--text);
+    }
+
+    .rs-tool.rs-tool-del:hover {
+      color: var(--error);
+      border-color: var(--error);
+    }
+
+    .rs-tool svg {
+      width: 15px;
+      height: 15px;
+    }
+
+    .rs-list-resolvers {
+      padding: 2px 8px 8px;
+    }
+
+    .rs-seeall {
+      display: block;
+      width: 100%;
+      margin-top: 4px;
+      padding: 6px;
+      border: none;
+      background: transparent;
+      color: var(--accent);
+      font-size: 12px;
+      cursor: pointer;
+      text-align: center;
+    }
+
+    .rs-seeall:hover {
+      text-decoration: underline;
+    }
+
+    /* Placeholder centred in the content pane when no conversation is open. */
+    .chat-content-empty {
+      margin: auto;
+      padding: 32px 24px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: var(--text-sm);
+    }
+
+    /* Desktop: the chat list is always in the sidebar, so the in-thread back
+       arrow is redundant — hide it (mobile keeps it for the pane-swap). */
+    @media (min-width: 769px) {
+      #chatPane .chat-back {
+        display: none;
+      }
+    }
+
+    /* The mirror channel list clears the floating nav (bottom bar on every
+       width), like the feed channel list. */
+    .tm-channels-list {
+      padding-bottom: calc(82px + var(--safe-bottom));
+    }
+
+
+    @media (max-width: 768px) {
+      /* A chat thread or an open mirror channel is a full conversation — hide
+         the floating nav so content isn't covered. The chat list and the
+         mirror channel LIST keep the nav visible for tab switching. */
+      html.chat-thread .nav-bar,
+      html.tm-channel .nav-bar {
+        display: none;
+      }
+
+      /* Back arrow (not hamburger) only while a mirror channel is open. */
+      html.tm-channel .tm-menu {
+        display: inline-flex !important;
+      }
+
+      /* Content clears the floating nav. */
+      html.tm-open .tm-content {
+        padding-bottom: calc(72px + var(--safe-bottom));
+      }
+
+      html:not(.chat-thread) .chat-body {
+        padding-bottom: calc(72px + var(--safe-bottom));
+      }
+    }
+
+    /* ---- Profiles popup: sit ABOVE the floating nav (which is z-index 9300)
+       and pin Close + Create-manually at the bottom while the list scrolls, so
+       the actions never slip under the nav and never need scrolling-to. ---- */
+    #profilesModal.modal-overlay {
+      z-index: 9400;
+    }
+
+    /* The profile editor + share popups open FROM the profiles modal, so they
+       must sit above it (which is above the nav). */
+    #profileEditorModal.modal-overlay,
+    #shareProfileModal.modal-overlay {
+      z-index: 9500;
+    }
+
+    /* The whole modal body scrolls as one (import section + default-configs list
+       + the user's own configs), with only the actions pinned. On a small screen
+       you can always scroll down to your own configs even with the default list
+       open. (A nested #profilesListEl flex scroller used to collapse to ~0 height
+       here and trap the configs off-screen with nothing to scroll.) */
+    #profilesModal .modal {
+      max-height: 90dvh;
+    }
+
+    #profilesModal .modal-actions {
+      position: sticky;
+      bottom: 0;
+      /* Span the full sheet width (cancel the modal's side padding) and match the
+         modal surface, so this reads as a seamless pinned footer with a hairline
+         divider — not a lighter, inset rectangle floating over the list. The
+         negative margin reaches the edges; the equal padding realigns the pills
+         with the configs above. */
+      margin: 0 calc(-1 * var(--space-5));
+      padding: 12px var(--space-5) 0;
+      background: var(--surface);
+      border-top: 1px solid var(--border);
+    }
+
+    /* Pill-shaped Close / Create-manually buttons to match the app's rounded
+       look — the default radius-md (8px) read as boxy here. */
+    #profilesModal .modal-actions .btn {
+      border-radius: var(--radius-pill);
+      padding-left: 16px;
+      padding-right: 16px;
+    }
+
+    @media (max-width: 768px) {
+      /* The sheet already clears the safe area; nudge the pinned actions a touch
+         more so they're never tight against the very bottom edge. */
+      #profilesModal .modal-actions {
+        padding-bottom: 4px;
+      }
+    }
+
+    /* ---- Scanner & Resolver Bank as full pages (consistent shell) ---- */
+    #scannerModal.modal-overlay,
+    #resolversModal.modal-overlay {
+      background: var(--bg);
+      align-items: stretch;
+      padding: 0;
+    }
+
+    #scannerModal .modal,
+    #resolversModal .modal {
+      width: 100% !important;
+      max-width: 100% !important;
+      height: 100%;
+      max-height: 100%;
+      margin: 0;
+      border-radius: 0;
+      overflow-y: auto;
+    }
+
+    @media (min-width: 769px) {
+      #scannerModal.modal-overlay,
+      #resolversModal.modal-overlay {
+        justify-content: center;
+      }
+
+      /* Constrain the form so it doesn't stretch across the whole page. */
+      #scannerModal .modal,
+      #resolversModal .modal {
+        max-width: 760px !important;
+      }
+    }
+
+    @media (max-width: 768px) {
+      /* Clear the floating nav so the bottom action bar stays tappable. */
+      #scannerModal .modal,
+      #resolversModal .modal {
+        padding-bottom: calc(80px + var(--safe-bottom));
+      }
+    }
+
+    /* No "Close" buttons on full-page sections — the nav / back is the way out.
+       The scanner content is reparented into #resolverScannerView, so target the
+       Close there too (the old #scannerModal copy is left empty). */
+    #scannerModal [onclick*="closeScanner"],
+    #resolversModal [onclick*="closeResolversModal"],
+    #resolverScannerView [onclick*="closeScanner"] {
+      display: none !important;
+    }
+
+    /* No dashed divider under the Saved-messages shortcut in telemirror. */
+    .tm-saved-shortcut {
+      border-bottom: none !important;
+    }
+
+    /* ---- Colour consistency: every section uses the Feed's dark shell ----
+       The telemirror channel list reads too light (and pure white in light
+       theme) — pin it to the feed sidebar colour. Scanner/Bank pages use the
+       feed body colour, not the lighter elevated-modal colour. */
+    .tm-sidebar {
+      background: var(--sidebar-bg);
+    }
+
+    #scannerModal .modal,
+    #resolversModal .modal {
+      background: var(--bg);
+    }
+
+    /* Settings = full page on MOBILE (popup stays fine on desktop). Cancel
+       isn't needed in fullscreen (the nav exits) and the action bar clears the
+       floating nav. */
+    @media (max-width: 768px) {
+      #settingsModal.modal-overlay {
+        background: var(--bg);
+        align-items: stretch;
+        padding: 0;
+      }
+
+      #settingsModal .modal {
+        width: 100% !important;
+        max-width: 100% !important;
+        height: 100%;
+        max-height: 100%;
+        margin: 0;
+        border-radius: 0;
+        padding-bottom: calc(84px + var(--safe-bottom));
+      }
+
+      #settingsActions [onclick*="closeSettings"] {
+        display: none;
+      }
+    }
+
+    /* Mirror (telemirror) dismissable note */
+    .tm-disclaimer-wrap {
+      position: relative;
+    }
+
+    /* Physical right (the ×'s side) so the text always clears the button,
+       whatever the text direction. */
+    .tm-disclaimer-wrap .tm-disclaimer {
+      padding-right: 34px;
+    }
+
+    /* Sit inside the card's rounded top-right corner: the card has an 8px margin,
+       so 16px from the wrap leaves a clean 8px inset clear of the radius. Plain
+       physical `right` (no logical override) keeps it top-right in both RTL/LTR;
+       the earlier inset-inline-end:auto flipped it to the wrong side in LTR. */
+    .tm-disclaimer-x {
+      position: absolute;
+      top: 16px;
+      right: 16px;
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: none;
+      background: var(--surface2);
+      color: var(--text-dim);
+      border-radius: 50%;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .tm-disclaimer-x:hover {
+      background: var(--hover);
+      color: var(--text);
+    }
+
+    .tm-disclaimer-x .icon,
+    .tm-disclaimer-x svg {
+      width: 15px;
+      height: 15px;
+    }
+
+    /* Profiles row surfaced at the top of the Settings modal. */
+    .settings-profiles-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      width: 100%;
+      padding: 11px 13px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      text-align: start;
+      font-family: inherit;
+      transition: background var(--motion-fast) var(--ease);
+    }
+
+    .settings-profiles-row:hover {
+      background: var(--hover);
+    }
+
+    .settings-profiles-ic {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .settings-profiles-ic .icon,
+    .settings-profiles-ic svg {
+      width: 20px;
+      height: 20px;
+    }
+
+    .settings-profiles-text {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .settings-profiles-title {
+      font-size: var(--text-md);
+      font-weight: 600;
+    }
+
+    .settings-profiles-sub {
+      font-size: var(--text-xs);
+      color: var(--text-dim);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .settings-profiles-sub:empty {
+      display: none;
+    }
+
+    .settings-profiles-chev {
+      color: var(--text-dim);
+      display: flex;
+    }
+
+    .settings-profiles-chev .icon,
+    .settings-profiles-chev svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    /* Saved-messages entry matches the card shape too — and no divider line
+       separating it from the channel list. */
+    .saved-channel-entry {
+      border-radius: 14px;
+      margin: 0 0 2px;
+      border-bottom: none;
+    }
+
+    /* ---- Default configs (onboarding quick-start) ---- */
+    .dc-toggle {
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      width: 100%;
+      margin-top: 10px;
+      padding: 11px 13px;
+      border: 1px solid color-mix(in oklab, var(--accent) 40%, var(--border));
+      border-radius: var(--radius-lg);
+      background: color-mix(in oklab, var(--accent) 9%, transparent);
+      color: var(--text);
+      cursor: pointer;
+      text-align: start;
+      font-family: inherit;
+      transition: background var(--motion-fast) var(--ease);
+    }
+
+    .dc-toggle:hover {
+      background: color-mix(in oklab, var(--accent) 15%, transparent);
+    }
+
+    .dc-toggle-emblem {
+      width: 26px;
+      height: 26px;
+      object-fit: contain;
+      border-radius: 5px;
+      flex-shrink: 0;
+      box-shadow: 0 0 0 1px var(--border);
+    }
+
+    .dc-toggle-text {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .dc-toggle-title {
+      font-size: var(--text-sm);
+      font-weight: 700;
+    }
+
+    .dc-toggle-sub {
+      font-size: var(--text-2xs);
+      color: var(--text-dim);
+    }
+
+    .dc-toggle-chev {
+      display: flex;
+      color: var(--text-dim);
+      transition: transform var(--motion) var(--ease);
+    }
+
+    .dc-toggle-chev .icon svg,
+    .dc-toggle-chev svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .dc-toggle.open .dc-toggle-chev {
+      transform: rotate(180deg);
+    }
+
+    .dc-list {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+
+    /* Prettier rows (overrides components.css .default-config-row). */
+    .default-config-row {
+      padding: 9px 10px;
+      gap: 11px;
+      margin-bottom: 0;
+      border-radius: var(--radius-lg);
+      background: var(--surface);
+    }
+
+    .default-config-emblem {
+      width: 38px;
+      height: 38px;
+      border-radius: 50%;
+      background: var(--bg2);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      overflow: hidden;
+      box-shadow: inset 0 0 0 1px var(--border);
+    }
+
+    .default-config-emblem .flag-emblem {
+      width: 24px;
+      height: auto;
+      border-radius: 3px;
+      box-shadow: none;
+    }
+
+    .default-config-name {
+      font-size: var(--text-base);
+    }
+
+    .default-config-domain {
+      font-size: var(--text-xs);
+    }
+
+    .dc-add-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .dc-add-btn .icon svg {
+      width: 14px;
+      height: 14px;
+    }
+
+    .dc-imported {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: var(--text-xs);
+      font-weight: 600;
+      color: var(--success);
+      white-space: nowrap;
+      flex: none;
+    }
+
+    .dc-imported .icon svg {
+      width: 15px;
+      height: 15px;
+    }
+
+    /* ---- Pull-to-refresh indicator ---- */
+    .ptr-ind {
+      position: absolute;
+      left: 50%;
+      /* Above the floating sidebar header (z-index 7) so the spinner isn't
+         hidden behind it while pulling to refresh. */
+      z-index: 8;
+      width: 30px;
+      height: 30px;
+      margin-left: -15px;
+      border-radius: 50%;
+      background: var(--surface);
+      box-shadow: var(--shadow-sm);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(-50%) translateY(-26px);
+    }
+
+    .ptr-ind .ptr-spin {
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+    }
+
+    .ptr-ind.ready .ptr-spin {
+      border-top-color: var(--success);
+    }
+
+    .ptr-ind.spinning .ptr-spin {
+      animation: ptr-rot .7s linear infinite;
+    }
+
+    @keyframes ptr-rot {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    /* ---- Resizable desktop sidebar ---- */
+    .sidebar-resize {
+      display: none;
+    }
+
+    @media (min-width: 769px) {
+      .sidebar {
+        position: relative;
+        width: var(--sidebar-w, 320px);
+        min-width: var(--sidebar-w, 320px);
+      }
+
+      .sidebar-resize {
+        display: block;
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        right: 0;
+        /* Wider hit target so the drag handle is easy to grab. */
+        width: 9px;
+        cursor: col-resize;
+        z-index: 7;
+        transition: background var(--motion-fast) var(--ease);
+      }
+
+      .sidebar-resize:hover,
+      .sidebar-resize.dragging {
+        background: color-mix(in oklab, var(--accent) 45%, transparent);
+      }
+    }
+
+    @media (max-width: 768px) {
+      .saved-channel-entry {
+        margin-bottom: 2px;
+      }
+    }

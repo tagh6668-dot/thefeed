@@ -273,6 +273,20 @@ func TestRewriteTranslateLink(t *testing.T) {
 		},
 		// Untouched: not a translate.goog URL.
 		{"https://example.com/foo", "https://example.com/foo"},
+		// Untouched: t.me special paths preserve query params.
+		{
+			"https://t.me/proxy?server=10.0.0.1&port=443&secret=ee00000000000000000000000000000000",
+			"https://t.me/proxy?server=10.0.0.1&port=443&secret=ee00000000000000000000000000000000",
+		},
+		{
+			"https://t.me/socks?server=10.0.0.2&port=1080&user=testuser&pass=testpass",
+			"https://t.me/socks?server=10.0.0.2&port=1080&user=testuser&pass=testpass",
+		},
+		// Translate proxy link for t.me/proxy: preserves all non-_x_tr params.
+		{
+			"https://t-me.translate.goog/proxy?server=10.0.0.1&port=443&secret=ee00000000000000000000000000000000&_x_tr_sl=auto&_x_tr_tl=fa",
+			"https://t.me/proxy?port=443&secret=ee00000000000000000000000000000000&server=10.0.0.1",
+		},
 		// Untouched: empty.
 		{"", ""},
 		// Tracking-only query string collapses to no query string.
@@ -351,6 +365,118 @@ func TestSanitizePostHTMLStripsScripts(t *testing.T) {
 	}
 	if !strings.Contains(got, `src="https://e.com/a.jpg"`) {
 		t.Errorf("img src should remain (served via proxy): %q", got)
+	}
+}
+
+func TestSanitizePostHTMLStitchesSplitURL(t *testing.T) {
+	// Google Translate splits proxy URLs at & boundaries:
+	// <a href="https://t.me/proxy?server=10.0.0.1">...</a>&port=443&secret=ee0000
+	cases := []struct {
+		desc string
+		in   string
+		want []string
+	}{
+		{
+			"split at first &",
+			`<a href="https://t.me/proxy?server=10.0.0.1">https://t.me/proxy?server=10.0.0.1</a>&amp;port=443&amp;secret=ee00000000000000000000000000000000`,
+			[]string{"server=10.0.0.1", "port=443", "secret=ee00000000000000000000000000000000"},
+		},
+		{
+			"split with translate host",
+			`<a href="https://t-me.translate.goog/proxy?server=10.0.0.1&amp;_x_tr_sl=auto">https://t.me/proxy?server=10.0.0.1</a>&amp;port=443&amp;secret=ee00000000000000000000000000000000`,
+			[]string{"server=10.0.0.1", "port=443", "secret=ee00000000000000000000000000000000"},
+		},
+		{
+			"no trailing params — unchanged",
+			`<a href="https://example.com/page?x=1">link</a> some text`,
+			[]string{`href="https://example.com/page?x=1"`},
+		},
+	}
+	for _, c := range cases {
+		got := sanitizePostHTML(c.in)
+		for _, w := range c.want {
+			if !strings.Contains(got, w) {
+				t.Errorf("%s: missing %q in %q", c.desc, w, got)
+			}
+		}
+	}
+}
+
+func TestSanitizePostHTMLProxyLinkComplete(t *testing.T) {
+	in := `<a href="https://t-me.translate.goog/proxy?server=10.0.0.1&amp;port=443&amp;secret=ee00000000000000000000000000000000&amp;_x_tr_sl=auto&amp;_x_tr_tl=fa">https://t.me/proxy?server=10.0.0.1&amp;port=443&amp;secret=ee00000000000000000000000000000000</a>`
+	got := sanitizePostHTML(in)
+	for _, want := range []string{"server=10.0.0.1", "port=443", "secret=ee00000000000000000000000000000000"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "_x_tr_") {
+		t.Errorf("translate params leaked: %q", got)
+	}
+	if strings.Contains(got, "translate.goog") {
+		t.Errorf("translate.goog host leaked: %q", got)
+	}
+}
+
+func TestSanitizePostHTMLPreservesQueryParams(t *testing.T) {
+	cases := []struct {
+		desc string
+		in   string
+		want string
+	}{
+		{
+			"proxy link keeps all query params",
+			`<a href="https://t.me/proxy?server=10.0.0.1&amp;port=443&amp;secret=ee00000000000000000000000000000000">Proxy</a>`,
+			`server=10.0.0.1`,
+		},
+		{
+			"proxy link keeps secret param",
+			`<a href="https://t.me/proxy?server=10.0.0.1&amp;port=443&amp;secret=ee00000000000000000000000000000000">Proxy</a>`,
+			`secret=ee00000000000000000000000000000000`,
+		},
+		{
+			"socks link keeps query params",
+			`<a href="https://t.me/socks?server=10.0.0.2&amp;port=1080&amp;user=testuser&amp;pass=testpass">SOCKS</a>`,
+			`server=10.0.0.2`,
+		},
+		{
+			"regular t.me channel link preserved",
+			`<a href="https://t.me/somechannel/123">post</a>`,
+			`href="https://t.me/somechannel/123"`,
+		},
+		{
+			"translate proxy link rewritten, proxy query kept",
+			`<a href="https://t-me.translate.goog/proxy?server=10.0.0.3&amp;port=443&amp;_x_tr_sl=auto">Proxy</a>`,
+			`server=10.0.0.3`,
+		},
+	}
+	for _, c := range cases {
+		got := sanitizePostHTML(c.in)
+		if !strings.Contains(got, c.want) {
+			t.Errorf("%s: got %q, want substring %q", c.desc, got, c.want)
+		}
+	}
+}
+
+// Telegram's embed HTML double-encodes & as &amp;amp; in proxy hrefs.
+// After html.Parse decodes one level the href still contains &amp;
+// which breaks url.Parse. The sanitizer must unescape before rewriting.
+func TestSanitizePostHTMLDoubleEncodedAmpersand(t *testing.T) {
+	// Simulates what html.Render produces from Telegram's double-encoded markup:
+	// raw source had &amp;amp;port → html.Parse yields &amp;port → html.Render
+	// re-encodes to &amp;amp;port in the serialised HTML we feed to sanitizePostHTML.
+	in := `<a href="https://t-me.translate.goog/proxy?server=10.0.0.1&amp;amp;port=443&amp;amp;secret=ee00000000000000000000000000000000&amp;_x_tr_sl=auto&amp;_x_tr_tl=fa">پروکسی</a>`
+	got := sanitizePostHTML(in)
+	for _, want := range []string{"server=10.0.0.1", "port=443", "secret=ee00000000000000000000000000000000"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in output: %q", want, got)
+		}
+	}
+	if strings.Contains(got, "_x_tr_") {
+		t.Errorf("translate params leaked: %q", got)
+	}
+	if strings.Contains(got, "translate.goog") {
+		t.Errorf("translate.goog host leaked: %q", got)
 	}
 }
 

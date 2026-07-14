@@ -39,8 +39,8 @@ func TestHandleProfileDefaults(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(resp.Profiles) != 3 {
-		t.Fatalf("profiles = %d, want 3", len(resp.Profiles))
+	if len(resp.Profiles) != len(defaultProfiles) {
+		t.Fatalf("profiles = %d, want %d", len(resp.Profiles), len(defaultProfiles))
 	}
 	for _, p := range resp.Profiles {
 		if p.Nickname == "" || p.Domain == "" || p.Key == "" {

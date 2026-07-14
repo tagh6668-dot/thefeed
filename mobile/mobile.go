@@ -125,6 +125,14 @@ func (s *Server) Stop() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
+	// Shutdown cancels the fetcher/checker/chat goroutines and closes the
+	// HTTP server; without it those goroutines leak across every
+	// background→foreground cycle and keep writing the shared profiles.json
+	// while the app is suspended. It also closes the listener for us, but we
+	// still close ln explicitly in case the server never reached serve().
+	if s.web != nil {
+		s.web.Shutdown()
+	}
 	_ = s.ln.Close()
 	<-s.done
 }

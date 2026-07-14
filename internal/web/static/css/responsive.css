@@ -5,15 +5,13 @@
     }
 
     .header-kebab-menu {
-      position: absolute;
-      right: 0;
-      top: calc(100% + 4px);
+      position: fixed;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: var(--radius-md);
       box-shadow: 0 4px 16px rgba(0, 0, 0, .2);
       min-width: 150px;
-      z-index: 100;
+      z-index: 9999;
       display: none;
       flex-direction: column;
       overflow: hidden
@@ -42,10 +40,14 @@
     @media(max-width:768px) {
 
       /* On mobile, the body's safe-area padding covers iOS notch/home bar.
-         Inside, the app fills the remaining space. */
+         Inside, the app fills the remaining space.
+         overflow:clip (not hidden) so the off-screen transformed pane can't be
+         scrolled into view — a child's scrollIntoView/focus was scrolling .app
+         horizontally (overflow:hidden still permits programmatic scroll),
+         shoving the sidebar off-screen and showing the content over it. */
       .app {
         position: relative;
-        overflow: hidden;
+        overflow: clip;
         height: 100%
       }
 
@@ -61,6 +63,10 @@
         right: 0;
         bottom: 0;
         width: 100%;
+        /* Reset the desktop min-width (and any persisted resize width) so the
+           sidebar can never be wider than a narrow viewport — that overflow
+           was making the layout look "stuck" in desktop mode on small widths. */
+        min-width: 0;
         z-index: 2;
         transform: translateX(0)
       }

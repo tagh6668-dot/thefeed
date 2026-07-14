@@ -126,7 +126,7 @@ func TestPublicReaderChannelMsgLimitOverride(t *testing.T) {
 
 	// Global msg limit is 3, but overridden hasMsgLimit = 2
 	pr := NewPublicReader(channels, feed, 3, 1, limits)
-	pr.baseURL = ts.URL
+	pr.baseURLs = []string{ts.URL}
 
 	// Trigger fetch
 	pr.fetchAll(context.Background())

@@ -73,6 +73,9 @@ function renderResolverTabs() {
   };
   tabs.appendChild(add);
   renderBankPill();
+  // Mirror list changes into the reparented Resolver sidebar (rename/delete/
+  // select all funnel through here).
+  if (typeof renderResolverSidebar === 'function') renderResolverSidebar();
 }
 
 function renderBankPill() {
@@ -117,8 +120,10 @@ async function selectResolverList(name) {
   var picked = lists.find(function (l) { return l.name === name; });
   var noScan = false;
   if (picked && (picked.count || 0) === 0) {
-    var bankEl = document.getElementById('resolverBankCount');
-    var bankCount = bankEl ? (parseInt(bankEl.textContent, 10) || 0) : 0;
+    // Read the REAL bank size (the old #resolverBankCount element lives in the
+    // now-hidden modal and is often stale/empty → wrong "bank is empty" copy).
+    var bankCount = 0;
+    try { var br = await fetch('/api/resolvers/bank'); if (br.ok) { var bd = await br.json(); bankCount = bd.count || 0; } } catch (e) { }
     if (bankCount > 0) {
       var ok = await showConfirmDialog(
         (t('empty_list_scan_confirm') || 'List "{n}" is empty. Scan the bank to find working resolvers?').replace('{n}', name),
@@ -306,6 +311,8 @@ async function addBankAddrToList(listName) {
     } else {
       showToast((t('already_in_list') || 'Already in "{n}"').replace('{n}', listName));
     }
+    // Refresh the list counts/previews immediately (don't wait for the 3s poll).
+    try { await loadResolverLists(); } catch (e2) { }
   } catch (e) { showToast(e.message || 'add failed'); }
 }
 
@@ -437,25 +444,34 @@ function checkAndShowSavedResolversPrompt(status) {
   // Per-tab debounce so we don't re-pop on every soft reload
   // within the same browsing session.
   if (sessionStorage.getItem('thefeed_scan_prompt_shown')) return;
+  // Only prompt when there are SAVED resolvers to offer as a fast path
+  // ("Use Now" vs "Scan Again"). A fresh install / wiped state has nothing to
+  // reuse and auto-scans on its own, so a lone "Scan Now?" prompt here is both
+  // redundant and reads as broken (a single, orphaned action button).
   var hasSaved = !!(status.lastScan && status.lastScan.count);
-  var msg;
-  if (hasSaved) {
-    var ls = status.lastScan;
-    var ageSec = Math.floor(Date.now() / 1000) - ls.scannedAt;
-    var ageStr;
-    if (ageSec < 3600) ageStr = Math.max(1, Math.round(ageSec / 60)) + ' ' + t('minutes_ago');
-    else ageStr = Math.round(ageSec / 3600) + ' ' + t('hours_ago');
-    msg = t('saved_resolvers_msg').replace('{n}', ls.count).replace('{t}', ageStr);
-  } else {
-    // Fresh install / wiped state — there's nothing to "use", so
-    // the prompt becomes a plain "want to scan?" question.
-    msg = t('startup_scan_msg') || 'Run a scan to find working resolvers?';
-  }
-  document.getElementById('savedResolversMsg').textContent = msg;
-  // Hide "Use Now" when we have nothing saved to apply.
+  if (!hasSaved) return;
+  var ls = status.lastScan;
+  var ageSec = Math.floor(Date.now() / 1000) - ls.scannedAt;
+  var ageStr;
+  if (ageSec < 3600) ageStr = Math.max(1, Math.round(ageSec / 60)) + ' ' + t('minutes_ago');
+  else ageStr = Math.round(ageSec / 3600) + ' ' + t('hours_ago');
+  document.getElementById('savedResolversMsg').textContent =
+    t('saved_resolvers_msg').replace('{n}', ls.count).replace('{t}', ageStr);
+  // Both actions present: "Scan Again" (outline) + "Use Now" (primary).
   var useBtn = document.getElementById('savedResolversUseBtn');
-  if (useBtn) useBtn.style.display = hasSaved ? '' : 'none';
-  document.getElementById('savedResolversModal').classList.add('active');
+  if (useBtn) useBtn.style.display = '';
+  var rescanBtn = document.getElementById('savedResolversRescanBtn');
+  if (rescanBtn) {
+    rescanBtn.classList.add('btn-outline');
+    rescanBtn.classList.remove('btn-primary');
+    rescanBtn.textContent = t('saved_resolvers_rescan');
+  }
+  var srm = document.getElementById('savedResolversModal');
+  // Lift above the floating nav (z-index 9300); the base .modal-overlay (100)
+  // would otherwise render this startup prompt under the nav bar. Matches the
+  // askRescan overlay lift.
+  srm.style.zIndex = '9600';
+  srm.classList.add('active');
 }
 function savedResolversSkip() {
   // "Later" — just close, server already applied saved resolvers and refresh is underway

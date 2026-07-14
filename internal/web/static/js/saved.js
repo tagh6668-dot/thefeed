@@ -76,13 +76,22 @@ async function openSavedMessages() {
   var entry = document.getElementById('savedChannelBtn');
   if (entry) entry.classList.add('active');
 
-  // Update header — hide normal elements, show saved title
+  // Update header — saved title + swap the feed actions for the saved ones
+  // (search toggle + lock) via the .sm-active flag on the header.
   var chatName = document.getElementById('chatName');
   var chatSub = document.getElementById('chatSub');
-  var headerActions = document.querySelector('.chat-header-actions');
+  var header = document.querySelector('.chat-area > .chat-header') || document.querySelector('.chat-header');
   if (chatName) { chatName.textContent = t('saved_messages'); }
   if (chatSub) { chatSub.textContent = ''; }
-  if (headerActions) headerActions.style.display = 'none';
+  if (header) header.classList.add('sm-active');
+  // Show the Saved (bookmark) icon in the header avatar — not the last
+  // channel's leftover picture.
+  var hAv = document.getElementById('chatHeaderAvatar');
+  if (hAv) {
+    hAv.classList.remove('ch-avatar-noimg');
+    hAv.classList.add('is-saved');
+    hAv.innerHTML = (typeof icon === 'function') ? icon('bookmark') : '';
+  }
 
   // Hide send panel
   var sendPanel = document.getElementById('sendPanel');
@@ -93,6 +102,7 @@ async function openSavedMessages() {
     var ls = await (await fetch('/api/saved/lock')).json();
     _savedLockMode = ls.mode || 'device';
   } catch (e) {}
+  updateSavedLockBtn();
 
   // Load and render
   savedMessages = await getAllSaved();
@@ -107,9 +117,9 @@ function closeSavedMessages() {
   // Remove saved-mode so #messages reverts to normal scrolling
   var messagesEl = document.getElementById('messages');
   if (messagesEl) messagesEl.classList.remove('saved-mode');
-  // Restore header actions
-  var headerActions = document.querySelector('.chat-header-actions');
-  if (headerActions) headerActions.style.display = '';
+  // Restore the feed header actions (drop the saved-mode flag).
+  var header = document.querySelector('.chat-area > .chat-header') || document.querySelector('.chat-header');
+  if (header) { header.classList.remove('sm-active'); header.classList.remove('sm-search-open'); }
   openSidebar();
   var entry = document.getElementById('savedChannelBtn');
   if (entry) entry.classList.remove('active');
@@ -119,9 +129,41 @@ function closeSavedMessages() {
 // an extra network round-trip on re-renders. Refreshed on every openSavedMessages().
 var _savedLockMode = 'device'; // 'device' | 'passphrase'
 
+// toggleSavedSearch shows/hides the search field (the title-bar search button).
+// Hidden by default so the saved view isn't a permanent search bar.
+function toggleSavedSearch() {
+  var root = document.querySelector('.sm-saved-root');
+  if (!root) return;
+  var open = root.classList.toggle('sm-search-open');
+  var btn = document.getElementById('savedSearchToggle');
+  if (btn) btn.classList.toggle('on', open);
+  var input = document.getElementById('savedSearch');
+  if (open) {
+    if (input) setTimeout(function () { try { input.focus(); } catch (e) {} }, 30);
+  } else if (input && input.value) {
+    input.value = '';
+    filterSavedMessages(); // restore the full list when closing a search
+  }
+}
+
+// updateSavedLockBtn refreshes the title-bar lock button's icon + tooltip from
+// the current lock mode (it lives on the header now, not in the list).
+function updateSavedLockBtn() {
+  var btn = document.getElementById('savedLockBtn');
+  if (!btn) return;
+  var passOn = _savedLockMode === 'passphrase';
+  btn.innerHTML = (typeof icon === 'function') ? icon(passOn ? 'lockKeyhole' : 'lockKeyholeOpen') : '';
+  var ttl = passOn ? (t('remove_passphrase') || 'Remove passphrase') : (t('set_passphrase') || 'Set passphrase');
+  btn.title = ttl;
+  btn.setAttribute('aria-label', ttl);
+}
+
 function renderSavedView() {
   var el = document.getElementById('messages');
   if (!el) return;
+
+  // Keep the title-bar lock button in sync (its mode can change via the gate).
+  updateSavedLockBtn();
 
   // Mark #messages as a non-scrolling flex container for the saved view layout
   el.classList.add('saved-mode');
@@ -159,33 +201,28 @@ function renderSavedView() {
   }
 
   var hasItems = savedMessages && savedMessages.length > 0;
-  var lockIconName = _savedLockMode === 'passphrase' ? 'lockKeyhole' : 'lockKeyholeOpen';
-  var lockTitle = _savedLockMode === 'passphrase'
-    ? escAttr(t('remove_passphrase') || 'Remove passphrase')
-    : escAttr(t('set_passphrase') || 'Set passphrase');
 
   var html = '<div class="sm-saved-root"><div class="sm-list">';
 
-  // Pinned banner above search bar
   var pinnedItems = savedMessages ? savedMessages.filter(function(m) { return m.pinned; }) : [];
-  if (pinnedItems.length) {
-    html += renderPinnedBanner(pinnedItems);
-  }
 
-  // Search bar + lock button
+  // Search input — hidden by default; the title-bar search button toggles it
+  // (.chat-header.sm-search-open). The lock button also lives on the title bar
+  // now, so this row is just the search field.
   html += '<div class="sm-search-bar">'
     + '<div class="sm-search-inner">'
     + '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>'
     + '<input type="search" id="savedSearch" placeholder="' + escAttr(t('search_saved') || 'Search saved messages…') + '" oninput="filterSavedMessages()">'
     + '<button class="sm-search-clear" id="savedSearchClear" onclick="clearSavedSearch()" style="display:none" aria-label="Clear search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></button>'
     + '</div>'
-    + '<button class="sm-lock-btn" onclick="toggleSavedPassphrase()" aria-label="' + lockTitle + '" title="' + lockTitle + '">'
-    + icon(lockIconName)
-    + '</button>'
     + '</div>';
 
-  // Scrollable items
+  // Scrollable items (pinned banner rides at the top of the scroll so it slides
+  // under the floating search bar with the rest of the list).
   html += '<div class="sm-scroll" id="savedList">';
+  if (pinnedItems.length) {
+    html += renderPinnedBanner(pinnedItems);
+  }
   if (hasItems) {
     var lastDate = '';
     var dateLocale = lang === 'fa' ? 'fa-IR' : 'en-US';
@@ -241,40 +278,71 @@ function savedModalToggleUnlockEye() {
   inp.type = inp.type === 'password' ? 'text' : 'password';
 }
 
-// renderPinnedBanner renders a compact banner at the top of the list.
-// Pinned items stay in their original position in the timeline;
-// the banner is a Telegram-style preview. ✕ unpins all.
+// _savedPinIdx is which pinned item the banner currently points at. Tapping the
+// banner jumps to it and advances to the next one (Telegram-style cycling
+// through multiple pins); the ✕ unpins ONLY the one being shown.
+var _savedPinIdx = 0;
+
+// renderPinnedBanner renders the compact banner for the pin at _savedPinIdx.
 function renderPinnedBanner(pinned) {
-  var first = pinned[0];
-  var rawPreview = (first.fileName || first.text || '');
-  // Strip internal media reference tokens (e.g. "[IMAGE]8862:1,1:15954:24:4a08cdf4")
+  if (!pinned.length) return '';
+  if (_savedPinIdx >= pinned.length) _savedPinIdx = 0;
+  var cur = pinned[_savedPinIdx];
+  var rawPreview = (cur.fileName || cur.text || '');
+  // Strip internal media reference tokens (e.g. "[IMAGE]8862:1,1:15954:24:...")
   // so the banner shows human-readable text, not raw storage keys.
   var preview = rawPreview
     .replace(/\[(IMAGE|VIDEO|FILE|AUDIO)\][^\s]*/g, '')
     .replace(/\s+/g, ' ').trim()
     .slice(0, 80)
-    || (first.kind === 'file' ? (first.fileName || '') : t('media_item') || 'Media');
-  var countLabel = pinned.length > 1 ? ' (' + pinned.length + ')' : '';
-  return '<div class="sm-pinned" id="savedPinBanner" onclick="savedBannerScrollToPinned()">'
+    || (cur.kind === 'file' ? (cur.fileName || '') : t('media_item') || 'Media');
+  // "Pinned · 2/3" when there are several; just "Pinned" for one.
+  var label = (t('pinned_label') || 'Pinned')
+    + (pinned.length > 1 ? ' · ' + (_savedPinIdx + 1) + '/' + pinned.length : '');
+  return '<div class="sm-pinned" id="savedPinBanner" onclick="savedPinCycle()">'
     + '<span class="sm-pinned-icon"><svg viewBox="0 0 24 24" fill="currentColor"><path d="m15.113 3.21.094.083 5.5 5.5a1 1 0 0 1-1.175 1.59l-3.172 3.171-1.424 3.797a1 1 0 0 1-.158.277l-.07.08-1.5 1.5a1 1 0 0 1-1.32.082l-.095-.083L9 16.415l-3.793 3.792a1 1 0 0 1-1.497-1.32l.083-.094L7.585 15l-2.792-2.793a1 1 0 0 1-.083-1.32l.083-.094 1.5-1.5a1 1 0 0 1 .258-.187l.098-.042 3.796-1.425 3.171-3.17a1 1 0 0 1 1.497-1.26z"/></svg></span>'
     + '<div class="sm-pinned-content">'
-    + '<div class="sm-pinned-label">' + esc(t('pin') || 'Pinned') + esc(countLabel) + '</div>'
+    + '<div class="sm-pinned-label">' + esc(label) + '</div>'
     + '<div class="sm-pinned-preview" dir="auto">' + esc(preview) + '</div>'
     + '</div>'
-    + '<button class="sm-pinned-close" onclick="event.stopPropagation(); savedUnpinAll()" title="' + escAttr(t('unpin') || 'Unpin all') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>'
+    + '<button class="sm-pinned-close" onclick="event.stopPropagation(); savedUnpinCurrent()" title="' + escAttr(t('unpin') || 'Unpin') + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>'
     + '</div>';
 }
 
-// Scroll to the first pinned item in the timeline
-function savedBannerScrollToPinned() {
-  var firstPinned = document.querySelector('.sm-card[data-pinned="1"]');
-  if (firstPinned) firstPinned.scrollIntoView({ behavior: 'smooth', block: 'center' });
+// Rebuild the banner in place from the current pin list (e.g. after cycling).
+function refreshPinnedBanner() {
+  var old = document.getElementById('savedPinBanner');
+  var pinned = (savedMessages || []).filter(function (m) { return m.pinned; });
+  if (!pinned.length) { if (old) old.remove(); return; }
+  var tmp = document.createElement('div');
+  tmp.innerHTML = renderPinnedBanner(pinned);
+  var fresh = tmp.firstChild;
+  if (old) old.replaceWith(fresh);
+  else { var sc = document.getElementById('savedList'); if (sc) sc.insertBefore(fresh, sc.firstChild); }
 }
 
-// Unpin all pinned items (called by the ✕ button on the pinned banner)
-function savedUnpinAll() {
-  var ids = savedMessages.filter(function(m) { return m.pinned; }).map(function(m) { return m.id; });
-  ids.forEach(function(id) { pinSavedItem(id, false); });
+// Tap the banner: scroll to the pin it shows, then advance to the next pin so a
+// repeated tap walks through all of them.
+function savedPinCycle() {
+  var pinned = (savedMessages || []).filter(function (m) { return m.pinned; });
+  if (!pinned.length) return;
+  if (_savedPinIdx >= pinned.length) _savedPinIdx = 0;
+  var cur = pinned[_savedPinIdx];
+  var card = document.querySelector('.sm-card[data-saved-id="' + cssEsc(cur.id) + '"]');
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  _savedPinIdx = (_savedPinIdx + 1) % pinned.length; // next tap → next pin
+  refreshPinnedBanner();
+}
+
+// ✕ on the banner: unpin ONLY the pin currently shown.
+function savedUnpinCurrent() {
+  var pinned = (savedMessages || []).filter(function (m) { return m.pinned; });
+  if (!pinned.length) return;
+  if (_savedPinIdx >= pinned.length) _savedPinIdx = 0;
+  var cur = pinned[_savedPinIdx];
+  // Keep the index pointing at a valid pin after removal.
+  if (_savedPinIdx >= pinned.length - 1) _savedPinIdx = 0;
+  pinSavedItem(cur.id, false); // updates the model + rebuilds the banner
 }
 
 // Clear the search input and reset filter
@@ -702,7 +770,9 @@ async function pinSavedItem(savedId, pinned) {
         pb.title = pinned ? (t('unpin') || 'Unpin') : (t('pin') || 'Pin');
       }
     }
-    // Refresh the pinned banner
+    // Refresh the pinned banner. Reset the cycle to the first pin so the banner
+    // shows a sensible item after a pin/unpin (renderPinnedBanner clamps anyway).
+    _savedPinIdx = 0;
     var oldBanner = document.getElementById('savedPinBanner');
     var pinnedNow = savedMessages.filter(function(m) { return m.pinned; });
     if (pinnedNow.length) {
@@ -713,8 +783,11 @@ async function pinSavedItem(savedId, pinned) {
       if (oldBanner) {
         oldBanner.replaceWith(newBanner);
       } else {
-        var searchBar = document.querySelector('.sm-search-bar');
-        if (searchBar) searchBar.parentNode.insertBefore(newBanner, searchBar);
+        // Insert at the TOP of the scroll list (where the initial render puts
+        // it) — NOT before the floating search bar, which dropped it outside the
+        // scroll and behind the title/search bars at the very top of the page.
+        var scroll = document.getElementById('savedList');
+        if (scroll) scroll.insertBefore(newBanner, scroll.firstChild);
       }
     } else if (oldBanner) {
       oldBanner.remove();
@@ -749,12 +822,7 @@ async function jumpToSavedOriginal(channelId, messageId) {
   // navigating, otherwise the saved-view flex layout leaks into the channel.
   closeSavedMessages();
 
-  await selectChannel(chNum);
-  // Wait for messages to render, then scroll
-  setTimeout(function () {
-    var found = scrollToMsg(messageId);
-    if (!found) showToast(t('msg_not_in_cache') || 'Message no longer in cache');
-  }, 500);
+  gotoChannelPost(chNum, messageId);
 }
 
 // jumpToTelemirrorPost reopens the Telemirror browser at the saved post's
@@ -818,32 +886,43 @@ async function downloadSavedMedia(btnEl, savedId, size, crcHex) {
   if (!rec) { btnEl.disabled = false; return; }
   var parsed = findMediaDescriptor(rec.text, size, crcHex);
   if (!parsed) { btnEl.disabled = false; showToast(t('msg_not_in_cache') || 'Unavailable'); return; }
+  // Pick the source the same way the feed does: prefer the GitHub relay (fast),
+  // fall back to DNS (slow). GH-only media has ch/blk == 0 — the fast path is
+  // keyed by size+crc, not channel, so it still works; hardcoding slow was the
+  // bug. A successful fetch is also served from the server cache by (size,crc),
+  // so a prior channel download is reused here too.
+  var sources = [];
+  if (parsed.githubAvailable) sources.push('fast');
+  if (parsed.dnsAvailable) sources.push('slow');
+  if (sources.length === 0) sources.push('slow');
   try {
-    var url = '/api/media/get?ch=' + parsed.channel + '&blk=' + parsed.blocks + '&size=' + parsed.size + '&crc=' + parsed.crc + '&source=slow';
-    var r = await fetch(url);
-    if (!r.ok) throw new Error('download failed');
-    await r.blob();
+    var ok = false;
+    for (var si = 0; si < sources.length; si++) {
+      var url = '/api/media/get?ch=' + parsed.channel + '&blk=' + parsed.blocks
+        + '&size=' + parsed.size + '&crc=' + parsed.crc + '&source=' + sources[si];
+      var r = await fetch(url);
+      if (r.ok) { await r.blob(); ok = true; break; }
+    }
+    if (!ok) throw new Error('download failed');
     await persistSavedMedia(size, crcHex);
     savedMessages = await getAllSaved();
     renderSavedView();
-  } catch (e) { btnEl.disabled = false; showToast(t('msg_not_in_cache') || 'Download failed'); }
+  } catch (e) { btnEl.disabled = false; showToast(t('media_failed') || 'Download failed'); }
 }
-// findMediaDescriptor walks the message text's sequential media tags (an album
-// is "[TAG]head\n[TAG]head\n…") and returns the descriptor whose (size, crc)
-// matches the clicked item — so downloading the Nth item fetches the Nth item,
-// not just the first.
+// findMediaDescriptor locates the descriptor whose (size, crc) matches the
+// clicked item. A structured media tag ("[TAG]size:flags:ch:blk:crc") can sit
+// anywhere in the text — after a caption, inside a [REPLY] wrapper, or as the
+// Nth item of an album — so we scan for every occurrence rather than assuming
+// it starts at position 0. We do NOT require ch/blk > 0: GH-relay-only media
+// legitimately has ch == blk == 0, and the caller fetches it via the fast path.
+var savedMediaTagRe = /\[(IMAGE|VIDEO|FILE|AUDIO|STICKER|GIF|CONTACT|LOCATION)\]\d+:[0-9,]+:\d+:\d+:[0-9a-fA-F]+/g;
 function findMediaDescriptor(text, size, crcHex) {
-  var tags = ['[IMAGE]', '[VIDEO]', '[FILE]', '[AUDIO]', '[STICKER]', '[GIF]', '[CONTACT]', '[LOCATION]'];
   var wantCrc = parseInt(crcHex, 16);
-  var rest = text;
-  while (rest) {
-    var matched = null;
-    for (var i = 0; i < tags.length; i++) { if (rest.indexOf(tags[i]) === 0) { matched = tags[i]; break; } }
-    if (!matched) break;
-    var p = parseDownloadableMedia(rest, matched);
-    if (!(p.size > 0 && p.channel > 0 && p.blocks > 0 && p.crc)) break;
-    if (p.size === size && parseInt(p.crc, 16) === wantCrc) return p;
-    rest = p.caption; // advance to the next media tag in the album
+  savedMediaTagRe.lastIndex = 0;
+  var m;
+  while ((m = savedMediaTagRe.exec(text)) !== null) {
+    var p = parseDownloadableMedia(text.substring(m.index), '[' + m[1] + ']');
+    if (p.size === size && p.crc && parseInt(p.crc, 16) === wantCrc) return p;
   }
   return null;
 }
@@ -1153,8 +1232,9 @@ window.downloadSavedMedia = downloadSavedMedia;
 window.msgSaveToggle = msgSaveToggle;
 window.savedModalToggleEye = savedModalToggleEye;
 window.savedModalToggleUnlockEye = savedModalToggleUnlockEye;
-window.savedBannerScrollToPinned = savedBannerScrollToPinned;
-window.savedUnpinAll = savedUnpinAll;
+window.savedPinCycle = savedPinCycle;
+window.savedUnpinCurrent = savedUnpinCurrent;
+window.refreshPinnedBanner = refreshPinnedBanner;
 window.clearSavedSearch = clearSavedSearch;
 window.copySavedText = copySavedText;
 window.savedMediaOpen = savedMediaOpen;
