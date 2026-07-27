@@ -259,6 +259,41 @@ Two relays ship today:
 | `--github-relay-repo` | `THEFEED_GITHUB_RELAY_REPO` | — | `owner/repo` |
 | `--github-relay-branch` | `THEFEED_GITHUB_RELAY_BRANCH` | `main` | branch for relay objects |
 | `--github-relay-max-size` | `THEFEED_GITHUB_RELAY_MAX_SIZE_KB` | `15360` KB | per-file cap |
+| `--github-relay-quota-gb` | `THEFEED_GITHUB_RELAY_QUOTA_GB` | `100` GB | repo size budget for warnings |
+
+### ⚠ The relay repo grows forever — watch its size
+
+Relay objects are written as git commits, and **git history keeps every blob**.
+The TTL prune deletes files from the current tree, but that does **not** reclaim
+space: the repo only ever gets bigger, until GitHub starts refusing pushes with
+`403 Repository is above its size quota` (observed at ~100 GB). At that point
+the relay can neither upload nor prune — a `git push --force` cannot help
+either, because GitHub does not run garbage collection on demand.
+
+What the server does for you:
+
+- Polls the repo size every 30 min and logs a warning at **70%** and **90%** of
+  `--github-relay-quota-gb`.
+- Shows repo size, headroom, queue depth and last error under
+  **Media cache & relay** in `thefeed-server --report`.
+- Uploads each file to GitHub as it arrives and keeps only the returned object
+  id, so a full or unreachable repo degrades to the DNS media path instead of
+  growing in memory until the process is OOM-killed.
+
+What you have to do when it fills up: **delete the repo on GitHub and create it
+again with the same name.** If your token is **fine-grained** (`github_pat_…`)
+and scoped to that one repository, **re-grant the repo in the token settings
+afterwards**: fine-grained tokens are bound to a repository *ID*, which changes
+when you recreate it, so the old grant stops working even though the name
+matches. Classic `ghp_…` tokens with the `repo` scope are unaffected.
+Ticking "Add a README" is fine — the server notices
+its own folder is gone either way, resets its object index, and re-uploads on
+demand, so no manual state cleanup is needed. Media stays available over DNS
+while the relay is empty.
+
+Use **one repo per server**. Two servers can share one safely (paths are
+namespaced by an HMAC of the domain, and neither can delete the other's files),
+but they contend on the same branch and share the same size budget.
 
 ---
 

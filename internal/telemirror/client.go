@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	neturl "net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -240,6 +241,13 @@ func (c *Client) fetchHTMLFromHost(ctx context.Context, host, username string, b
 			c.markSuccess(attemptIndex(ap))
 			return b, false, nil
 		}
+		if status >= 300 && status < 400 {
+			// A live public channel is served 200 directly; the proxy only
+			// redirects (302 → t.me) when the channel doesn't exist, was
+			// renamed, or is private. Every host agrees, so report
+			// not-found rather than walking on or chasing the dead host.
+			return "", false, ErrChannelNotFound
+		}
 		if status == http.StatusNotFound {
 			// Google's edge routes by Host header before applying the
 			// per-host 404, so every transport attempt would return the
@@ -456,6 +464,25 @@ func setBrowserHeaders(req *http.Request, ua string, fronted bool) {
 	}
 }
 
+// followPreviewRedirect is the widget fetch's redirect policy. A live
+// channel's /s/ preview is served with 200 directly; the proxy redirects
+// only when there is no public preview (the channel is missing, private,
+// or has its web preview disabled), bouncing to the join page — which
+// drops the /s/ path and/or leaves the host, and carries no widget to
+// scrape. So we follow a redirect only when it stays on the same host and
+// keeps the /s/ preview path (a canonical move that still yields a
+// widget); every other redirect stops here with its 3xx status, which
+// fetchHTMLFromHost maps to ErrChannelNotFound. This preserves any
+// legitimate same-preview redirect while never chasing the dead t.me host.
+func followPreviewRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > 0 &&
+		req.URL.Host == via[0].URL.Host &&
+		strings.HasPrefix(req.URL.Path, "/s/") {
+		return nil
+	}
+	return http.ErrUseLastResponse
+}
+
 func (c *Client) do(ctx context.Context, ap proxyAttempt, host, username, ua string, beforeID int) (string, int, error) {
 	url := fmt.Sprintf(
 		"https://%s/s/%s?_x_tr_sl=%s&_x_tr_tl=%s&_x_tr_hl=en&_x_tr_pto=wapp",
@@ -467,7 +494,11 @@ func (c *Client) do(ctx context.Context, ap proxyAttempt, host, username, ua str
 
 	transport := transportFor(ap, host)
 	defer transport.CloseIdleConnections()
-	httpClient := &http.Client{Transport: transport, Timeout: requestTimeout}
+	httpClient := &http.Client{
+		Transport:     transport,
+		Timeout:       requestTimeout,
+		CheckRedirect: followPreviewRedirect,
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
