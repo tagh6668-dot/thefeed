@@ -98,6 +98,13 @@ function pushSeenBulk(ids, hashes) {
   } catch (e) { }
 }
 var appVersion = '', latestVersion = '';
+// Set from /api/settings at startup; store builds must not self-update.
+var storeBuild = false;
+// Removes the manual "check on GitHub" control.
+function hideUpdateEntryPoints() {
+  var btn = document.getElementById('checkGitHubBtn');
+  if (btn) btn.style.display = 'none';
+}
 var profiles = null, activeProfileId = '', editingProfileId = null, resolverScanHint = '', resolverScanHealthy = 0, resolverScanDone = 0, resolverScanTotal = 0;
 var currentMaxMsgID = 0;
 var currentMaxTimestamp = 0;
@@ -241,11 +248,22 @@ async function init() {
   // the background so a slow github.com response can't delay startup —
   // if there's an update, the dialog shows up a few seconds later.
   // Skipped on iOS: App Store / TestFlight handles updates there.
+  // Must precede the update check: migration 1 repairs skip flags that the
+  // check reads back, and racing it costs another launch.
+  var migrated = fetch('/api/settings')
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (s) {
+      storeBuild = !!(s && s.storeBuild);
+      return runPendingMigrations(s);
+    })
+    .catch(function () { });
   if (typeof IOS === 'undefined') {
-    checkGitHubUpdate(false).catch(function () { });
+    migrated.then(function () {
+      if (storeBuild) { hideUpdateEntryPoints(); return; }
+      return checkGitHubUpdate(false);
+    }).catch(function () { });
   } else {
-    var ghBtn = document.getElementById('checkGitHubBtn');
-    if (ghBtn) ghBtn.style.display = 'none';
+    hideUpdateEntryPoints();
   }
   try {
     var r = await fetch('/api/status'); var st = await r.json();
@@ -553,8 +571,8 @@ function showInputDialog(opts) {
   });
 }
 
-// triggerDownload saves a blob to the user's device. On iOS WKWebView the
-// <a download> attribute is ignored, so we use the Web Share API instead.
+// triggerDownload saves a blob to the user's device. Resolves false only when
+// a save definitely failed; iOS and the anchor path cannot report either way.
 function triggerDownload(blob, filename) {
   // Ensure the filename has an extension — iOS share sheet and Android
   // bridge use it literally, unlike <a download> which infers from MIME.
@@ -564,7 +582,9 @@ function triggerDownload(blob, filename) {
       'audio/ogg': '.ogg', 'application/pdf': '.pdf' }[blob.type];
     if (!ext) {
       var sub = blob.type.split('/')[1];
-      if (sub) ext = '.' + sub.replace(/\+.*$/, '');
+      // octet-stream names no real extension; ".octet-stream" would leave a
+      // file no OS can open.
+      if (sub && sub !== 'octet-stream') ext = '.' + sub.replace(/\+.*$/, '');
     }
     if (ext) filename += ext;
   }
@@ -575,17 +595,22 @@ function triggerDownload(blob, filename) {
   // sheet has no "save" entry at all.
   var bridge = (typeof window !== 'undefined') ? (window.Android || window.IOS) : null;
   if (bridge && typeof bridge.saveMedia === 'function') {
-    var reader = new FileReader();
-    reader.onload = function () {
-      var b64 = (reader.result || '').split(',')[1] || '';
-      try { bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename); }
-      catch (e) { showToast('Save failed'); }
-    };
-    reader.readAsDataURL(blob);
-    return;
+    return new Promise(function (resolve) {
+      var fail = function () { showToast(t('save_failed')); resolve(false); };
+      var reader = new FileReader();
+      reader.onload = function () {
+        var b64 = (reader.result || '').split(',')[1] || '';
+        // Android returns false on failure; iOS returns undefined either way.
+        try { resolve(bridge.saveMedia(b64, blob.type || 'application/octet-stream', filename) !== false); }
+        catch (e) { fail(); }
+      };
+      reader.onerror = fail;
+      reader.readAsDataURL(blob);
+    });
   }
   // Every desktop browser handles this natively.
   anchorDownload(blob, filename);
+  return Promise.resolve(true);
 }
 
 function anchorDownload(blob, filename) {

@@ -135,6 +135,28 @@ func ContentHashOf(msgs []Message) uint32 {
 	return crc32.ChecksumIEEE(data)
 }
 
+// truncateUTF8 cuts s to at most max bytes without splitting a rune.
+// Returns a string, not []byte: a substring shares the original backing array,
+// so the size pass costs nothing, and copy() takes a string source directly.
+func truncateUTF8(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	// range over a string yields the byte index of each rune boundary, so the
+	// last index that still fits is where we cut.
+	end := 0
+	for i := range s {
+		if i > max {
+			break
+		}
+		end = i
+	}
+	return s[:end]
+}
+
 // SerializeMetadata encodes metadata into bytes for channel 0 blocks.
 // Format: marker(3) + timestamp(4) + nextFetch(4) + flags(1) + channelCount(2) + per-channel data
 // Per-channel: nameLen(1) + name + blocks(2) + lastMsgID(4) + contentHash(4) + chatType(1) + flags(1)
@@ -147,7 +169,7 @@ func SerializeMetadata(m *Metadata) []byte {
 	// 3 marker + 4 timestamp + 4 nextFetch + 1 flags + 2 channel count + per-channel data
 	size := MarkerSize + 4 + 4 + 1 + 2
 	for _, ch := range m.Channels {
-		size += 1 + len(ch.Name) + 2 + 4 + 4 + 1 + 1
+		size += 1 + len(truncateUTF8(ch.Name, 255)) + 2 + 4 + 4 + 1 + 1
 	}
 	buf := make([]byte, size)
 	off := 0
@@ -175,10 +197,7 @@ func SerializeMetadata(m *Metadata) []byte {
 	off += 2
 
 	for _, ch := range m.Channels {
-		nameBytes := []byte(ch.Name)
-		if len(nameBytes) > 255 {
-			nameBytes = nameBytes[:255]
-		}
+		nameBytes := truncateUTF8(ch.Name, 255)
 		buf[off] = byte(len(nameBytes))
 		off++
 		copy(buf[off:], nameBytes)
@@ -437,28 +456,16 @@ func CompressMessages(data []byte) []byte {
 func EncodeTitlesData(titles map[string]string) []byte {
 	size := 2
 	for name, title := range titles {
-		n := name
-		if len(n) > 255 {
-			n = n[:255]
-		}
-		t := title
-		if len([]byte(t)) > 255 {
-			t = string([]byte(t)[:255])
-		}
-		size += 1 + len(n) + 1 + len([]byte(t))
+		nb := truncateUTF8(name, 255)
+		tb := truncateUTF8(title, 255)
+		size += 1 + len(nb) + 1 + len(tb)
 	}
 	buf := make([]byte, size)
 	binary.BigEndian.PutUint16(buf, uint16(len(titles)))
 	off := 2
 	for name, title := range titles {
-		nb := []byte(name)
-		if len(nb) > 255 {
-			nb = nb[:255]
-		}
-		tb := []byte(title)
-		if len(tb) > 255 {
-			tb = tb[:255]
-		}
+		nb := truncateUTF8(name, 255)
+		tb := truncateUTF8(title, 255)
 		buf[off] = byte(len(nb))
 		off++
 		copy(buf[off:], nb)

@@ -97,6 +97,14 @@ func NewAndroidServer(dataDir string, preferredPort int) (*Server, error) {
 	return NewServer(dataDir, preferredPort)
 }
 
+// NewAndroidPlayServer is NewServer for the Google Play build: it disables the
+// in-app updater end to end. Deliberately does NOT set THEFEED_ANDROID_APK —
+// that flag is what points the updater at a GitHub APK asset.
+func NewAndroidPlayServer(dataDir string, preferredPort int) (*Server, error) {
+	os.Setenv("THEFEED_STORE_BUILD", "1")
+	return NewServer(dataDir, preferredPort)
+}
+
 // NewAndroidUniversalServer is NewServer for the universal APK build:
 // the update prompt keeps the user on the universal asset.
 func NewAndroidUniversalServer(dataDir string, preferredPort int) (*Server, error) {

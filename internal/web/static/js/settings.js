@@ -392,6 +392,7 @@ function changeAppPassword() {
 // with a download link tailored to their platform.
 // `manual=true` shows a toast on "no update", `manual=false` stays silent.
 async function checkGitHubUpdate(manual) {
+  if (storeBuild) return; // store builds update through the store
   try {
     var r = await fetch('/api/update/github');
     if (!r.ok) {
@@ -404,16 +405,31 @@ async function checkGitHubUpdate(manual) {
     renderLatestVersion();
     if (data.hasUpdate && data.downloadURL) {
       if (!manual) {
-        // Server-stored skip survives per-port localStorage wipes.
-        var skipped = '';
+        // Server-stored state survives per-port localStorage wipes.
+        var skipped = '', downloaded = '';
         try {
           var sx = new XMLHttpRequest();
           sx.open('GET', '/api/settings', false);
           sx.send();
-          if (sx.status === 200) skipped = JSON.parse(sx.responseText).skipUpdateVersion || '';
+          if (sx.status === 200) {
+            var sv = JSON.parse(sx.responseText);
+            skipped = sv.skipUpdateVersion || '';
+            downloaded = sv.downloadedVersion || '';
+          }
         } catch (e) { }
         if (!skipped) skipped = localStorage.getItem('thefeed_skip_gh_update_' + normalizeVersion(data.latest)) === '1' ? data.latest : '';
+        if (!downloaded) downloaded = localStorage.getItem('thefeed_downloaded_gh_update_' + normalizeVersion(data.latest)) === '1' ? data.latest : '';
         if (normalizeVersion(skipped) === normalizeVersion(data.latest)) return;
+        // Already saved but evidently not installed (we are still running the
+        // old build): remind how to finish rather than offering the download
+        // again. Shown every launch, like the normal prompt — "don't show
+        // again" is the way out. A once-per-session guard lived here and was
+        // wrong: sessionStorage outlives app restarts while the browser tab
+        // stays open, so the reminder appeared once and never again.
+        if (normalizeVersion(downloaded) === normalizeVersion(data.latest)) {
+          showUpdateReminder(data.latest, data.downloadURL);
+          return;
+        }
       }
       showUpdateDialog(data.latest, data.downloadURL);
     } else if (manual) {
@@ -430,7 +446,6 @@ function showUpdateDialog(newVersion, url) {
   var dl = t('update_download_btn') || 'Download';
   var later = t('update_later_btn') || 'Later';
   var skip = t('update_skip_btn') || "Don't show again";
-  var skipKey = 'thefeed_skip_gh_update_' + normalizeVersion(newVersion);
   var overlay = document.createElement('div');
   overlay.className = 'modal-overlay active';
   overlay.innerHTML = '<div class="modal" style="max-width:380px">'
@@ -444,50 +459,182 @@ function showUpdateDialog(newVersion, url) {
     + '</div></div>';
   document.body.appendChild(overlay);
   var dismiss = function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); };
-  var persistSkip = function () {
-    try { localStorage.setItem(skipKey, '1'); } catch (e) { }
-    fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skipUpdateVersion: newVersion })
-    }).catch(function () { });
-  };
-  document.getElementById('updateLater').onclick = dismiss;
-  document.getElementById('updateSkip').onclick = function () { persistSkip(); dismiss(); };
-  document.getElementById('updateDownload').onclick = function () {
+  // Scoped to this overlay: nothing stops a second dialog carrying the same ids.
+  overlay.querySelector('#updateLater').onclick = dismiss;
+  overlay.querySelector('#updateSkip').onclick = function () { persistUpdateSkip(newVersion); dismiss(); };
+  overlay.querySelector('#updateDownload').onclick = function () {
     runUpdateDownload(newVersion, overlay);
+  };
+}
+
+// ===== ONE-TIME DATA MIGRATIONS =====
+// Append-only; index+1 is the migration number. Each entry mutates the
+// settings patch POSTed once all pending steps have run.
+var TF_MIGRATIONS = [
+  // 1 — the old download path wrote skipUpdateVersion (the "don't show again"
+  // field) to mean "downloaded", hiding that version's update for good. A real
+  // "don't show again" is cleared too; the two are indistinguishable now.
+  function (patch) {
+    try {
+      Object.keys(localStorage)
+        .filter(function (k) { return k.indexOf('thefeed_skip_gh_update_') === 0; })
+        .forEach(function (k) { localStorage.removeItem(k); });
+    } catch (e) { }
+    patch.skipUpdateVersion = '';
+  }
+];
+
+function tfLocalMigrationLevel() {
+  try { return parseInt(localStorage.getItem('thefeed_migration_level') || '0', 10) || 0; }
+  catch (e) { return 0; }
+}
+
+// runPendingMigrations applies everything above this install's level, and
+// resolves once done so callers reading the migrated values can wait.
+// Level lives on the server for a single-user client (its loopback port
+// changes and wipes localStorage), but per-browser on a shared backend, where
+// one profiles.json serves everyone yet each browser has its own localStorage.
+function runPendingMigrations(s) {
+  if (!s) return Promise.resolve();
+  var shared = !!s.shared;
+  var applied = shared ? tfLocalMigrationLevel() : (s.migrationVersion || 0);
+  if (applied >= TF_MIGRATIONS.length) return Promise.resolve();
+  var patch = { migrationVersion: TF_MIGRATIONS.length };
+  for (var i = applied; i < TF_MIGRATIONS.length; i++) {
+    try { TF_MIGRATIONS[i](patch); } catch (e) { }
+  }
+  if (shared) {
+    try { localStorage.setItem('thefeed_migration_level', String(TF_MIGRATIONS.length)); } catch (e) { }
+    return Promise.resolve();
+  }
+  return fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch)
+  }).catch(function () { });
+}
+
+// pruneVersionKeys drops every <prefix><version> entry except `keep` — only
+// the newest is ever read, so the rest would accumulate one per release.
+function pruneVersionKeys(prefix, keep) {
+  try {
+    Object.keys(localStorage).forEach(function (k) {
+      if (k.indexOf(prefix) === 0 && k !== keep) localStorage.removeItem(k);
+    });
+  } catch (e) { }
+}
+
+// persistUpdateSkip records an explicit "don't show again" — permanent for
+// that version. Local first, so it sticks even if the API call fails.
+function persistUpdateSkip(newVersion) {
+  var key = 'thefeed_skip_gh_update_' + normalizeVersion(newVersion);
+  pruneVersionKeys('thefeed_skip_gh_update_', key);
+  try { localStorage.setItem(key, '1'); } catch (e) { }
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skipUpdateVersion: newVersion })
+  }).catch(function () { });
+}
+
+// persistUpdateDownloaded records that the asset was saved — deliberately not
+// the skip flag, so a download the user never installs is still remindable.
+function persistUpdateDownloaded(newVersion) {
+  var key = 'thefeed_downloaded_gh_update_' + normalizeVersion(newVersion);
+  pruneVersionKeys('thefeed_downloaded_gh_update_', key);
+  try { localStorage.setItem(key, '1'); } catch (e) { }
+  fetch('/api/settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ downloadedVersion: newVersion })
+  }).catch(function () { });
+}
+
+// updateSaveHint describes where this shell puts the file: Android streams it
+// to Downloads/, iOS asks the user to pick, desktop uses the browser folder.
+function updateSaveHint() {
+  return androidBridge ? t('update_done_android')
+    : (typeof window !== 'undefined' && window.IOS) ? t('update_done_ios')
+      : t('update_done_desktop');
+}
+
+// showUpdateReminder runs when this version was already downloaded but the
+// app is still the old build — so the file was never installed.
+function showUpdateReminder(newVersion, url) {
+  var overlay = document.createElement('div');
+  overlay.className = 'modal-overlay active';
+  overlay.innerHTML = '<div class="modal" style="max-width:380px">'
+    + '<h2 style="margin-top:0">' + esc(t('update_ready_title').replace('{v}', newVersion)) + '</h2>'
+    + '<p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;line-height:1.6">' + esc(updateSaveHint()) + '</p>'
+    + '<div class="modal-actions" style="flex-wrap:wrap;gap:6px">'
+    + '  <button class="btn btn-flat" id="updateSkip">' + esc(t('update_skip_btn')) + '</button>'
+    + '  <button class="btn btn-flat" id="updateLater">' + esc(t('update_later_btn')) + '</button>'
+    + '  <button class="btn btn-primary" id="updateRedownload">' + esc(t('update_download_again')) + '</button>'
+    + '</div></div>';
+  document.body.appendChild(overlay);
+  var dismiss = function () { if (overlay.parentNode) overlay.parentNode.removeChild(overlay); };
+  overlay.querySelector('#updateLater').onclick = dismiss;
+  overlay.querySelector('#updateSkip').onclick = function () { persistUpdateSkip(newVersion); dismiss(); };
+  overlay.querySelector('#updateRedownload').onclick = function () {
+    runUpdateDownload(newVersion, overlay);
+  };
+}
+
+// showUpdateDone replaces the progress panel with a completion notice, kept
+// open until dismissed because installing the file is a manual step.
+function showUpdateDone(overlay, savedName) {
+  var modal = overlay && overlay.querySelector('.modal');
+  if (!modal) return;
+  var hint = updateSaveHint();
+  modal.innerHTML = ''
+    + '<h2 style="margin-top:0">' + esc(t('update_done_title')) + '</h2>'
+    + '<p style="color:var(--text-dim);font-size:13px;margin:0 0 10px;line-height:1.6">' + esc(hint) + '</p>'
+    + (savedName
+      ? '<div style="font-family:monospace;font-size:12px;word-break:break-all;background:var(--bg-soft,#222);padding:8px 10px;border-radius:6px">'
+        + esc(savedName) + '</div>'
+      : '')
+    + '<div class="modal-actions" style="margin-top:14px;justify-content:flex-end">'
+    + '  <button class="btn btn-primary" id="updateDoneClose">' + esc(t('close')) + '</button>'
+    + '</div>';
+  // Scoped to this modal: a second update dialog would carry the same id, and
+  // document.getElementById would hand back the older one's button.
+  modal.querySelector('#updateDoneClose').onclick = function () {
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
   };
 }
 
 // runUpdateDownload swaps the update dialog's body for a progress
 // bar, streams the asset through /api/update/download, and on
-// completion triggers a same-page Save As via a Blob URL.
+// completion shows the install notice.
 async function runUpdateDownload(newVersion, overlay) {
   var modal = overlay && overlay.querySelector('.modal');
   var progressHTML = ''
-    + '<h2 style="margin-top:0">' + esc((t('update_downloading') || 'Downloading {v}…').replace('{v}', newVersion)) + '</h2>'
+    + '<h2 style="margin-top:0">' + esc(t('update_downloading').replace('{v}', newVersion)) + '</h2>'
     + '<div style="background:var(--bg-soft,#222);height:10px;border-radius:5px;overflow:hidden;margin-bottom:8px">'
     + '  <div id="updateProgressBar" style="background:var(--accent,#4caf50);height:100%;width:0%;transition:width .2s"></div>'
     + '</div>'
     + '<div id="updateProgressText" style="font-size:12px;color:var(--text-dim);text-align:center">0 / ?</div>'
     + '<div class="modal-actions" style="margin-top:14px;justify-content:flex-end">'
-    + '  <button class="btn btn-flat" id="updateCancel">' + esc(t('cancel') || 'Cancel') + '</button>'
+    + '  <button class="btn btn-flat" id="updateCancel">' + esc(t('cancel')) + '</button>'
     + '</div>';
-  if (modal) modal.innerHTML = progressHTML;
+  if (!modal) return;
+  modal.innerHTML = progressHTML;
+
+  // Scoped to this modal: a second update dialog carries the same ids.
+  var cancelBtn = modal.querySelector('#updateCancel');
+  var bar = modal.querySelector('#updateProgressBar');
+  var txt = modal.querySelector('#updateProgressText');
 
   var controller = new AbortController();
-  document.getElementById('updateCancel').onclick = function () {
+  cancelBtn.onclick = function () {
     controller.abort();
-    if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
   };
 
-  var bar = document.getElementById('updateProgressBar');
-  var txt = document.getElementById('updateProgressText');
-
-  var fmtBytes = function (n) {
-    if (n < 1024) return n + ' B';
-    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-    return (n / 1024 / 1024).toFixed(2) + ' MB';
+  var showFailed = function (detail) {
+    if (!txt) return;
+    txt.style.color = 'var(--danger,#e53935)';
+    txt.textContent = t('update_download_failed') + (detail ? ': ' + detail : '');
   };
 
   // Android: let the native side stream the APK straight to Downloads.
@@ -498,12 +645,20 @@ async function runUpdateDownload(newVersion, overlay) {
     var updURL = location.origin + '/api/update/download?version=' + encodeURIComponent(newVersion);
     var updName = 'thefeed-' + newVersion + '.apk';
     if (!androidBridge.startDownload(updURL, updName)) {
-      if (txt) txt.textContent = t('update_download_failed') || 'Download failed';
+      showFailed('');
       return;
     }
+    var pollFails = 0;
     var poll = setInterval(function () {
       var st;
-      try { st = JSON.parse(androidBridge.downloadStatus() || '{}'); } catch (e) { return; }
+      try { st = JSON.parse(androidBridge.downloadStatus() || '{}'); }
+      catch (e) {
+        // A bridge that keeps throwing would otherwise poll for the whole
+        // session; give it a few seconds, then report the failure.
+        if (++pollFails < 20) return;
+        st = { state: 'error', detail: e.message || String(e) };
+      }
+      pollFails = 0;
       if (st.state === 'running') {
         if (st.total > 0) {
           var p = Math.min(100, (st.received / st.total) * 100);
@@ -517,25 +672,25 @@ async function runUpdateDownload(newVersion, overlay) {
       clearInterval(poll);
       if (st.state === 'done') {
         if (bar) bar.style.width = '100%';
-        if (txt) txt.textContent = (t('update_saved') || 'Saved') + ': ' + (st.detail || updName);
-        try { localStorage.setItem('thefeed_skip_gh_update_' + normalizeVersion(newVersion), '1'); } catch (e) { }
-        fetch('/api/settings', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ skipUpdateVersion: newVersion })
-        }).catch(function () { });
-        setTimeout(function () {
-          if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
-        }, 1500);
-      } else if (st.state === 'error') {
-        if (txt) {
-          txt.style.color = 'var(--danger,#e53935)';
-          txt.textContent = (t('update_download_failed') || 'Download failed') + ': ' + (st.detail || '');
-        }
+        persistUpdateDownloaded(newVersion);
+        // st.detail is the name the native side actually wrote, which may
+        // differ from updName when the server supplies an ABI-tagged one.
+        showUpdateDone(overlay, st.detail || updName);
+      } else if (st.state === 'canceled') {
+        // User-initiated; the dialog is normally already gone.
+        if (txt) txt.textContent = t('update_canceled');
+      } else {
+        // Anything that is not running or done — including an unrecognised
+        // state — must report, or the bar freezes with no explanation.
+        showFailed(st.detail || '');
       }
     }, 300);
-    document.getElementById('updateCancel').onclick = function () {
+    cancelBtn.onclick = function () {
       clearInterval(poll);
-      if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      // Stop the native transfer too — without this it ran to completion and
+      // toasted "Saved to Downloads/…" after the dialog had gone.
+      try { if (androidBridge.cancelDownload) androidBridge.cancelDownload(); } catch (e) { }
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
     };
     return;
   }
@@ -571,50 +726,29 @@ async function runUpdateDownload(newVersion, overlay) {
         }
       }
       blob = new Blob(chunks, { type: 'application/octet-stream' });
+      chunks.length = 0; // the Blob owns a copy; drop the second one
     } else {
       // Fallback for old WebViews without ReadableStream. No
       // progress — just wait for the whole response, then save.
-      if (txt) txt.textContent = (t('update_downloading_no_progress') || 'Downloading (no progress on this browser)…');
+      if (txt) txt.textContent = t('update_downloading_no_progress');
       if (bar) bar.style.width = '100%';
       blob = await resp.blob();
     }
 
-    if (androidBridge && androidBridge.saveMedia) {
-      // Android WebView ignores <a download> for blob URLs — route
-      // through the native bridge so the file lands in Downloads/.
-      if (txt) txt.textContent = (t('update_saving') || 'Saving to Downloads…');
-      var b64 = await blobToBase64(blob);
-      androidBridge.saveMedia(b64, 'application/octet-stream', filename);
-    } else {
-      var blobURL = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = blobURL;
-      a.download = filename;
-      document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(function () { URL.revokeObjectURL(blobURL); }, 60000);
+    // Both native WebViews ignore <a download> for blob URLs; triggerDownload
+    // picks the bridge and reports whether the save actually landed.
+    if (txt) txt.textContent = t('update_saving');
+    if (!await triggerDownload(blob, filename)) {
+      showFailed('');
+      return;
     }
 
-    if (txt) txt.textContent = (t('update_saved') || 'Saved') + ': ' + filename;
-    try {
-      var sk = 'thefeed_skip_gh_update_' + normalizeVersion(newVersion);
-      localStorage.setItem(sk, '1');
-    } catch (e) { }
-    fetch('/api/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skipUpdateVersion: newVersion })
-    }).catch(function () { });
-
-    setTimeout(function () {
-      if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
-    }, 1500);
+    persistUpdateDownloaded(newVersion);
+    showUpdateDone(overlay, filename);
   } catch (e) {
     if (e && e.name === 'AbortError') return;
-    if (txt) {
-      txt.style.color = 'var(--danger,#e53935)';
-      txt.textContent = (t('update_download_failed') || 'Download failed') + ': ' + (e.message || e);
-    }
-    showToast((t('update_download_failed') || 'Download failed') + ': ' + (e.message || e));
+    showFailed(e.message || e);
+    showToast(t('update_download_failed') + ': ' + (e.message || e));
   }
 }
 

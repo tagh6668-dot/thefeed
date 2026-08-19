@@ -71,7 +71,11 @@ class ThefeedService : Service() {
                 // the kernel pick a high random port.
                 val port = pickPort()
 
-                val s = if (BuildConfig.IS_UNIVERSAL) {
+                // Play updates through the store; the ABI/universal split
+                // below only picks which GitHub asset the updater points at.
+                val s = if (BuildConfig.IS_PLAY_BUILD) {
+                    Mobile.newAndroidPlayServer(dataDir.absolutePath, port.toLong())
+                } else if (BuildConfig.IS_UNIVERSAL) {
                     Mobile.newAndroidUniversalServer(dataDir.absolutePath, port.toLong())
                 } else {
                     Mobile.newAndroidServer(dataDir.absolutePath, port.toLong())

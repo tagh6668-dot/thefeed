@@ -4,6 +4,15 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+  # Manual test builds. Artifacts only — the release job is gated on a tag
+  # ref, so nothing started from here can ever publish a release.
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'What to build (downloadable from this run, never released)'
+        type: choice
+        default: all
+        options: [all, android, desktop, ios, macos]
 
 permissions:
   contents: write
@@ -31,6 +40,7 @@ jobs:
 
   build:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","desktop"]'), inputs.platforms)
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -49,6 +59,10 @@ jobs:
             goarch: arm64
           - goos: windows
             goarch: amd64
+          - goos: windows
+            goarch: '386'
+          - goos: windows
+            goarch: arm64
           - goos: android
             goarch: arm64
           - goos: android
@@ -79,8 +93,16 @@ jobs:
       - name: Generate Windows PE resources
         if: matrix.goos == 'windows'
         run: |
-          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
-          VERSION=${GITHUB_REF_NAME:-dev}
+          # Pinned + explicit arch flags: v1.7.0 defaults -64 and -arm to
+          # true, and a 64-bit .syso in a 386 build fails to link.
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@v1.7.0
+          case "${{ matrix.goarch }}" in
+            386)   ARCHFLAGS="-64=false -arm=false" ;;
+            amd64) ARCHFLAGS="-64 -arm=false" ;;
+            arm64) ARCHFLAGS="-64 -arm" ;;
+            *)     ARCHFLAGS="" ;;
+          esac
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           VER_NUM="${VERSION#v}"
           # Strip any -dirty / -rc / commit suffix so the numeric
           # FixedFileInfo accepts the parse. The StringFileInfo path
@@ -90,13 +112,13 @@ jobs:
           V_MIN=$(echo "$NUM_ONLY" | awk -F. '{print $2+0}')
           V_PATCH=$(echo "$NUM_ONLY" | awk -F. '{print $3+0}')
           for d in cmd/server cmd/client; do
-            (cd "$d" && goversioninfo \
+            (cd "$d" && goversioninfo $ARCHFLAGS \
               -ver-major="$V_MAJ" \
               -ver-minor="$V_MIN" \
               -ver-patch="$V_PATCH" \
               -product-version="$VER_NUM" \
               -file-version="$VER_NUM" \
-              -o resource_windows_amd64.syso \
+              -o resource_windows_${{ matrix.goarch }}.syso \
               versioninfo.json)
           done
 
@@ -107,7 +129,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # Keep symbols on Windows (strip elsewhere): a stripped Go .exe looks
@@ -127,7 +149,7 @@ jobs:
           GOARM: ${{ matrix.goarm || '' }}
           CGO_ENABLED: '0'
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           ext=""
@@ -214,6 +236,7 @@ jobs:
 
   android-apk:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","android"]'), inputs.platforms)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -238,7 +261,7 @@ jobs:
       - name: Build gomobile AAR
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # -s -w drops the symbol table + DWARF (saves ~12 MB per
@@ -280,7 +303,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           if [ ! -x ./gradlew ]; then gradle wrapper --gradle-version 8.10.2; fi
           if [ -f app/keystore.jks ]; then BT=release; TASK=assembleRelease; else BT=debug; TASK=assembleDebug; fi
 
@@ -314,6 +337,7 @@ jobs:
 
   ios-ipa:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","ios"]'), inputs.platforms)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -335,7 +359,7 @@ jobs:
 
       - name: Build Mobile.xcframework
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
@@ -343,7 +367,7 @@ jobs:
 
       - name: Archive (unsigned)
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           MARKETING_VERSION=${VERSION#v}
           BUILD_NUMBER=$(git rev-list --count HEAD)
           xcodebuild \
@@ -362,7 +386,7 @@ jobs:
 
       - name: Pack unsigned IPA
         run: |
-          VERSION=${GITHUB_REF_NAME:-dev}
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           mkdir -p build/Payload
           cp -r build/Thefeed.xcarchive/Products/Applications/Thefeed.app build/Payload/
           (cd build && zip -qry "thefeed-ios-${VERSION}-unsigned.ipa" Payload)
@@ -376,6 +400,7 @@ jobs:
 
   macos-dmg:
     needs: test
+    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","macos"]'), inputs.platforms)
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -396,7 +421,7 @@ jobs:
       # hdiutil are all on PATH.
       - name: Build macOS DMG
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}
         run: |
           make mac-dmg VERSION="${VERSION}"
           ls -lh build/thefeed-macos-*.dmg
@@ -426,6 +451,14 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           append_body: true
           body: |
+            ## Install
+
+            [![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
+            [![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
+
+            Android and iOS install and update themselves through the store.
+            Every other platform downloads from the table below.
+
             ## Downloads
 
             | Platform | Architecture | Download |
@@ -438,6 +471,8 @@ jobs:
             | FreeBSD | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-freebsd-amd64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-freebsd-amd64) |
             | FreeBSD | arm64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-freebsd-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-freebsd-arm64) |
             | Windows | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-windows-amd64.exe) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-windows-amd64.exe) |
+            | Windows | 386 (32-bit) | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-windows-386.exe) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-windows-386.exe) |
+            | Windows | arm64 (Snapdragon / Surface) | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-windows-arm64.exe) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-windows-arm64.exe) |
             | Android | universal (all ABIs, **recommended**) | [thefeed-android-${{ github.ref_name }}-universal.apk - اندروید (یونیورسال، توصیه‌شده)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-universal.apk) |
             | Android | arm64-v8a (modern phones, smaller) | [thefeed-android-${{ github.ref_name }}-arm64-v8a.apk - اندروید (گوشی‌های جدید)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-arm64-v8a.apk) |
             | Android | armeabi-v7a (older 32-bit phones) | [thefeed-android-${{ github.ref_name }}-armeabi-v7a.apk - اندروید (دستگاه‌های قدیمی‌تر)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-armeabi-v7a.apk) |

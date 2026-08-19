@@ -103,6 +103,14 @@ type ProfileList struct {
 	Lang     string `json:"lang,omitempty"`
 	// SkipUpdateVersion is the latest release the user dismissed.
 	SkipUpdateVersion string `json:"skipUpdateVersion,omitempty"`
+	// DownloadedVersion is the latest release saved but not necessarily
+	// installed. Kept apart from SkipUpdateVersion so a download never
+	// silently suppresses the prompt for good.
+	DownloadedVersion string `json:"downloadedVersion,omitempty"`
+	// MigrationVersion is the highest one-time migration applied here. The
+	// frontend owns the list (some touch localStorage) and reports its level;
+	// storing it server-side stops replays when the loopback port changes.
+	MigrationVersion int `json:"migrationVersion,omitempty"`
 	// ResolverBank is the shared pool of DNS resolvers used by all profiles.
 	ResolverBank []string `json:"resolverBank,omitempty"`
 	// ResolverScores stores accumulated performance data for bank resolvers.

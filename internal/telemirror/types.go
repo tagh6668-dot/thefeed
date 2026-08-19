@@ -12,7 +12,8 @@ import (
 	"time"
 )
 
-// DefaultChannels are pinned in the UI; users cannot remove them.
+// DefaultChannels are listed first on a fresh install. Removable — a
+// removal is recorded in the store's Hidden set.
 var DefaultChannels = []string{"VahidOnline", "networkti", "thefeedconfig"}
 
 // Channel describes the public channel header.
@@ -31,9 +32,9 @@ type Media struct {
 	Thumb    string   `json:"thumb,omitempty"`
 	Ratio    float64  `json:"ratio,omitempty"` // width/height; lets the UI reserve the exact box (no scroll jump)
 	Duration string   `json:"duration,omitempty"`
-	Title    string   `json:"title,omitempty"`    // file name / poll question / audio title
+	Title    string   `json:"title,omitempty"` // file name / poll question / audio title
 	Subtitle string   `json:"subtitle,omitempty"`
-	Options  []string `json:"options,omitempty"`  // poll options
+	Options  []string `json:"options,omitempty"` // poll options
 }
 
 type Reaction struct {
@@ -78,7 +79,6 @@ type FetchResult struct {
 // Sentinel errors returned by Store.
 var (
 	ErrEmptyUsername = errors.New("empty username")
-	ErrPinnedChannel = errors.New("pinned channel cannot be removed")
 	// ErrChannelNotFound means the username has no public web preview — it
 	// doesn't exist, was renamed, or is private. The proxy signals this by
 	// redirecting the /s/ request instead of serving the 200 widget.
@@ -111,7 +111,7 @@ func SanitizeUsername(s string) string {
 	return string(out)
 }
 
-// IsDefault reports whether username is one of the pinned defaults.
+// IsDefault reports whether username is one of the bundled defaults.
 func IsDefault(username string) bool {
 	for _, d := range DefaultChannels {
 		if strings.EqualFold(d, username) {

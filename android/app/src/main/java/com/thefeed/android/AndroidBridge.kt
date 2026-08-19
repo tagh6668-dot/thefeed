@@ -241,10 +241,20 @@ class AndroidBridge(private val activity: Activity) {
     // JS starts the transfer and then polls downloadStatus().
 
     private val dlLock = Any()
-    private var dlState = "idle" // idle | running | done | error
+    private var dlState = "idle" // idle | running | done | error | canceled
     private var dlReceived = 0L
     private var dlTotal = 0L
     private var dlDetail = "" // saved name on success, message on error
+
+    // Read by the transfer thread on every buffer, so they must not be cached.
+    @Volatile private var dlCancel = false
+    // Bumped per download. A worker whose generation is stale must not write
+    // state or keep writing bytes — otherwise a cancel-then-retry lets the
+    // abandoned transfer finish and clobber the new one's status.
+    @Volatile private var dlGen = 0
+
+    /** Raised on the transfer thread when the user cancels. */
+    private class DownloadCanceled : java.io.IOException("canceled")
 
     /** Starts a background download of url into Downloads/. Returns false if
      *  it could not be started (storage permission still pending). */
@@ -255,19 +265,38 @@ class AndroidBridge(private val activity: Activity) {
             toast("Storage permission needed — please tap Update again")
             return false
         }
+        var gen = 0
         synchronized(dlLock) {
             if (dlState == "running") return true // already in flight
+            dlCancel = false
+            dlGen++
+            gen = dlGen
             dlState = "running"
             dlReceived = 0L
             dlTotal = 0L
             dlDetail = ""
         }
         val safe = sanitiseFilename(filename)
-        Thread({ runDownload(url, safe) }, "thefeed-download").apply {
+        Thread({ runDownload(url, safe, gen) }, "thefeed-download").apply {
             isDaemon = true
             start()
         }
         return true
+    }
+
+    /** Aborts an in-flight download; the partial file is discarded. Without
+     *  this the transfer ran to completion after the user cancelled. */
+    @JavascriptInterface
+    fun cancelDownload() {
+        synchronized(dlLock) {
+            if (dlState != "running") return
+            // Release the slot now. The worker may be parked in read() until
+            // the 60s timeout; without this a retry would be refused as
+            // "already in flight" and silently start nothing.
+            dlState = "canceled"
+            dlDetail = ""
+        }
+        dlCancel = true
     }
 
     /** Progress for the JS poller: {"state","received","total","detail"}. */
@@ -277,16 +306,30 @@ class AndroidBridge(private val activity: Activity) {
             "\"total\":$dlTotal,\"detail\":\"${jsonEscape(dlDetail)}\"}"
     }
 
-    private fun finishDownload(state: String, detail: String) {
+    /** Ignores writes from a superseded worker. */
+    private fun finishDownload(gen: Int, state: String, detail: String) {
         synchronized(dlLock) {
+            if (gen != dlGen) return
             dlState = state
             dlDetail = detail
         }
     }
 
-    private fun runDownload(url: String, fallbackName: String) {
+    /** Drops a half-written file so Downloads never holds a truncated APK. */
+    private fun discardPartial(resolver: android.content.ContentResolver, target: Uri?, legacy: File?) {
+        if (target != null) {
+            try { resolver.delete(target, null, null) } catch (ignored: Exception) { }
+        }
+        if (legacy != null) {
+            try { legacy.delete() } catch (ignored: Exception) { }
+        }
+    }
+
+    private fun runDownload(url: String, fallbackName: String, gen: Int) {
         val resolver = activity.contentResolver
         var target: Uri? = null
+        var legacy: File? = null // pre-Q has no pending flag; delete by path
+        var safe = fallbackName
         try {
             val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
                 connectTimeout = 30_000
@@ -296,11 +339,11 @@ class AndroidBridge(private val activity: Activity) {
             try {
                 if (conn.responseCode / 100 != 2) throw java.io.IOException("HTTP ${conn.responseCode}")
                 val len = conn.contentLengthLong
-                synchronized(dlLock) { dlTotal = if (len > 0) len else 0L }
+                synchronized(dlLock) { if (gen == dlGen) dlTotal = if (len > 0) len else 0L }
                 // The server names the asset (it encodes the ABI, e.g.
                 // ...-arm64-v8a.apk); fall back to the caller's guess.
                 val header = conn.getHeaderField("X-Download-Filename")
-                val safe = if (header.isNullOrBlank()) fallbackName else sanitiseFilename(header)
+                if (!header.isNullOrBlank()) safe = sanitiseFilename(header)
 
                 val out: java.io.OutputStream
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -318,7 +361,9 @@ class AndroidBridge(private val activity: Activity) {
                     @Suppress("DEPRECATION")
                     val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
                     if (!dir.exists()) dir.mkdirs()
-                    out = FileOutputStream(File(dir, safe))
+                    val f = File(dir, safe)
+                    legacy = f
+                    out = FileOutputStream(f)
                 }
 
                 conn.inputStream.use { input ->
@@ -326,11 +371,12 @@ class AndroidBridge(private val activity: Activity) {
                         val buf = ByteArray(64 * 1024)
                         var got = 0L
                         while (true) {
+                            if (dlCancel || gen != dlGen) throw DownloadCanceled()
                             val n = input.read(buf)
                             if (n < 0) break
                             os.write(buf, 0, n)
                             got += n
-                            synchronized(dlLock) { dlReceived = got }
+                            synchronized(dlLock) { if (gen == dlGen) dlReceived = got }
                         }
                         os.flush()
                     }
@@ -346,15 +392,15 @@ class AndroidBridge(private val activity: Activity) {
                     null, null
                 )
             }
-            finishDownload("done", safe)
+            finishDownload(gen, "done", safe)
             toast("Saved to Downloads/$safe")
+        } catch (e: DownloadCanceled) {
+            discardPartial(resolver, target, legacy)
+            finishDownload(gen, "canceled", "")
         } catch (e: Exception) {
             Log.e(TAG, "startDownload failed", e)
-            // Drop the half-written pending entry so Downloads isn't littered.
-            if (target != null) {
-                try { resolver.delete(target, null, null) } catch (ignored: Exception) { }
-            }
-            finishDownload("error", e.message ?: "download failed")
+            discardPartial(resolver, target, legacy)
+            finishDownload(gen, "error", e.message ?: "download failed")
         }
     }
 

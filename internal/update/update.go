@@ -54,10 +54,27 @@ func stopOnRedirect(req *http.Request, via []*http.Request) error {
 	return http.ErrUseLastResponse
 }
 
+// StoreBuild reports whether this binary ships through an app store, where
+// both Google and Apple forbid an app from updating itself.
+func StoreBuild() bool {
+	return storeBuildFor(runtime.GOOS, os.Getenv("THEFEED_STORE_BUILD"))
+}
+
+// storeBuildFor is StoreBuild's testable core. GOOS=ios is how gomobile builds
+// the App Store framework; the env flag comes from mobile.NewAndroidPlayServer.
+// The macOS .dmg is a separate GOOS=darwin binary and keeps its updater.
+func storeBuildFor(goos, env string) bool {
+	return goos == "ios" || env == "1"
+}
+
 // Check fetches the latest tag and assembles a Status for the running
 // platform.
 func Check(ctx context.Context) (Status, error) {
 	s := Status{Current: version.Version}
+	// Nothing to offer, and returning early keeps a store build off the network.
+	if StoreBuild() {
+		return s, nil
+	}
 	latest, err := fetchLatestTag(ctx, httpClient, LatestReleaseURL)
 	if err != nil {
 		return s, err

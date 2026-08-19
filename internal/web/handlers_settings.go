@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sartoopjj/thefeed/internal/update"
 	"github.com/sartoopjj/thefeed/internal/version"
 )
 
@@ -43,6 +44,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"mirrorNoteOff":      pl.MirrorNoteOff,
 			"profilePicsEnabled": pl.ProfilePicsEnabled,
 			"skipUpdateVersion":  pl.SkipUpdateVersion,
+			"downloadedVersion":  pl.DownloadedVersion,
+			"migrationVersion":   pl.MigrationVersion,
+			// Multi-user deployment: the frontend keeps per-browser state
+			// (seen markers, migration level) local instead of in the shared
+			// profiles.json, and never writes global settings on its own.
+			"shared": s.sharedBackend,
+			// Lets the frontend hide its update entry points.
+			"storeBuild":         update.StoreBuild(),
 			"queryMode":          qm,
 			"rateLimit":          rl,
 			"scatter":            sc,
@@ -64,6 +73,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			MirrorNoteOff      *bool    `json:"mirrorNoteOff"`
 			ProfilePicsEnabled *bool    `json:"profilePicsEnabled"`
 			SkipUpdateVersion  *string  `json:"skipUpdateVersion"`
+			DownloadedVersion  *string  `json:"downloadedVersion"`
+			MigrationVersion   *int     `json:"migrationVersion"`
 			QueryMode          *string  `json:"queryMode"`
 			RateLimit          *float64 `json:"rateLimit"`
 			Scatter            *int     `json:"scatter"`
@@ -114,6 +125,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.SkipUpdateVersion != nil {
 			pl.SkipUpdateVersion = *req.SkipUpdateVersion
+		}
+		if req.DownloadedVersion != nil {
+			pl.DownloadedVersion = *req.DownloadedVersion
+		}
+		// Monotonic: a stale client must never walk the level backwards and
+		// make already-applied migrations run again.
+		if req.MigrationVersion != nil && *req.MigrationVersion > pl.MigrationVersion {
+			pl.MigrationVersion = *req.MigrationVersion
 		}
 		if req.QueryMode != nil && (*req.QueryMode == "single" || *req.QueryMode == "double") {
 			pl.QueryMode = *req.QueryMode

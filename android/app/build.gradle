@@ -44,6 +44,14 @@ android {
         // Drives which release asset the in-app update prompt links to.
         buildConfigField "boolean", "IS_UNIVERSAL",
             project.hasProperty('universalBuild') ? "true" : "false"
+
+        // Disables the in-app updater (see NewAndroidPlayServer). The
+        // 'bundle' check is the safety net for a forgotten -PplayBuild: an
+        // .aab is only ever produced for a store.
+        buildConfigField "boolean", "IS_PLAY_BUILD",
+            (project.hasProperty('playBuild') ||
+             gradle.startParameter.taskNames.any { it.toLowerCase().contains('bundle') })
+                ? "true" : "false"
     }
 
     buildFeatures {

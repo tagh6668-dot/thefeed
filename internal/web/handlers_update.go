@@ -63,6 +63,11 @@ func (s *Server) handleUpdateDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", 405)
 		return
 	}
+	// Defence in depth: an explicit ?asset= would skip the checks below.
+	if update.StoreBuild() {
+		http.Error(w, "in-app updates are disabled in store builds", 403)
+		return
+	}
 	q := r.URL.Query()
 	v := strings.TrimSpace(q.Get("version"))
 	if v == "" {
