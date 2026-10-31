@@ -14,16 +14,22 @@ DNS-based **feed reader and lite messenger** for networks where only DNS gets th
 
 <table align="center">
 <tr>
-<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="Main feed"><br><sub>Main feed</sub></td>
-<td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>Reading a post</sub></td>
-<td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
-<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="Messenger"><br><sub>Messenger</sub></td>
+<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="Feed channels"><br><sub>Feed channels</sub></td>
+<td align="center"><img src="docs/screenshots/feed-channel.jpg" width="170" alt="Reading a channel"><br><sub>Reading a channel</sub></td>
+<td align="center"><img src="docs/screenshots/mirror-list.jpg" width="170" alt="Mirror channels"><br><sub>Mirror channels</sub></td>
+<td align="center"><img src="docs/screenshots/mirror-channel.jpg" width="170" alt="A channel in Mirror"><br><sub>A channel in Mirror</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/screenshots/chat-list.jpg" width="170" alt="Chats"><br><sub>Chats</sub></td>
-<td align="center"><img src="docs/screenshots/scanner.jpg" width="170" alt="Resolver scanner"><br><sub>Resolver scanner</sub></td>
+<td align="center"><img src="docs/screenshots/chat-list.jpg" width="170" alt="thefeed Chat"><br><sub>thefeed Chat</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="thefeed Chat, end-to-end encrypted"><br><sub>thefeed Chat, end-to-end encrypted</sub></td>
 <td align="center"><img src="docs/screenshots/resolver-bank.jpg" width="170" alt="Resolver bank"><br><sub>Resolver bank</sub></td>
 <td align="center"><img src="docs/screenshots/settings.jpg" width="170" alt="Settings"><br><sub>Settings</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screenshots/tel-chats.jpg" width="170" alt="Telegram chats"><br><sub>Telegram chats</sub></td>
+<td align="center"><img src="docs/screenshots/tel-chat.jpg" width="170" alt="Telegram chat"><br><sub>Telegram chat</sub></td>
+<td align="center"><img src="docs/screenshots/tel-channel.jpg" width="170" alt="Telegram channel"><br><sub>Telegram channel</sub></td>
+<td align="center"><img src="docs/screenshots/tel-intro.jpg" width="170" alt="Telegram over DNS"><br><sub>Telegram over DNS</sub></td>
 </tr>
 </table>
 
@@ -45,7 +51,7 @@ Download the client for your platform from the latest release — pick the mirro
 
 Then open **Settings → Configs** and import a config (or paste your domain + passphrase). DNS resolvers are managed in the **Resolver** tab — a shared Bank used by all configs, plus a Scanner to find more.
 
-**Public configs to try:** [@thefeedconfig](https://t.me/thefeedconfig).
+**Project news:** [@networkti](https://t.me/networkti) — the main channel for announcements and releases.
 
 ---
 
@@ -83,7 +89,12 @@ sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts
 
 The script downloads the latest binary, asks for your domain / passphrase / channels / X accounts, asks whether to use Telegram login (recommended: **No** — public channels work without it), and sets up a systemd service. Re-run it any time to **update**.
 
-Other actions (pipe the script to `sudo bash -s -- <flag>`):
+Other actions: put the flag at the end of the same one-liner, after a lone `--`. The `--` is required; without it bash takes the flag as the script's own name (`$0`) and the script never sees it.
+
+```bash
+# e.g. install the newest pre-release
+sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh)" -- --pre
+```
 
 | Flag | Action |
 |------|--------|
@@ -181,6 +192,7 @@ Key flags (also settable via env vars, e.g. `THEFEED_DOMAIN`, `THEFEED_KEY`, `TH
 | `--key` | | Encryption passphrase **(required)** |
 | `--extra-domains` | | Comma-separated extra feed sub-domains (load spread + resilience) |
 | `--chat-domains` | | Enable the [messenger](#messenger) on these sub-domains (separate from feed) |
+| `--mtproto-domains` | | Enable [Telegram over DNS](#telegram-over-dns-beta) on these sub-domains (separate from feed and chat) |
 | `--no-telegram` | `false` | Run without Telegram login (public channels only) |
 | `--api-id` / `--api-hash` / `--phone` | | Telegram credentials (private channels) |
 | `--login-only` | `false` | Authenticate to Telegram, save session, exit |
@@ -189,11 +201,27 @@ Key flags (also settable via env vars, e.g. `THEFEED_DOMAIN`, `THEFEED_KEY`, `TH
 | `--fetch-interval` | `10` | Fetch cycle in minutes (min 3) |
 | `--allow-manage` | `false` | Allow remote send / channel management (leave off unless trusted) |
 | `--padding` | `32` | Max random padding bytes (anti-DPI; 0 = off) |
-| `--x-rss-instances` | `nitter.net,…` | Comma-separated X RSS base URLs |
+| `--x-rss-instances` | `nitter.net,…` | Comma-separated X RSS base URLs — see the warning below |
 | `--dns-media-enabled` | `false` | Serve media over the slow DNS relay |
 | `--github-relay-enabled` | `false` | Serve media over the fast GitHub relay (needs `--github-relay-token` / `-repo`) |
 | `--report` | | Render the terminal dashboard and exit |
 | `--version` | | Show version and exit |
+
+> **⚠ X (Twitter) posts are currently broken.** X content is fetched through
+> Nitter, and the Nitter project has been **archived** — its public instances now
+> answer with "Instance has been rate limited"
+> ([zedeus/nitter#1442](https://github.com/zedeus/nitter/issues/1442)). Until a
+> working source exists, the X section of the feed stops updating. Point
+> `--x-rss-instances` at an instance you know still works, or leave X unused.
+> **Server-side only** — Telegram channels, Mirror, the messenger and every
+> client are unaffected.
+>
+> **Self-hosting Nitter still works.** The archived code runs fine: clone the
+> repo, create session tokens from a real X account (scripts and instructions
+> are in the Nitter repo/wiki), run it with Docker + Redis, and point
+> `--x-rss-instances` at it (e.g. `http://127.0.0.1:8080` — only the thefeed
+> server reads it, so it needs no domain or TLS). Keep the instance **private**:
+> the project was archived after legal pressure aimed at public instances.
 
 Full media-relay flags are in [How it works → Media relays](#media-relays).
 
@@ -210,9 +238,39 @@ thefeed-server ... --chat-domains c.example.com     # or THEFEED_CHAT_DOMAINS=c.
 - **End-to-end encrypted** — only the two users can read a message; the server stores opaque blobs and verifies senders without reading anything. Contact names never leave the device.
 - **Identity** — the client generates a recovery code locally; your address is 20 characters derived from it. Share the address out-of-band; the same recovery code works on any server.
 - **Fail-closed** — chat activates only when the profile pins the server key (`sk=`) and the server's signed chat capability verifies. A signed bit in the feed metadata lets a keyless client tell you *"this server has a messenger — re-import the config with its key"* instead of failing silently.
-- **Abuse limits** (advertised to clients): `--chat-send-per-hour` (30), `--chat-inbox-cap` (50), `--chat-per-pair-cap` (10), `--chat-max-msg-bytes` (500); undelivered messages expire after `--chat-ttl-hours` (72). `--chat-enabled=false` keeps the domains but advertises chat as disabled.
+- **Abuse limits** (advertised to clients): `--chat-send-per-hour` (30), `--chat-inbox-cap` (50), `--chat-per-pair-cap` (10), `--chat-max-msg-bytes` (500); undelivered messages expire after `--chat-ttl-hours` (72). `--chat-enabled=false` keeps the domains but advertises chat as disabled. The install script asks for these when the messenger is on, and keeps values you set by hand when it updates.
 
 In the client, open **Chat** from the bottom nav. ✓ = stored on the server, ✓✓ = picked up by the recipient; matching safety emojis on both devices confirm the conversation is secure.
+
+### AI assistant bridge (Hermes)
+
+[`integrations/hermes/`](integrations/hermes/) lets you chat with a [Hermes](https://github.com/NousResearch/hermes-agent) AI agent over the messenger, so it stays reachable when the internet is cut. It is a Hermes skill: give your agent the folder and it sets itself up. It only ever reads messages from your own address. Strangers who write to it are never answered or shown to the model.
+
+Please run it against **your own thefeed server**: a bridge polls around the clock, and the shared default servers built into the app are meant for people, not bots. A default config still works if you have no server.
+
+---
+
+## Telegram over DNS (beta)
+
+An **optional** second use of the same tunnel: sign in to your **own Telegram account** and use it through the server — no VPN, no proxy app. It behaves like Telegram through an MTProto proxy, except the transport is DNS, so it keeps working when a country's internet has been cut back to domestic traffic. Enable it with dedicated sub-domains (with a matching [NS record](#1-dns-records), separate from the feed and chat domains):
+
+```bash
+thefeed-server ... --mtproto-domains m.example.com   # or THEFEED_MTPROTO_DOMAINS=m.example.com
+```
+
+- **Telegram's own protocol, unchanged** — MTProto is wrapped in ordinary DNS queries; the server unwraps them and relays the bytes to Telegram's data centres. The auth key is generated on the client and never leaves it, so the relay only moves sealed packets and cannot read them.
+- **It needs a server that implements this** — an ordinary MTProto proxy cannot carry MTProto over DNS. thefeed's server can, and a config whose server advertises the tunnel (a signed bit in the feed metadata) is the one the client offers in its picker.
+- **What works**: your conversations, groups, channels and bots; sending and reading text; ✓/✓✓ read marks; sender names in groups; search over what is loaded; starting a chat by @username; leaving or clearing one; unread counts.
+- **What does not**: downloading photos, files, stickers or voice; calls; sending media; forum topics (shown merged); pressing a bot's callback buttons (they are listed, and URL buttons work). A message with an attachment shows **what** it was — photo, file + name and size, sticker, voice — so nothing is silently missing.
+- **Text only, on purpose.** Every byte is a DNS query, so the client fetches only what is new and keeps what it already has.
+- **Speed comes from three settings** — queries per second, timeout, and resolvers per query. The first also caps how many queries are in flight at once, so the send window follows the configured rate and never grows without bound. A message's own framing says how many queries it needs, so they go out together instead of one per round trip, and the relay reassembles them in any order.
+- **The relay cannot police content** — the stream is encrypted end to end with Telegram, so the server sees opaque bytes and cannot tell a message from a file. What it *can* limit is volume: `--mtproto-down-kb-per-min` (512 KB/min per tunnel by default) throttles any client that tries to pull files through it, and `--mtproto-max-tunnels` bounds how many run at once.
+- **Notifications**: while the app is open it rings and notifies. For a backgrounded app, turn on background checking in the ⋮ menu — it costs queries around the clock, so it is off by default.
+- **It needs good resolvers.** The Feed and the Messenger hold up far better on very slow resolvers; this is the most bandwidth-hungry part of the app.
+- **App credentials** — official release builds carry a shared default pair, so you can sign in without one; the tab says when it is in use. It is better to register your own `api_id` / `api_hash` at [my.telegram.org](https://my.telegram.org) and enter it there: if Telegram restricts the shared pair, everyone signed in with it may be signed out. Builds you make yourself have no default unless you pass one in (`TEL_LDFLAG`, see `cmd/telseal`).
+- **Limits**: `--mtproto-enabled`, `--mtproto-max-tunnels`, `--mtproto-idle-minutes`, `--mtproto-buffer-kb`, `--mtproto-dial-seconds`.
+
+In the client, open **Telegram** from the bottom nav. The ⋮ menu is on every screen (config picker, credentials, log, sign out); ✓ / ✓✓ mean sent and read; the ring in the title bar counts down to the next automatic check, and every operation reports its progress and the number of queries it has spent.
 
 ---
 
@@ -308,6 +366,14 @@ but they contend on the same branch and share the same size budget.
 - **Encryption passphrase (`--key`)** — required on both server and client. Anyone with it can read all channel messages (including private channels); share it only with people you trust.
 - **Remote management (`--allow-manage`)** — when enabled, anyone with the passphrase can, from the client: **send messages through the server's Telegram account** (into channels / private chats — this is Telegram sending via the operator's logged-in account, and is *completely separate* from the end-to-end [messenger](#messenger)), and **change the feed's channel list** (add or remove the channels shown in the feed). Off by default; enable only on trusted servers.
 - **Client web password (`--password`)** — HTTP Basic Auth on the web UI. Local protection only; it does **not** affect DNS-level access.
+
+**Reaching the client's web UI by a name of your own.** The client answers only at an address the machine is actually reachable at — loopback, the address it was bound to, and the names you list. Anything else is refused with a `403` that names the setting, because a page on the internet that re-resolves its own domain to `127.0.0.1` would otherwise be same-origin with the UI and could read your passphrase. If you serve the client through nginx or under a custom hostname, list it:
+
+```bash
+THEFEED_EXTRA_HOSTS=feed.example.com,feed.home.lan
+```
+
+On **Android and iOS** you do not set `--password`: the app generates one itself each launch and hands it only to its own WebView, so other apps on the phone get a `401` even while the app sits locked. Loopback is not private on a phone. Nothing to configure. On **Android**, where the device can have a passcode, that passcode also wraps the Telegram session and message-cache key, so those files are useless without it.
 
 **Properties:** end-to-end AES-256 in both directions · random padding defeats size analysis · each query independent (no wire session state) · writes gated by `--allow-manage` · Telegram 2FA prompted interactively (never stored in args) · session file `0600`.
 

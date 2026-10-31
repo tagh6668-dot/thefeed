@@ -16,7 +16,10 @@
 definitions:
   # Pinned Go toolchain (must match go.mod). Codemagic mac machines are
   # Apple-silicon, so we fetch the darwin-arm64 tarball.
-  go_version: &go_version "1.26.1"
+  # Keep ≥ 1.26.9: earlier 1.26.x patches have a Go runtime bug that crashes
+  # 32-bit ARM Android 8–10 devices at startup (fixed upstream in the 1.26.9
+  # runtime). The Play AAB's armeabi-v7a split hit this on MIUI/Android 9.
+  go_version: &go_version "1.26.9"
 
   scripts:
     - &derive_version
@@ -42,7 +45,7 @@ definitions:
       name: Install Go + gomobile
       script: |
         set -e
-        GO_VERSION="1.26.1"
+        GO_VERSION="1.26.9"  # keep in sync with go_version above (Android 32-bit crash fix)
         curl -fsSL "https://go.dev/dl/go${GO_VERSION}.darwin-arm64.tar.gz" -o /tmp/go.tgz
         sudo rm -rf /usr/local/go
         sudo tar -C /usr/local -xzf /tmp/go.tgz
@@ -71,6 +74,10 @@ workflows:
     integrations:
       app_store_connect: "CodeMagic API Key"
     environment:
+      # Same group as Android: it also holds TEL_API_ID / TEL_API_HASH,
+      # the bundled Telegram app credentials (sealed in by cmd/telseal).
+      groups:
+        - google_credentials
       xcode: latest
       ios_signing:
         # Codemagic auto-creates/fetches the distribution certificate and
@@ -98,8 +105,10 @@ workflows:
           go mod tidy
           COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=v${APP_MARKETING_VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
-          gomobile bind -iosversion=13.0 -target=ios,iossimulator -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
+          TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
+          LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=v${APP_MARKETING_VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} ${TEL_LDFLAG}"
+          # Device slice only; see the same step in .github/workflows/build.yml.
+          gomobile bind -iosversion=15.0 -target=ios/arm64 -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
       - name: Set up provisioning profiles
         script: xcode-project use-profiles
       - name: Build signed IPA
@@ -168,10 +177,10 @@ workflows:
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           # -s -w strips symbols (~12 MB/ABI); max-page-size=16384 keeps the
           # .so loadable on Android 15+ 16 KB-page devices.
-          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=v${APP_MARKETING_VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384"
+          TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
+          LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=v${APP_MARKETING_VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384 ${TEL_LDFLAG}"
           mkdir -p android/app/libs
-          gomobile bind -target=android/arm,android/arm64,android/386,android/amd64 -androidapi 24 \
-            -ldflags="${LDFLAGS}" -o android/app/libs/mobile.aar ./mobile
+          bash scripts/gomobile-android-aar.sh android/app/libs/mobile.aar "${LDFLAGS}"
       - name: Wire signing keystore
         script: |
           set -e
@@ -192,7 +201,7 @@ workflows:
           if [ -z "$LATEST" ]; then VC=$BUILD_NUMBER; else VC=$(($LATEST + 1)); fi
           echo "versionCode = $VC"
           cd android
-          [ -x ./gradlew ] || gradle wrapper --gradle-version 8.10.2
+          [ -x ./gradlew ] || gradle wrapper --gradle-version 8.11.1
           # -PplayBuild disables the in-app updater (Play forbids an app
           # distributed through the store from updating itself). The bundle
           # task alone already implies it in build.gradle; passing it

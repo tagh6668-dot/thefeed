@@ -32,7 +32,11 @@ var (
 	ErrChatNoServerKey    = errors.New("chat requires a pinned server key (sk)")
 	ErrChatDisabled       = errors.New("chat not enabled on this server")
 	ErrChatServerDisabled = errors.New("chat is turned off by this server")
-	ErrChatUnverified     = errors.New("chat info signature missing or invalid")
+	// ErrChatNoResolvers means there is no healthy DNS resolver to send over.
+	// A sentinel so the UI can say the link is down, rather than reporting the
+	// catch-all "something went wrong" for the one failure a user can act on.
+	ErrChatNoResolvers = errors.New("chat: no active resolvers")
+	ErrChatUnverified  = errors.New("chat info signature missing or invalid")
 	// ErrChatVersion means the server speaks a chat protocol this client can't
 	// (e.g. an old server still on the previous wire) — a stable mismatch, so it
 	// is backed off long and never retried in a tight loop.
@@ -121,6 +125,19 @@ type ChatIncoming struct {
 	From [protocol.AddressSize]byte
 	Seq  uint32
 	Text string
+	// Undecryptable marks an envelope that will NEVER open: malformed, or
+	// sealed to a key that is not ours. It is reported rather than silently
+	// skipped so the caller can acknowledge it and free the inbox slot.
+	//
+	// Skipping them quietly is a denial of service: identities are free, so a
+	// handful of throwaway senders fill a victim's inbox with ciphertext
+	// nobody can read, every real sender then gets InboxFull, and it all sits
+	// there for the full 72-hour TTL because nothing ever acknowledges it.
+	//
+	// A TRANSIENT failure (a fetch that timed out, a sender key we could not
+	// look up) is NOT this: those are held back, because acknowledging a
+	// later seq would free an earlier one we never actually read.
+	Undecryptable bool
 }
 
 // ChatSendResult reports a committed send.
@@ -171,8 +188,10 @@ type ChatClient struct {
 	// re-handshakes. Spacing handshakes by chatRehandshakeMinGap caps that
 	// amplification while still letting a genuine reboot/expiry recover.
 	lastHandshake time.Time
-	// OnHandshake, if set, reports handshake cell progress (done, total).
-	OnHandshake ChatProgress
+	// onHandshake, if set, reports handshake cell progress (done, total). Set
+	// it with SetOnHandshake: polls run in parallel, so the field is read from
+	// one goroutine while another is assigning it.
+	onHandshake ChatProgress
 	// budget is the per-cell op-plaintext budget B (RFC §8.2): smaller = shorter
 	// queries, more of them. The cell is self-describing by length, so the server
 	// needs no negotiation; the value is clamped to [ChatCellPlainMin, Max].
@@ -183,8 +202,8 @@ const (
 	chatInfoMaxAge      = 1 * time.Hour
 	chatControlAttempts = 6
 	// chatProbeAttempts: ChatInfo fetch retries; high to ride out a flaky network.
-	chatProbeAttempts = 10
-	chatCellAttempts  = 3
+	chatProbeAttempts   = 10
+	chatCellAttempts    = 3
 	chatMaxUploadRounds = 20
 	chatMaxFinRounds    = 6
 	chatMaxRestarts     = 3
@@ -222,6 +241,21 @@ func (c *ChatClient) chunkSize() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.budget - 2
+}
+
+// SetOnHandshake sets the handshake-progress callback. Guarded: parallel polls
+// read it while the UI re-points it at a new progress sink.
+func (c *ChatClient) SetOnHandshake(p ChatProgress) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.onHandshake = p
+}
+
+// onHandshakeFunc returns the current handshake-progress callback, or nil.
+func (c *ChatClient) onHandshakeFunc() ChatProgress {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.onHandshake
 }
 
 // SetBudget sets the per-cell op-plaintext budget B (clamped to the valid
@@ -277,6 +311,14 @@ func (c *ChatClient) updateQuota(remaining uint16, reset uint32) {
 	c.mu.Unlock()
 }
 
+// CachedInfo returns the verified ChatInfo this client already holds, or nil.
+// Never a round trip.
+func (c *ChatClient) CachedInfo() *protocol.ChatInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.info
+}
+
 // EnsureInfo fetches and verifies the ChatInfo capability payload once (and
 // re-fetches after expiry or when marked stale). Fail-closed: chat requires a
 // pinned sk and a VERIFIED signature.
@@ -296,16 +338,10 @@ func (c *ChatClient) EnsureInfo(ctx context.Context) (*protocol.ChatInfo, error)
 
 	block0, err := c.f.fetchBlockAttempts(ctx, protocol.ChatInfoChannel, 0, chatProbeAttempts)
 	if err != nil {
-		if seenBefore {
-			return nil, ErrChatUnreachable
-		}
-		return nil, ErrChatDisabled
+		return nil, ErrChatUnreachable
 	}
 	if len(block0) < 2 {
-		if seenBefore {
-			return nil, ErrChatUnreachable
-		}
-		return nil, ErrChatDisabled
+		return nil, ErrChatUnreachable
 	}
 	totalBlocks := int(binary.BigEndian.Uint16(block0))
 	if totalBlocks < 1 {
@@ -446,7 +482,11 @@ func (c *ChatClient) ensureSession(ctx context.Context, info *protocol.ChatInfo)
 	c.mu.Lock()
 	c.lastHandshake = time.Now()
 	c.mu.Unlock()
-	for attempt := 0; attempt < 2; attempt++ {
+	// Three rounds, because onboarding legitimately needs two: Auth says
+	// UnknownSender, Register publishes the record, and the Auth that follows
+	// is a round of its own. Leaving it at two spent the whole budget on
+	// registering and had no round left for a clock-skew retry.
+	for attempt := 0; attempt < 3; attempt++ {
 		ref, ks, status, srvUnix, err := c.handshake(ctx, info, protocol.ChatHandshakeAuth)
 		if err != nil {
 			return err
@@ -462,12 +502,22 @@ func (c *ChatClient) ensureSession(ctx context.Context, info *protocol.ChatInfo)
 				return rerr
 			}
 			c.updateClock(rsu)
-			if rst != protocol.ChatStatusOK {
+			switch rst {
+			case protocol.ChatStatusRegistered:
+				// The record is published; the session comes from Auth, which
+				// is the whole point -- a replayed record cannot produce one.
+				// Loop round and authenticate, now that the account exists.
+				c.f.log("[chat] registered %s…", ChatAddressString(c.id.Addr)[:8])
+				continue
+			case protocol.ChatStatusOK:
+				// A server from before that change still answers with a
+				// session. Accepted so this client keeps working against one.
+				c.f.log("[chat] registered %s… (server issued a session)", ChatAddressString(c.id.Addr)[:8])
+				c.setSession(rref, rks)
+				return nil
+			default:
 				return &ChatStatusError{Status: rst}
 			}
-			c.f.log("[chat] registered %s…", ChatAddressString(c.id.Addr)[:8])
-			c.setSession(rref, rks)
-			return nil
 		case protocol.ChatStatusBadAuth:
 			// Clock skew — srvUnix corrected our offset; retry auth once.
 			continue
@@ -557,8 +607,8 @@ func (c *ChatClient) handshake(ctx context.Context, info *protocol.ChatInfo, kin
 			if data, de := c.sendQuery(ctx, qname); de == nil {
 				last = data
 			}
-			if c.OnHandshake != nil {
-				c.OnHandshake(i+1, n)
+			if onHS := c.onHandshakeFunc(); onHS != nil {
+				onHS(i+1, n)
 			}
 		}
 		if st, body, oe := protocol.OpenChatResponse(ks, tag, protocol.ChatBootstrapCounter(), last); oe == nil {
@@ -582,7 +632,7 @@ func (c *ChatClient) sendQuery(ctx context.Context, qname string) ([]byte, error
 	}
 	picked := c.f.pickWeightedResolvers(c.f.scatter)
 	if len(picked) == 0 {
-		return nil, fmt.Errorf("chat: no active resolvers")
+		return nil, ErrChatNoResolvers
 	}
 	if c.f.debug {
 		c.f.log("[chat] query qname=%s resolvers=[%s]", qname, strings.Join(picked, ", "))
@@ -1149,15 +1199,18 @@ func (c *ChatClient) FetchInbox(ctx context.Context, onQuery ChatProgress) ([]Ch
 		m, err := protocol.ParseChatMessage(env)
 		if err != nil {
 			c.f.log("[chat] envelope %x seq %d: %v", e.src[:4], e.seq, err)
+			out = append(out, ChatIncoming{From: e.src, Seq: e.seq, Undecryptable: true})
 			continue
 		}
 		contentKey, err := protocol.ChatContentKey(c.id.Enc, rec.EncPub, e.src, c.id.Addr, m.Seq)
 		if err != nil {
+			out = append(out, ChatIncoming{From: e.src, Seq: m.Seq, Undecryptable: true})
 			continue
 		}
 		text, err := m.Open(contentKey)
 		if err != nil {
 			c.f.log("[chat] decrypt %x seq %d: %v", e.src[:4], e.seq, err)
+			out = append(out, ChatIncoming{From: e.src, Seq: m.Seq, Undecryptable: true})
 			continue
 		}
 		out = append(out, ChatIncoming{From: e.src, Seq: m.Seq, Text: text})
@@ -1208,10 +1261,9 @@ func (c *ChatClient) Ack(ctx context.Context, peer [protocol.AddressSize]byte, u
 	return nil
 }
 
-// PeerStatus returns (last_accepted ✓, last_delivered ✓✓) for own messages
-// sent to peer.
-// PeerStatus returns ✓/✓✓ counters, serialized with opSeq so it cannot swap
-// the session out from under an in-progress upload.
+// PeerStatus returns (last_accepted ✓, last_delivered ✓✓) for our own
+// messages sent to peer. Serialized with opSeq so it cannot swap the session
+// out from under an in-progress upload.
 func (c *ChatClient) PeerStatus(ctx context.Context, peer [protocol.AddressSize]byte) (accepted, delivered uint32, err error) {
 	c.opSeq.Lock()
 	defer c.opSeq.Unlock()

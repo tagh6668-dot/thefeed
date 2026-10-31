@@ -7,6 +7,7 @@ yellow='\033[0;33m'
 plain='\033[0m'
 
 GITHUB_REPO="sartoopjj/thefeed"
+INSTALL_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh"
 GITLAB_REPO="sartoopjj/thefeed"
 # URL-encoded GitLab project path for /api/v4/projects/:id calls.
 GITLAB_REPO_ENC="sartoopjj%2Fthefeed"
@@ -177,8 +178,7 @@ list_versions() {
         printf "  %-15s %s\n" "$tag" "$label"
     done < <(_split_releases)
     echo ""
-    echo -e "Install one with: ${blue}sudo bash install.sh --version <tag>${plain}"
-    echo -e "Or:               ${blue}sudo bash install.sh <tag>${plain} (positional)"
+    echo -e "Install one with: ${blue}curl -Ls ${INSTALL_URL} | sudo bash -s -- --version <tag>${plain}"
 }
 
 download_binary() {
@@ -303,13 +303,80 @@ env_get() {
     grep "^${key}=" "$DATA_DIR/thefeed.env" 2>/dev/null | head -1 | cut -d= -f2-
 }
 
+# Helper: append every KEY=value line of the previous env file ($1) whose key
+# the freshly written file does not have. The file is rewritten from a fixed
+# list, so anything set by hand would otherwise be dropped on update.
+env_carry_over() {
+    local old="$1" line key kept=""
+    [[ -z "$old" ]] && return 0
+    while IFS= read -r line; do
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
+        key="${BASH_REMATCH[1]}"
+        grep -q "^${key}=" "$DATA_DIR/thefeed.env" 2>/dev/null && continue
+        printf '%s\n' "$line" >> "$DATA_DIR/thefeed.env"
+        kept="${kept} ${key}"
+    done <<< "$old"
+    [[ -n "$kept" ]] && echo -e "${yellow}Kept from the previous config:${kept}${plain}"
+    return 0
+}
+
+# Messenger limits: "KEY|question|default", defaults as in cmd/server.
+CHAT_LIMITS=(
+    "THEFEED_CHAT_SEND_PER_HOUR|Messages each user can send per hour|30"
+    "THEFEED_CHAT_INBOX_CAP|Undelivered messages kept per inbox|50"
+    "THEFEED_CHAT_PER_PAIR_CAP|Undelivered messages one sender can leave for one user|10"
+    "THEFEED_CHAT_MAX_MSG_BYTES|Max message size in bytes|500"
+    "THEFEED_CHAT_TTL_HOURS|Hours before an undelivered message expires|72"
+    "THEFEED_CHAT_ACCOUNT_TTL_DAYS|Delete accounts idle this many days (0 = never)|0"
+    "THEFEED_CHAT_MAX_ACCOUNTS|Max stored accounts (0 = unlimited)|0"
+)
+
+# Asks for each messenger limit, showing the current value, and stores the
+# answers in chat_limit_values ("KEY=value" lines) for setup_config to write.
+ask_chat_limits() {
+    local entry key question def cur in
+    chat_limit_values=""
+    echo -e "${yellow}Messenger limits (per user):${plain}"
+    for entry in "${CHAT_LIMITS[@]}"; do
+        IFS='|' read -r key question def <<< "$entry"
+        cur=$(env_get "$key"); cur="${cur:-$def}"
+        echo -e "  ${key#THEFEED_CHAT_} = ${cur}"
+    done
+    read -rp "Change messenger limits? [y/N]: " in
+    [[ "$in" == "y" || "$in" == "Y" ]] || return 0
+    for entry in "${CHAT_LIMITS[@]}"; do
+        IFS='|' read -r key question def <<< "$entry"
+        cur=$(env_get "$key"); cur="${cur:-$def}"
+        while true; do
+            read -rp "  ${question} [${cur}]: " in
+            in="${in:-$cur}"
+            # The server ignores 0 where the default is not 0.
+            if [[ "$in" =~ ^[0-9]+$ ]] && { [[ "$def" == 0 ]] || [[ "$in" -gt 0 ]]; }; then break; fi
+            if [[ "$def" == 0 ]]; then echo -e "  ${red}Must be a whole number${plain}"; else echo -e "  ${red}Must be at least 1${plain}"; fi
+        done
+        chat_limit_values="${chat_limit_values}${key}=${in}"$'\n'
+    done
+}
+
+# Finishes the env file written by setup_config: applies the messenger limits
+# that were asked for, then carries over whatever else the old file had.
+env_finish() {
+    local old="$1" line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && env_set "${line%%=*}" "${line#*=}"
+    done <<< "$chat_limit_values"
+    env_carry_over "$old"
+    chmod 600 "$DATA_DIR/thefeed.env"
+}
+
 setup_config() {
     mkdir -p "$DATA_DIR"
 
-    local is_update=false cur_allow_manage=""
+    local is_update=false cur_allow_manage="" old_env="" chat_limit_values=""
     if [[ -f "$DATA_DIR/thefeed.env" ]]; then
         is_update=true
         cur_allow_manage=$(env_get THEFEED_ALLOW_MANAGE)
+        old_env=$(cat "$DATA_DIR/thefeed.env")
     fi
 
     # --- Channels ---
@@ -363,7 +430,7 @@ setup_config() {
     echo -e "${green}═══════════════════════════════════════${plain}"
     echo ""
 
-    local cur_domain cur_key cur_limit cur_listen cur_fetch_interval cur_extra_domains
+    local cur_domain cur_key cur_limit cur_listen cur_fetch_interval cur_extra_domains cur_x_rss
     if $is_update; then
         cur_domain=$(env_get THEFEED_DOMAIN)
         cur_key=$(env_get THEFEED_KEY)
@@ -371,7 +438,13 @@ setup_config() {
         cur_listen=$(env_get THEFEED_LISTEN)
         cur_fetch_interval=$(env_get THEFEED_FETCH_INTERVAL)
         cur_extra_domains=$(env_get THEFEED_EXTRA_DOMAINS)
+        # Carried over like every other setting. This one used to be written
+        # back hard-coded, so each update -- which is how the script is
+        # normally re-run -- silently threw away whatever list the operator
+        # had put there.
+        cur_x_rss=$(env_get THEFEED_X_RSS_INSTANCES)
     fi
+    local x_rss_instances="${cur_x_rss:-https://nitter.net,http://nitter.net}"
 
     local domain=""
     while true; do
@@ -439,6 +512,51 @@ setup_config() {
             if [[ -n "$chat_domains" ]]; then chat_domains="${chat_domains},${cdom}"; else chat_domains="$cdom"; fi
             echo -e "  ${green}Added ${cdom}${plain}"
         done
+    fi
+    [[ -n "$chat_domains" ]] && ask_chat_limits
+
+    # Telegram proxy: carries real MTProto to Telegram's own data centres over
+    # DNS, on its own dedicated sub-domain(s) — never on the feed or messenger
+    # domains. Stored in THEFEED_MTPROTO_DOMAINS; empty = proxy off.
+    local cur_mtp_domains=""
+    $is_update && cur_mtp_domains=$(env_get THEFEED_MTPROTO_DOMAINS)
+    local mtproto_domains="$cur_mtp_domains"
+    local do_collect_md=false
+    echo ""
+    if [[ -n "$cur_mtp_domains" ]]; then
+        echo -e "${yellow}Telegram proxy domains: ${cur_mtp_domains}${plain}"
+        read -rp "Change Telegram proxy domains? [y/N]: " change_md
+        [[ "$change_md" == "y" || "$change_md" == "Y" ]] && do_collect_md=true
+    else
+        echo -e "${yellow}The Telegram proxy lets clients reach Telegram itself through this"
+        echo -e "server when only domestic traffic works. It needs dedicated sub-domain(s)"
+        echo -e "and makes outbound TCP connections to Telegram's data centres.${plain}"
+        read -rp "Enable the Telegram proxy? [y/N]: " add_md
+        [[ "$add_md" == "y" || "$add_md" == "Y" ]] && do_collect_md=true
+    fi
+    if $do_collect_md; then
+        echo -e "${yellow}Enter each Telegram proxy sub-domain (must differ from the feed and messenger domains; empty line to finish):${plain}"
+        mtproto_domains=""
+        while true; do
+            read -rp "  Domain: " mdom
+            mdom="${mdom//[[:space:]]/}"
+            [[ -z "$mdom" ]] && break
+            if [[ "$mdom" == "$domain" ]]; then echo -e "  ${red}Must differ from the main feed domain${plain}"; continue; fi
+            if [[ ",${chat_domains}," == *",${mdom},"* ]]; then echo -e "  ${red}Already a messenger domain${plain}"; continue; fi
+            if [[ -n "$mtproto_domains" ]]; then mtproto_domains="${mtproto_domains},${mdom}"; else mtproto_domains="$mdom"; fi
+            echo -e "  ${green}Added ${mdom}${plain}"
+        done
+    fi
+
+    # Only asked when the proxy is on: a cap matters because each active tunnel
+    # holds a socket to Telegram plus its buffers.
+    local cur_mtp_max=""
+    $is_update && cur_mtp_max=$(env_get THEFEED_MTPROTO_MAX_TUNNELS)
+    local mtproto_max_tunnels="${cur_mtp_max:-0}"
+    if [[ -n "$mtproto_domains" ]]; then
+        read -rp "Max concurrent Telegram proxy users (0 = uncapped) [${cur_mtp_max:-0}]: " mtproto_max_tunnels
+        mtproto_max_tunnels="${mtproto_max_tunnels:-${cur_mtp_max:-0}}"
+        [[ "$mtproto_max_tunnels" =~ ^[0-9]+$ ]] || mtproto_max_tunnels=0
     fi
 
     local passkey=""
@@ -612,10 +730,12 @@ setup_config() {
 THEFEED_DOMAIN=${domain}
 THEFEED_EXTRA_DOMAINS=${extra_domains}
 THEFEED_CHAT_DOMAINS=${chat_domains}
+THEFEED_MTPROTO_DOMAINS=${mtproto_domains}
+THEFEED_MTPROTO_MAX_TUNNELS=${mtproto_max_tunnels}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}
-THEFEED_X_RSS_INSTANCES=https://nitter.net,http://nitter.net
+THEFEED_X_RSS_INSTANCES=${x_rss_instances}
 TELEGRAM_API_ID=${api_id}
 TELEGRAM_API_HASH=${api_hash}
 TELEGRAM_PHONE=${phone}
@@ -633,7 +753,7 @@ THEFEED_GITHUB_RELAY_BRANCH=${gh_branch}
 THEFEED_GITHUB_RELAY_MAX_SIZE_KB=${gh_max_size}
 THEFEED_GITHUB_RELAY_TTL_MIN=${gh_ttl}
 ENVEOF
-        chmod 600 "$DATA_DIR/thefeed.env"
+        env_finish "$old_env"
         echo -e "${green}Config saved to ${DATA_DIR}/thefeed.env${plain}"
         return 0
     fi
@@ -689,10 +809,12 @@ ENVEOF
 THEFEED_DOMAIN=${domain}
 THEFEED_EXTRA_DOMAINS=${extra_domains}
 THEFEED_CHAT_DOMAINS=${chat_domains}
+THEFEED_MTPROTO_DOMAINS=${mtproto_domains}
+THEFEED_MTPROTO_MAX_TUNNELS=${mtproto_max_tunnels}
 THEFEED_KEY=${passkey}
 THEFEED_ALLOW_MANAGE=${allow_manage}
 THEFEED_MSG_LIMIT=${msg_limit}
-THEFEED_X_RSS_INSTANCES=https://nitter.net,http://nitter.net
+THEFEED_X_RSS_INSTANCES=${x_rss_instances}
 TELEGRAM_API_ID=${api_id}
 TELEGRAM_API_HASH=${api_hash}
 TELEGRAM_PHONE=${phone}
@@ -709,7 +831,7 @@ THEFEED_GITHUB_RELAY_BRANCH=${gh_branch}
 THEFEED_GITHUB_RELAY_MAX_SIZE_KB=${gh_max_size}
 THEFEED_GITHUB_RELAY_TTL_MIN=${gh_ttl}
 ENVEOF
-    chmod 600 "$DATA_DIR/thefeed.env"
+    env_finish "$old_env"
     echo -e "${green}Config saved to ${DATA_DIR}/thefeed.env${plain}"
     chmod 700 "$DATA_DIR"
 }
@@ -744,7 +866,7 @@ telegram_login() {
     if [[ $rc -ne 0 ]]; then
         echo -e "${red}Telegram login failed${plain}"
         echo -e "${yellow}You can retry later with:${plain}"
-        echo -e "  sudo bash install.sh --login"
+        echo -e "  ${blue}curl -Ls ${INSTALL_URL} | sudo bash -s -- --login${plain}"
         [[ $was_active -eq 1 ]] && systemctl start thefeed-server
         return 1
     fi
@@ -846,16 +968,15 @@ show_usage() {
     echo -e "│  ${blue}Session:${plain}  ${DATA_DIR}/session.json               │"
     echo -e "│  ${blue}Binary:${plain}   ${INSTALL_DIR}/thefeed-server                  │"
     echo -e "│                                                         │"
-    echo -e "│  ${yellow}Quick commands (copy-paste):${plain}                           │"
-    echo -e "│  Update:    ${blue}curl -Ls URL | sudo bash${plain}                    │"
-    echo -e "│  Uninstall: ${blue}curl -Ls URL | sudo bash -s -- --uninstall${plain}  │"
-    echo -e "│  Re-login:  ${blue}curl -Ls URL | sudo bash -s -- --login${plain}      │"
-    echo -e "│  Config:    ${blue}curl -Ls URL | sudo bash -s -- --config${plain}     │"
-    echo -e "│                                                         │"
     echo -e "│  ${red}⚠ NEVER share your passphrase publicly!${plain}                │"
     echo -e "│  ${red}Anyone with it can read ALL your messages.${plain}             │"
     echo -e "│  ${red}--password only protects the web UI on your PC.${plain}        │"
     echo -e "└─────────────────────────────────────────────────────────┘"
+    echo -e "${yellow}Quick commands (copy-paste; keep the -- before a flag):${plain}"
+    echo -e "  Update:    ${blue}curl -Ls ${INSTALL_URL} | sudo bash${plain}"
+    echo -e "  Re-login:  ${blue}curl -Ls ${INSTALL_URL} | sudo bash -s -- --login${plain}"
+    echo -e "  Config:    ${blue}curl -Ls ${INSTALL_URL} | sudo bash -s -- --config${plain}"
+    echo -e "  Uninstall: ${blue}curl -Ls ${INSTALL_URL} | sudo bash -s -- --uninstall${plain}"
     echo ""
     echo -e "Full update command:"
     echo -e "  ${blue}curl -Ls https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh | sudo bash${plain}"
@@ -889,7 +1010,7 @@ install_thefeed() {
             version=$(get_latest_version)
             if [[ -z "$version" ]]; then
                 echo -e "${red}Failed to fetch latest version from GitHub${plain}"
-                echo -e "${yellow}Please check your network or specify a version: bash install.sh --version v1.0.0${plain}"
+                echo -e "${yellow}Please check your network or specify a version: curl -Ls ${INSTALL_URL} | sudo bash -s -- --version v1.0.0${plain}"
                 exit 1
             fi
         fi

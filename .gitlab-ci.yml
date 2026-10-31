@@ -148,7 +148,8 @@ build:
       fi
     - SERVER_LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
     - ASSET_TEMPLATE="thefeed-client-{V}-${GOOS}-${GOARCH}${ext}"
-    - CLIENT_LDFLAGS="${SERVER_LDFLAGS} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE}"
+    - TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
+    - CLIENT_LDFLAGS="${SERVER_LDFLAGS} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE} ${TEL_LDFLAG}"
     - go build -trimpath -ldflags="${SERVER_LDFLAGS}" -o "build/thefeed-server-${GOOS}-${GOARCH}${ext}" ./cmd/server
     - go build -trimpath -ldflags="${CLIENT_LDFLAGS}" -o "build/thefeed-client-${VERSION}-${GOOS}-${GOARCH}${ext}" ./cmd/client
     # UPX on Linux only. Windows is excluded — UPX-packed PE binaries
@@ -231,7 +232,8 @@ build:
     # is 16 KB-aligned, which Android 16 devices require to mmap and exec
     # the binary. NDK r28+ defaults to this, but the explicit flag keeps
     # working if the NDK is downgraded.
-    - LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE} -extldflags=-Wl,-z,max-page-size=16384"
+    - TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
+    - LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -X github.com/sartoopjj/thefeed/internal/version.AssetTemplate=${ASSET_TEMPLATE} -extldflags=-Wl,-z,max-page-size=16384 ${TEL_LDFLAG}"
     - |
       case "$GOARCH" in
         arm64) export CC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang" ;;
@@ -279,7 +281,9 @@ android-apk:
     # this NDK up via ANDROID_NDK_HOME.
     ANDROID_NDK_RELEASE: "r28b"
     ANDROID_NDK_HOME: "$CI_PROJECT_DIR/.android-ndk"
-    GO_VERSION: "1.26.0"
+    # ≥ 1.26.9: earlier patches crash 32-bit ARM Android 8–10 at startup
+    # (Go runtime bug, fixed in the 1.26.9 runtime).
+    GO_VERSION: "1.26.9"
   cache:
     - key: "gradle"
       paths:
@@ -298,7 +302,7 @@ android-apk:
       paths: [.cache/go-mod]
       policy: pull-push
   before_script:
-    - apt-get update -qq && apt-get install -y -qq curl unzip git
+    - apt-get update -qq && apt-get install -y -qq curl unzip zip git
     # Install Android cmdline-tools + SDK platform + build-tools if missing.
     # sdkmanager is Java-based and this image already ships Temurin 17, so
     # no extra JDK install is needed.
@@ -367,9 +371,10 @@ android-apk:
     # 16 KB page alignment is required on Android 15+ devices
     # configured for 16 KB pages — NDK r28+ defaults to this anyway,
     # but the explicit flag is belt-and-suspenders.
-    - LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384"
+    - TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
+    - LDFLAGS="-s -w -X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} -extldflags=-Wl,-z,max-page-size=16384 ${TEL_LDFLAG}"
     - mkdir -p android/app/libs
-    - gomobile bind -target=android/arm,android/arm64,android/386,android/amd64 -androidapi 24 -ldflags="${LDFLAGS}" -o android/app/libs/mobile.aar ./mobile
+    - bash scripts/gomobile-android-aar.sh android/app/libs/mobile.aar "${LDFLAGS}"
     # Decode signing keystore. KEYSTORE_BASE64 can be a regular variable
     # (base64-encoded) or a File-type variable containing the raw bytes.
     # Required for any tag pipeline — we never ship debug-signed APKs
@@ -397,7 +402,7 @@ android-apk:
         curl -sSL -o /tmp/g.zip https://services.gradle.org/distributions/gradle-8.10.2-bin.zip
         unzip -q /tmp/g.zip -d /opt
         export PATH="/opt/gradle-8.10.2/bin:$PATH"
-        gradle wrapper --gradle-version 8.10.2
+        gradle wrapper --gradle-version 8.11.1
       fi
     # We only reach this point with app/keystore.jks present — the
     # KEYSTORE_BASE64 check above hard-fails otherwise. So always do a
@@ -475,8 +480,16 @@ ios-ipa:
     - VERSION="${CI_COMMIT_TAG:-dev}"
     - COMMIT=$(git rev-parse --short HEAD)
     - DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    - LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE}"
-    - gomobile bind -iosversion=14.0 -target=ios,iossimulator -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
+    - TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
+    - LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} ${TEL_LDFLAG}"
+    # Deliberately BEHIND the Xcode project, which is 15.0 for the App
+    # Store (ITMS-90068: uploads must target 15.0+ from April 2027).
+    # This .ipa never goes through App Store Connect -- it is unsigned and
+    # re-signed by whoever sideloads it -- so it keeps iOS 13 and 14
+    # devices working. The xcodebuild below overrides the app to match;
+    # the two must move together, or the framework's minimum ends up
+    # above the app's and the link fails.
+    - gomobile bind -iosversion=13.0 -target=ios/arm64 -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
     - MARKETING_VERSION="${VERSION#v}"
     - BUILD_NUMBER=$(git rev-list --count HEAD)
     - |
@@ -492,6 +505,7 @@ ios-ipa:
         CODE_SIGN_IDENTITY="" \
         CODE_SIGNING_REQUIRED=NO \
         CODE_SIGNING_ALLOWED=NO \
+        IPHONEOS_DEPLOYMENT_TARGET=13.0 \
         DEVELOPMENT_TEAM=""
     - mkdir -p build/Payload artifacts
     - cp -r build/Thefeed.xcarchive/Products/Applications/Thefeed.app build/Payload/
@@ -609,7 +623,7 @@ release:
       | iOS / iPadOS | TestFlight (**easiest — installs in one tap**) | [Join the TestFlight beta - نصب آسان روی آیفون](https://testflight.apple.com/join/J6bfxDdZ) |
       | iOS (unsigned) | universal \`.ipa\` | [thefeed-ios-${VERSION}-unsigned.ipa](${DL_BASE}/thefeed-ios-${VERSION}-unsigned.ipa) |
 
-      **iOS / iPadOS (preview, iOS 14+):** the easiest install is the public [TestFlight beta](https://testflight.apple.com/join/J6bfxDdZ) — one tap, no computer needed. Otherwise the \`.ipa\` below is unsigned: re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or \`xcrun altool\`). The \`.ipa\` will not install directly from a download.
+      **iOS / iPadOS (preview, iOS 13+):** the easiest install is the public [TestFlight beta](https://testflight.apple.com/join/J6bfxDdZ) — one tap, no computer needed. Otherwise the \`.ipa\` below is unsigned: re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or \`xcrun altool\`). The \`.ipa\` will not install directly from a download.
 
       **Windows (10/11):** the \`.exe\` is **unsigned**, so SmartScreen shows *"Windows protected your PC"* and Defender may flag it as a false positive — DNS-tunneling tools commonly trip AV heuristics; **this is not malware**. Click **More info → Run anyway**, and if it's quarantined restore it from Defender → *Protection history*. Verify the SHA-256 below if unsure. — این هشدار طبیعی است (فایل امضای دیجیتال ندارد)؛ روی **More info → Run anyway** بزنید.
 

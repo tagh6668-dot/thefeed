@@ -107,7 +107,11 @@ type Metadata struct {
 	// (flags bit 0x02). Lets clients skip the ChatInfo probe on chatless
 	// servers and tell apart "no chat" from "chat, but you lack the key".
 	ChatAvailable bool
-	Channels      []ChannelInfo
+
+	// MTProtoAvailable advertises that this server can relay MTProto over DNS,
+	// so a client can show the shield on a config instead of probing each one.
+	MTProtoAvailable bool
+	Channels         []ChannelInfo
 }
 
 // ChannelInfo describes a single feed channel.
@@ -190,6 +194,9 @@ func SerializeMetadata(m *Metadata) []byte {
 	if m.ChatAvailable {
 		flags |= 0x02
 	}
+	if m.MTProtoAvailable {
+		flags |= 0x04
+	}
 	buf[off] = flags
 	off++
 
@@ -248,6 +255,7 @@ func ParseMetadata(data []byte) (*Metadata, error) {
 	off++
 	m.TelegramLoggedIn = flags&0x01 != 0
 	m.ChatAvailable = flags&0x02 != 0
+	m.MTProtoAvailable = flags&0x04 != 0
 
 	count := binary.BigEndian.Uint16(data[off:])
 	off += 2
@@ -510,6 +518,31 @@ func DecodeTitlesData(data []byte) (map[string]string, error) {
 		titles[name] = title
 	}
 	return titles, nil
+}
+
+// InflateCap bounds how large a compressed payload may expand to, as a
+// multiple of what actually arrived.
+//
+// RELATIVE, not a fixed ceiling, because the ceiling is the operator's
+// business: one server caps media at 100 KB and another caches 35 MB through
+// the GitHub relay, and a number written here would be wrong for both. What
+// is NOT the operator's business is a payload that expands a thousandfold --
+// deflate's worst case is about 1032x, which is how a few hundred kilobytes
+// on the wire became gigabytes of memory and the process died.
+//
+// So the rule is about the RATIO. A real payload is text (a few times) or
+// already-compressed media (about 1:1). Thirty-two times is far above
+// anything genuine and far below a bomb, and it scales with whatever the
+// server is configured to send.
+func InflateCap(compressedLen int) int {
+	const (
+		ratio = 32
+		floor = 4 << 20 // small payloads still get room to breathe
+	)
+	if n := compressedLen * ratio; n > floor {
+		return n
+	}
+	return floor
 }
 
 // DecompressMessages decompresses data produced by CompressMessages.

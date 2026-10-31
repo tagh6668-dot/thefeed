@@ -191,9 +191,21 @@ type relayFetcher func(ctx context.Context, size int64, crc uint32) ([]byte, err
 // push an SSE event mid-refresh.
 type storedCallback func(username string)
 
-// Refresh is the test entry point (DNS only, no GitHub fetcher).
-func (h *profilePicsHub) Refresh(ctx context.Context, fetcher *client.Fetcher, dnsAllowed bool) error {
-	return h.refresh(ctx, fetcher, dnsAllowed, nil, nil)
+// noteGitHubUnavailable records WHICH of the three preconditions failed.
+//
+// "Avatars did not download" with nothing else to go on is not something
+// anyone can act on, and all three causes are on the server side where the
+// user cannot see them at all.
+func (h *profilePicsHub) noteGitHubUnavailable(viaGitHub relayFetcher, serverHasRelay bool, bundleSize uint32) {
+	switch {
+	case viaGitHub == nil:
+		h.setProgressErr("github relay: not available in this build")
+	case !serverHasRelay:
+		h.setProgressErr("github relay: the server did not publish a bundle for it " +
+			"(relay disabled, or the upload failed)")
+	case bundleSize == 0:
+		h.setProgressErr("github relay: the server published an empty bundle")
+	}
 }
 
 // refresh tries the GitHub bundle first, then per-entry DNS for
@@ -240,6 +252,9 @@ func (h *profilePicsHub) refresh(ctx context.Context, fetcher *client.Fetcher, d
 	// Phase 1: GitHub bundle (one fetch, all entries).
 	missing := bundle.Entries
 	hasGitHub := bundle.HasRelay(protocol.RelayGitHub) && viaGitHub != nil && bundle.BundleSize > 0
+	if !hasGitHub {
+		h.noteGitHubUnavailable(viaGitHub, bundle.HasRelay(protocol.RelayGitHub), bundle.BundleSize)
+	}
 	if hasGitHub {
 		body, ghErr := viaGitHub(ctx, int64(bundle.BundleSize), bundle.BundleCRC)
 		if ghErr != nil {
@@ -386,6 +401,13 @@ func (h *profilePicsHub) setProgressErr(msg string) {
 	h.mu.Lock()
 	h.progress.Error = msg
 	h.mu.Unlock()
+}
+
+// progressErr reads back what the last refresh reported.
+func (h *profilePicsHub) progressErr() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.progress.Error
 }
 
 // ===== HTTP handlers =====

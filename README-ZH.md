@@ -14,16 +14,22 @@
 
 <table align="center">
 <tr>
-<td align="center"><img src="docs/screenshots/mainfeed.jpg" width="170" alt="Main feed"><br><sub>主信息流</sub></td>
-<td align="center"><img src="docs/screenshots/feed-post.jpg" width="170" alt="Reading a post"><br><sub>阅读消息</sub></td>
-<td align="center"><img src="docs/screenshots/telemirror.jpg" width="170" alt="Telemirror"><br><sub>Telemirror</sub></td>
-<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="Messenger"><br><sub>私信</sub></td>
+<td align="center"><img src="docs/screenshots/feed-list.jpg" width="170" alt="Feed channels"><br><sub>订阅频道</sub></td>
+<td align="center"><img src="docs/screenshots/feed-channel.jpg" width="170" alt="Reading a channel"><br><sub>阅读频道</sub></td>
+<td align="center"><img src="docs/screenshots/mirror-list.jpg" width="170" alt="Mirror channels"><br><sub>Mirror 频道</sub></td>
+<td align="center"><img src="docs/screenshots/mirror-channel.jpg" width="170" alt="A channel in Mirror"><br><sub>Mirror 中的频道</sub></td>
 </tr>
 <tr>
-<td align="center"><img src="docs/screenshots/chat-list.jpg" width="170" alt="Chats"><br><sub>私信列表</sub></td>
-<td align="center"><img src="docs/screenshots/scanner.jpg" width="170" alt="Resolver scanner"><br><sub>解析器扫描</sub></td>
+<td align="center"><img src="docs/screenshots/chat-list.jpg" width="170" alt="thefeed Chat"><br><sub>thefeed 私信</sub></td>
+<td align="center"><img src="docs/screenshots/chat.jpg" width="170" alt="thefeed Chat, end-to-end encrypted"><br><sub>thefeed 私信（端到端加密）</sub></td>
 <td align="center"><img src="docs/screenshots/resolver-bank.jpg" width="170" alt="Resolver bank"><br><sub>解析器池</sub></td>
 <td align="center"><img src="docs/screenshots/settings.jpg" width="170" alt="Settings"><br><sub>设置</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="docs/screenshots/tel-chats.jpg" width="170" alt="Telegram chats"><br><sub>Telegram 会话</sub></td>
+<td align="center"><img src="docs/screenshots/tel-chat.jpg" width="170" alt="Telegram chat"><br><sub>Telegram 聊天</sub></td>
+<td align="center"><img src="docs/screenshots/tel-channel.jpg" width="170" alt="Telegram channel"><br><sub>Telegram 频道</sub></td>
+<td align="center"><img src="docs/screenshots/tel-intro.jpg" width="170" alt="Telegram over DNS"><br><sub>通过 DNS 使用 Telegram</sub></td>
 </tr>
 </table>
 
@@ -47,7 +53,7 @@
 
 然后打开 **设置 → 配置**，导入一个配置（或填入域名 + 口令）。DNS 解析器在 **解析器** 标签页管理 —— 一个所有配置共享的解析器池，外加一个用于发现更多解析器的扫描器。
 
-**可用来测试的公开配置：** [@thefeedconfig](https://t.me/thefeedconfig)。
+**项目动态：** [@networkti](https://t.me/networkti) —— 发布公告和新版本的主要频道。
 
 ---
 
@@ -87,7 +93,12 @@ sudo bash -c "$(curl -Ls https://gitlab.com/sartoopjj/thefeed/-/raw/main/scripts
 
 脚本会下载最新二进制，询问你的域名 / 口令 / 频道 / X 账号，询问是否使用 Telegram 登录（推荐**否** —— 公开频道无需登录），并配置 systemd 服务。随时重跑即可**更新**。
 
-其他操作（把脚本管道给 `sudo bash -s -- <flag>`）：
+其他操作：把参数加在同一条命令的末尾，前面单独加一个 `--`。这个 `--` 必不可少，否则 bash 会吞掉参数，脚本收不到。
+
+```bash
+# 例如：安装最新的预发布版
+sudo bash -c "$(curl -Ls https://raw.githubusercontent.com/sartoopjj/thefeed/main/scripts/install.sh)" -- --pre
+```
 
 | Flag | 作用 |
 |------|------|
@@ -188,6 +199,7 @@ thefeed-server --data-dir /srv/thefeed --report --report-refresh 5s   # 实时
 | `--key` | | 加密口令 **（必填）** |
 | `--extra-domains` | | 逗号分隔的额外 feed 子域名（分担负载 + 容灾） |
 | `--chat-domains` | | 在这些子域名上启用 [私信](#messenger)（与 feed 分开） |
+| `--mtproto-domains` | | 在这些子域名上启用 [DNS 上的 Telegram](#telegram-over-dns)（与 feed 和私信分开） |
 | `--no-telegram` | `false` | 不登录 Telegram（仅公开频道） |
 | `--api-id` / `--api-hash` / `--phone` | | Telegram 凭据（私有频道） |
 | `--login-only` | `false` | 登录 Telegram、保存 session、退出 |
@@ -196,11 +208,22 @@ thefeed-server --data-dir /srv/thefeed --report --report-refresh 5s   # 实时
 | `--fetch-interval` | `10` | 抓取周期（分钟，最小 3） |
 | `--allow-manage` | `false` | 允许远程发送 / 频道管理（非可信勿开） |
 | `--padding` | `32` | 最大随机填充字节（抗 DPI；0 = 关闭） |
-| `--x-rss-instances` | `nitter.net,…` | 逗号分隔的 X RSS 基址 |
+| `--x-rss-instances` | `nitter.net,…` | 逗号分隔的 X RSS 基址 —— 见下方警告 |
 | `--dns-media-enabled` | `false` | 通过慢速 DNS 中继提供媒体 |
 | `--github-relay-enabled` | `false` | 通过快速 GitHub 中继提供媒体（需 `--github-relay-token` / `-repo`） |
 | `--report` | | 渲染终端仪表板后退出 |
 | `--version` | | 显示版本后退出 |
+
+> **⚠ X（Twitter）帖子目前无法使用。** X 内容通过 Nitter 抓取，而 Nitter 项目已被
+> **归档**，其公共实例现在一律返回 "Instance has been rate limited"
+> （[zedeus/nitter#1442](https://github.com/zedeus/nitter/issues/1442)）。在出现可用
+> 来源之前，信息流的 X 部分不再更新。请把 `--x-rss-instances` 指向你确认仍可用的实例，
+> 或者不使用 X。**仅影响服务端** —— Telegram 频道、Mirror、信使和所有客户端均不受影响。
+>
+> **自建 Nitter 仍然可行。** 已归档的代码依旧能跑：克隆仓库，用一个真实的 X 账号生成
+> session 令牌（脚本和说明在 Nitter 仓库/wiki 里），用 Docker + Redis 运行，再把
+> `--x-rss-instances` 指向它（例如 `http://127.0.0.1:8080` —— 只有 thefeed 服务端读取它，
+> 无需域名和 TLS）。请保持实例**私有**：该项目正是因针对公共实例的法律压力而归档的。
 
 完整的媒体中继参数见 [工作原理 → 媒体中继](#media-relays)。
 
@@ -219,9 +242,41 @@ thefeed-server ... --chat-domains c.example.com     # 或 THEFEED_CHAT_DOMAINS=c
 - **端到端加密** —— 只有双方能读消息；服务器仅存储不透明数据块，在不读取内容的情况下验证发送者。联系人名称永不离开设备。
 - **身份** —— 客户端在本地生成恢复码；你的地址是由它派生的 20 个字符。通过其他渠道把地址告诉对方即可被联系；同一恢复码可在任何服务器上使用。
 - **失败即关闭** —— 只有配置固定了服务器公钥（`sk=`）且服务器已签名的私信能力通过校验，客户端才启用私信。feed 元数据里的一个签名比特让无密钥的客户端提示「此服务器有私信 —— 请用其密钥重新导入配置」，而不是静默失败。
-- **滥用限制**（自动告知客户端）：`--chat-send-per-hour`（30）、`--chat-inbox-cap`（50）、`--chat-per-pair-cap`（10）、`--chat-max-msg-bytes`（500）；未送达消息在 `--chat-ttl-hours`（72）后过期。`--chat-enabled=false` 保留域名但对外宣告私信停用。
+- **滥用限制**（自动告知客户端）：`--chat-send-per-hour`（30）、`--chat-inbox-cap`（50）、`--chat-per-pair-cap`（10）、`--chat-max-msg-bytes`（500）；未送达消息在 `--chat-ttl-hours`（72）后过期。`--chat-enabled=false` 保留域名但对外宣告私信停用。启用聊天时安装脚本会询问这些值，更新时会保留你手动设置的值。
 
 在客户端从底部导航栏打开 **Chat**。✓ = 已存到服务器，✓✓ = 对方已取走；两台设备上的安全表情一致即表示会话安全。
+
+### AI 助手桥接（Hermes）
+
+[`integrations/hermes/`](integrations/hermes/) 让你通过私信通道与 [Hermes](https://github.com/NousResearch/hermes-agent) AI 智能体聊天，断网时也能联系到它。它是一个 Hermes 技能：把这个文件夹交给你的智能体，它会自行完成配置。它只读取来自你自己地址的消息；陌生人发来的消息既不会得到回复，也不会展示给模型。
+
+请在**你自己的 thefeed 服务器**上运行它：桥接程序会全天候轮询，而应用内置的共享默认服务器是给人用的，不是给机器人用的。如果你没有自己的服务器，默认配置也可以使用。
+
+---
+
+<a id="telegram-over-dns"></a>
+
+## DNS 上的 Telegram（测试版）
+
+同一条隧道的**可选**第二种用途：登录**你自己的 Telegram 账号**，通过服务器使用它——不需要 VPN，也不需要代理应用。它的工作方式与通过 MTProto 代理使用 Telegram 一样，区别只在于传输层换成了 DNS，因此当一个国家的网络被收缩到只剩内网流量时依然可用。用专用子域名启用（需配套的 [NS 记录](#1-dns-records)，与订阅和私信域名分开）：
+
+```bash
+thefeed-server ... --mtproto-domains m.example.com   # 或 THEFEED_MTPROTO_DOMAINS=m.example.com
+```
+
+- **Telegram 自己的协议，未作改动** — MTProto 被封装进普通的 DNS 查询；服务器拆包后把字节转发到 Telegram 的数据中心。授权密钥在客户端生成且从不离开设备，所以中继只搬运密封的数据包，无法读取内容。
+- **需要实现了该功能的服务器** — 普通的 MTProto 代理无法在 DNS 上承载 MTProto。thefeed 的服务器可以；客户端只会在选择列表中提供那些服务器已声明隧道（订阅元数据中的签名位）的配置。
+- **支持的功能**：你的会话、群组、频道和机器人；收发文本；✓/✓✓ 已读标记；群内发送者名字；对已加载内容的搜索；用 @username 发起会话；退出频道或清空会话；未读计数。
+- **不支持的功能**：下载图片、文件、贴纸和语音；通话；发送媒体；论坛话题（合并显示）；点击机器人的回调按钮（会列出来，链接按钮可用）。带附件的消息会显示**是什么**——图片、文件及其名称和大小、贴纸、语音——不会悄无声息地缺失。
+- **刻意只传文本。** 每个字节都是一次 DNS 查询，所以客户端只获取新增内容，并保留已经拿到的部分。
+- **速度由三项设置决定** —— 每秒查询数、超时时间，以及每个查询使用的解析器数量。第一项同时也是同时在途查询数的上限，因此发送窗口随设定速率变化，不会无限增长。消息自身的分帧会说明它需要多少次查询，于是这些查询一起发出，而不是每个往返只发一个；服务器则按任意到达顺序重新拼装。
+- **中继无法管控内容** —— 数据流在你与 Telegram 之间端到端加密，服务器只看到不透明的字节，分不清消息和文件。它能限制的是流量：`--mtproto-down-kb-per-min`（默认每条隧道 512 KB/分钟）会拖慢任何试图拉取文件的客户端，`--mtproto-max-tunnels` 则限制并发数量。
+- **通知**：应用打开时会响铃并提醒。应用退到后台时，可在 ⋮ 菜单中开启后台检查——它会持续消耗查询，因此默认关闭。
+- **需要好的解析器。** 订阅和私信在极慢的解析器上表现好得多；这是整个应用中最吃带宽的部分。
+- **应用凭据** — 官方发布版内置一对共享的默认凭据，没有自己的也能登录；Telegram 标签页会提示正在使用它。更好的做法是在 [my.telegram.org](https://my.telegram.org) 申请你自己的 `api_id` / `api_hash` 并在那里填入：如果 Telegram 限制了共享凭据，所有用它登录的人可能会被登出。自己构建的版本没有默认凭据，除非你传入一份（`TEL_LDFLAG`，见 `cmd/telseal`）。
+- **限制项**：`--mtproto-enabled`、`--mtproto-max-tunnels`、`--mtproto-idle-minutes`、`--mtproto-buffer-kb`、`--mtproto-dial-seconds`。
+
+在客户端中，从底部导航打开 **Telegram**。⋮ 菜单在每个界面都有（配置选择、凭据、日志、退出登录）；✓ / ✓✓ 表示已发送和已读；标题栏的圆环倒计时显示下一次自动检查的时间，每个操作都会显示自己的进度和已消耗的查询数。
 
 ---
 
@@ -316,6 +371,15 @@ optional caption
 - **加密口令（`--key`）** —— 服务器和客户端都需要。持有它的人能读取所有频道消息（含私有频道）；只分享给信任的人。
 - **远程管理（`--allow-manage`）** —— 开启后，持有口令的人可从客户端：**用服务器端的 Telegram 账号发送消息**（发到频道 / 私聊 —— 这是通过运维者已登录的 Telegram 账号发送，与端到端 [私信](#messenger) **完全不同**），以及**修改信息流的频道列表**（增删信息流中显示的频道）。默认关闭；只在可信服务器上开启。
 - **客户端 Web 密码（`--password`）** —— 对 Web UI 做 HTTP Basic Auth。仅本地保护；不影响 DNS 层访问。
+
+**用你自己的名字访问客户端 Web UI。** 客户端只响应本机确实可达的地址 —— 回环地址、它绑定的地址，以及你自己列出的名字。其他一律以 `403` 拒绝，并在错误里点明要设置哪一项；否则，互联网上的某个页面只要把自己的域名解析到 `127.0.0.1`，在浏览器看来就与 UI 同源，便能读到你的口令。如果你通过 nginx 或自定义主机名提供客户端，请把它列出来：
+
+```bash
+THEFEED_EXTRA_HOSTS=feed.example.com,feed.home.lan
+```
+
+在 **Android 和 iOS** 上你不需要自己设置 `--password`：应用每次启动都会自己生成一个，并且只交给自己的 WebView，因此手机上的其他应用会拿到 `401` —— 即使应用正处于锁定状态，因为手机上的回环地址并不私密。无需任何配置。在 **Android** 上，设备可以设置密码，该密码还会包裹 Telegram 会话与消息缓存的密钥，使这些文件在没有密码时毫无用处。
+
 
 **特性：** 双向端到端 AES-256 · 随机填充挫败大小分析 · 每次查询独立（链路上无会话状态）· 写操作受 `--allow-manage` 门控 · Telegram 两步验证交互式询问（绝不存进参数）· session 文件权限 `0600`。
 

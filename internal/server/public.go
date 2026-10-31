@@ -856,4 +856,3 @@ func extractBackgroundImageURL(n *html.Node) string {
 	raw = strings.TrimSuffix(raw, "\"")
 	return raw
 }
-

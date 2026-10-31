@@ -450,33 +450,6 @@ func (tr *TelegramReader) resolvePeer(ctx context.Context, api *tg.Client, usern
 	return nil, fmt.Errorf("%s not found in resolved chats or users", username)
 }
 
-func (tr *TelegramReader) fetchChannel(ctx context.Context, api *tg.Client, username string) ([]protocol.Message, error) {
-	rp, err := tr.resolvePeer(ctx, api, username)
-	if err != nil {
-		return nil, err
-	}
-
-	limit := tr.msgLimit
-	if tr.limits != nil {
-		if lim, ok := tr.limits[strings.ToLower(username)]; ok {
-			if lim.MsgLimit > 0 {
-				limit = lim.MsgLimit
-			}
-		}
-	}
-
-	hist, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
-		Peer:  rp.peer,
-		Limit: limit,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("get history %s: %w", username, err)
-	}
-
-	userNames := buildUserMap(hist)
-	return tr.extractMessages(ctx, api, hist, protocol.ChatTypeChannel, userNames)
-}
-
 // buildUserMap extracts a user ID → display name map from a history response.
 func buildUserMap(hist tg.MessagesMessagesClass) map[int64]string {
 	var users []tg.UserClass
@@ -669,9 +642,16 @@ func (tr *TelegramReader) extractText(msg *tg.Message) string {
 			mediaPrefix = protocol.MediaPoll
 			pollMedia := msg.Media.(*tg.MessageMediaPoll)
 			question := pollMedia.Poll.Question.Text
+			// Poll answers became an interface list: each one is a concrete
+			// type now, so the text is read after asserting rather than off
+			// the struct directly.
 			var opts []string
 			for _, a := range pollMedia.Poll.Answers {
-				opts = append(opts, "○ "+a.Text.Text)
+				ans, ok := a.(*tg.PollAnswer)
+				if !ok {
+					continue
+				}
+				opts = append(opts, "○ "+ans.Text.Text)
 			}
 			pollBody := "📊 " + question
 			if len(opts) > 0 {
