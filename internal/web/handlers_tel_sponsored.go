@@ -77,23 +77,9 @@ func (s *Server) handleTelSponsored(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": false, "reason": "tel_err_not_connected"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), telCallTimeout)
-	defer cancel()
-	var ads []tgbridge.Sponsored
-	if err := h.withBridge(ctx, func(b *tgbridge.Bridge) error {
-		var e error
-		ads, e = b.SponsoredMessages(ctx, req.Peer)
-		return e
-	}); err != nil {
-		h.s.addLog("[tel] ads: " + err.Error())
-		writeJSON(w, map[string]any{"ok": false})
-		return
-	}
-	h.setAds(key, ads, time.Now())
-	if ads == nil {
-		ads = empty
-	}
-	writeJSON(w, map[string]any{"ok": true, "ads": ads})
+	// Sponsored messages / ads disabled
+	h.setAds(key, empty, time.Now())
+	writeJSON(w, map[string]any{"ok": true, "ads": empty})
 }
 
 // handleTelSponsoredAct reports what the user did with an ad: saw it, opened
