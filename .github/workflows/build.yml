@@ -11,7 +11,7 @@ on:
         description: 'What to build (downloadable from this run, never released)'
         type: choice
         default: all
-        options: [all, android, desktop, ios, macos]
+        options: [all, android, desktop]
 
 permissions:
   contents: write
@@ -47,10 +47,6 @@ jobs:
           - goos: linux
             goarch: amd64
           - goos: linux
-            goarch: arm64
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
             goarch: arm64
           - goos: freebsd
             goarch: amd64
@@ -345,122 +341,8 @@ jobs:
             artifacts/thefeed-android-*-x86_64.apk
             artifacts/thefeed-android-*-universal.apk
 
-  ios-ipa:
-    needs: test
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","ios"]'), inputs.platforms)
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache: true
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode.app
-
-      - name: Install gomobile + gobind
-        run: |
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          go install golang.org/x/mobile/cmd/gobind@latest
-          gomobile init
-          go get golang.org/x/mobile/bind golang.org/x/mobile/bind/objc
-          go mod tidy
-
-      - name: Build Mobile.xcframework
-        timeout-minutes: 8
-        env:
-          TEL_API_ID: ${{ secrets.TEL_API_ID }}
-          TEL_API_HASH: ${{ secrets.TEL_API_HASH }}
-        run: |
-          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
-          COMMIT=$(git rev-parse --short HEAD)
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          TEL_LDFLAG=$(GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/telseal)
-          # Hidden from every later line of this log.
-          for v in ${TEL_LDFLAG}; do case "$v" in *=*) echo "::add-mask::${v#*=}" ;; esac; done
-          LDFLAGS="-X github.com/sartoopjj/thefeed/internal/version.Version=${VERSION} -X github.com/sartoopjj/thefeed/internal/version.Commit=${COMMIT} -X github.com/sartoopjj/thefeed/internal/version.Date=${DATE} ${TEL_LDFLAG}"
-          # Device slice only: the archive is for a device, and every extra
-          # slice is another concurrent compile of gotd/td/tg.
-          gomobile bind -iosversion=15.0 -target=ios/arm64 -ldflags="${LDFLAGS}" -o ios/Mobile.xcframework ./mobile
-
-      - name: Archive (unsigned)
-        run: |
-          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
-          MARKETING_VERSION=${VERSION#v}
-          BUILD_NUMBER=$(git rev-list --count HEAD)
-          xcodebuild \
-            -project ios/Thefeed.xcodeproj \
-            -scheme Thefeed \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath build/Thefeed.xcarchive \
-            archive \
-            MARKETING_VERSION="${MARKETING_VERSION}" \
-            CURRENT_PROJECT_VERSION="${BUILD_NUMBER}" \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            DEVELOPMENT_TEAM=""
-
-      - name: Pack unsigned IPA
-        run: |
-          VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
-          mkdir -p build/Payload
-          cp -r build/Thefeed.xcarchive/Products/Applications/Thefeed.app build/Payload/
-          (cd build && zip -qry "thefeed-ios-${VERSION}-unsigned.ipa" Payload)
-          ls -lh build/*.ipa
-
-      - name: Upload iOS IPA artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: thefeed-ios-ipa
-          path: build/thefeed-ios-*-unsigned.ipa
-
-  macos-dmg:
-    needs: test
-    if: github.event_name != 'workflow_dispatch' || contains(fromJSON('["all","macos"]'), inputs.platforms)
-    runs-on: macos-15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26'
-          cache: true
-      - name: Cache Go build
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/go-build
-          key: gobuild-macos-dmg-${{ hashFiles('**/go.sum') }}
-          restore-keys: gobuild-macos-dmg-
-
-      # `make mac-dmg` does the heavy lifting (universal binary via
-      # lipo, .app bundle, .icns from the iOS icon, hdiutil DMG).
-      # macos-15 runners ship Xcode tools, so lipo/sips/iconutil/
-      # hdiutil are all on PATH.
-      - name: Build macOS DMG
-        env:
-          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}
-          TEL_API_ID: ${{ secrets.TEL_API_ID }}
-          TEL_API_HASH: ${{ secrets.TEL_API_HASH }}
-        run: |
-          # Its own line: a failure inside make's arguments would not stop the
-          # step. Exported, not passed as an argument: make then prints the
-          # variable's name in its command lines, not its value.
-          TEL_LDFLAG=$(go run ./cmd/telseal)
-          for v in ${TEL_LDFLAG}; do case "$v" in *=*) echo "::add-mask::${v#*=}" ;; esac; done
-          export TEL_LDFLAG
-          make mac-dmg VERSION="${VERSION}"
-          ls -lh build/thefeed-macos-*.dmg
-
-      - name: Upload macOS DMG artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: thefeed-macos-dmg
-          path: build/thefeed-macos-*.dmg
-
   release:
-    needs: [build, android-apk, ios-ipa, macos-dmg]
+    needs: [build, android-apk]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -481,9 +363,8 @@ jobs:
             ## Install
 
             [![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
-            [![TestFlight](https://img.shields.io/badge/iOS-TestFlight%20beta-0D96F6?style=for-the-badge&logo=apple&logoColor=white)](https://testflight.apple.com/join/J6bfxDdZ)
 
-            Android and iOS install and update themselves through the store.
+            Android installs and updates itself through the store.
             Every other platform downloads from the table below.
 
             ## Downloads
@@ -492,9 +373,6 @@ jobs:
             |----------|-------------|----------|
             | Linux | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-linux-amd64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-linux-amd64) |
             | Linux | arm64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-linux-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-linux-arm64) |
-            | macOS | amd64 (Intel) | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-darwin-amd64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-darwin-amd64) |
-            | macOS | arm64 (Apple Silicon) | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-darwin-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-darwin-arm64) |
-            | macOS | universal `.dmg` (drag-install, **recommended**) | [thefeed-macos-${{ github.ref_name }}.dmg - مک (نصب با کشیدن، توصیه‌شده)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-macos-${{ github.ref_name }}.dmg) |
             | FreeBSD | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-freebsd-amd64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-freebsd-amd64) |
             | FreeBSD | arm64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-freebsd-arm64) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-freebsd-arm64) |
             | Windows | amd64 | [server-سرور](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-server-windows-amd64.exe) / [client-کلاینت](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-client-${{ github.ref_name }}-windows-amd64.exe) |
@@ -505,11 +383,5 @@ jobs:
             | Android | armeabi-v7a (older 32-bit phones) | [thefeed-android-${{ github.ref_name }}-armeabi-v7a.apk - اندروید (دستگاه‌های قدیمی‌تر)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-armeabi-v7a.apk) |
             | Android | x86_64 (Chromebooks, emulators, WSA) | [thefeed-android-${{ github.ref_name }}-x86_64.apk - اندروید (کروم‌بوک، شبیه‌ساز، WSA)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-x86_64.apk) |
             | Android | x86 (32-bit Intel, niche) | [thefeed-android-${{ github.ref_name }}-x86.apk - اندروید (اینتل ۳۲ بیت، نادر)](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-android-${{ github.ref_name }}-x86.apk) |
-            | iOS / iPadOS | TestFlight (**easiest — installs in one tap**) | [Join the TestFlight beta - نصب آسان روی آیفون](https://testflight.apple.com/join/J6bfxDdZ) |
-            | iOS (unsigned) | universal `.ipa` | [thefeed-ios-${{ github.ref_name }}-unsigned.ipa](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/thefeed-ios-${{ github.ref_name }}-unsigned.ipa) |
-
-            **iOS / iPadOS (preview, iOS 14+):** the easiest install is the public [TestFlight beta](https://testflight.apple.com/join/J6bfxDdZ) — one tap, no computer needed. Otherwise the `.ipa` below is unsigned: re-sign it with your own Apple ID and provisioning profile (AltStore, Sideloadly, or `xcrun altool`). The `.ipa` will not install directly from a download.
-
-            **macOS `.dmg` (preview, macOS 11+):** universal binary (Intel + Apple Silicon), unsigned. After dragging Thefeed.app into Applications, the first launch needs right-click → Open, or run `xattr -dr com.apple.quarantine /Applications/Thefeed.app` to clear Gatekeeper. CLI users can still grab the bare `thefeed-server` / `thefeed-client` binaries above.
 
             **Windows (10/11):** the `.exe` is **unsigned**, so SmartScreen shows *"Windows protected your PC"* and Defender may flag it as a false positive — DNS-tunneling tools commonly trip AV heuristics; **this is not malware**. Click **More info → Run anyway**, and if it's quarantined restore it from Defender → *Protection history*. Verify the SHA-256 below if unsure. — این هشدار طبیعی است (فایل امضای دیجیتال ندارد)؛ روی **More info → Run anyway** بزنید.
