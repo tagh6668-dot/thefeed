@@ -357,7 +357,7 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(github.ref_name, '-rc') }}
           append_body: true
           body: |
             ## Install
