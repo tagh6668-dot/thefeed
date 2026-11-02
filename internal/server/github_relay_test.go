@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"hash/crc32"
@@ -23,7 +24,16 @@ type fakeGitHub struct {
 	files   map[string][]byte // repoPath → ciphertext (committed)
 	commits int               // number of commits created (rate-limit metric)
 	blobs   int               // blob create count
+	blob    []byte            // the last blob, decoded
 	deletes int               // contents-api deletions
+
+	// blobDelay makes blob creation slow, as a real upload is.
+	blobDelay time.Duration
+	// blobRefuse refuses the next blob creations with blobStatus, sending
+	// blobRetryAfter (seconds) when set.
+	blobRefuse     int
+	blobStatus     int
+	blobRetryAfter string
 
 	// Tree state — dumb counter; we don't model real Git history.
 	headSHA string
@@ -38,6 +48,9 @@ func (f *fakeGitHub) sha(prefix string) string {
 
 func (f *fakeGitHub) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/blobs") {
+			time.Sleep(f.blobDelay)
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		path := strings.TrimPrefix(r.URL.Path, "/repos/owner/repo/")
@@ -62,9 +75,28 @@ func (f *fakeGitHub) handler() http.Handler {
 			})
 			return
 
+		case r.Method == http.MethodPost && path == "git/blobs" && f.blobRefuse > 0:
+			f.blobRefuse--
+			if f.blobRetryAfter != "" {
+				w.Header().Set("Retry-After", f.blobRetryAfter)
+			}
+			w.WriteHeader(f.blobStatus)
+			_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit"}`))
+			return
+
 		case r.Method == http.MethodPost && path == "git/blobs":
-			var body struct{ Content string }
-			_ = json.NewDecoder(r.Body).Decode(&body)
+			var body struct{ Encoding, Content string }
+			dec := json.NewDecoder(r.Body)
+			dec.DisallowUnknownFields()
+			raw, err := []byte(nil), dec.Decode(&body)
+			if err == nil {
+				raw, err = base64.StdEncoding.DecodeString(body.Content)
+			}
+			if err != nil || body.Encoding != "base64" {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				return
+			}
+			f.blob = raw
 			f.blobs++
 			s := f.sha("blob")
 			_ = json.NewEncoder(w).Encode(map[string]any{"sha": s})
@@ -237,5 +269,29 @@ func TestGitHubRelayStatePersistence(t *testing.T) {
 	r2 := NewGitHubRelay(cfg, "ex.test", "pp")
 	if !r2.Has(int64(len(body)), crc32.ChecksumIEEE(body)) {
 		t.Fatal("r2 should have loaded the file from statePath")
+	}
+}
+
+// A cycle's end commits what the cycle stored, though its uploads are still
+// being prepared in the background when the cycle ends.
+func TestAfterFetchCycleCommitsTheCyclesUploads(t *testing.T) {
+	fk, _ := newFakeGitHub(t)
+	fk.blobDelay = 300 * time.Millisecond
+	r := NewGitHubRelay(GitHubRelayConfig{Enabled: true, Token: "tok", Repo: "owner/repo", MaxBytes: 1 << 20, TTLMinutes: 60}, "feed.example.com", "test-passphrase")
+	f := NewFeed([]string{"a"})
+	mc := NewMediaCache(MediaCacheConfig{MaxFileBytes: 64 * 1024, TTL: time.Hour, DNSRelayEnabled: true})
+	mc.SetGitHubRelay(r)
+	f.SetMediaCache(mc)
+	f.SetGitHubRelay(r)
+
+	if _, err := mc.Store("bundle", "[PROFILE-BUNDLE]", fakeJPEG(4096), "application/octet-stream", "b.bin"); err != nil {
+		t.Fatal(err)
+	}
+	f.AfterFetchCycle(context.Background())
+	fk.mu.Lock()
+	n := len(fk.files)
+	fk.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d files committed, want the one this cycle stored", n)
 	}
 }

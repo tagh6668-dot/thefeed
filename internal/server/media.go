@@ -55,7 +55,18 @@ type MediaCache struct {
 	currentEntries  int64 // live entry count
 	currentBytes    int64 // sum of file sizes currently cached (incl. relay-only, which hold no RAM)
 	currentRAMBytes int64 // sum of block bytes actually held in memory
+
+	// uploading counts relay uploads still being prepared (encrypted, sent as
+	// a blob); WaitUploads lets a flush include them.
+	uploading atomic.Int64
+	// uploadBytes is what those uploads hold in copies of the files.
+	uploadBytes atomic.Int64
 }
+
+// maxUploadBytes caps uploadBytes: an upload waits its turn for minutes, and
+// a big cycle would otherwise hold every new file in memory at once. A file
+// left out is uploaded when a later cycle stores it again.
+const maxUploadBytes = 64 << 20
 
 type mediaEntry struct {
 	channel  uint16
@@ -75,6 +86,9 @@ type mediaEntry struct {
 	// inflight prevents the eviction sweep from reaping an entry that is
 	// currently being downloaded by a goroutine that hasn't installed it yet.
 	inflight bool
+	// relayed marks a file meant for the GitHub relay (not stored with
+	// SkipGitHub), which Refetch may ask for again.
+	relayed bool
 }
 
 // MediaCacheConfig configures a new MediaCache.
@@ -222,9 +236,8 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 		existing.expiresAt = c.expiry(now)
 		atomic.AddUint64(&c.storeHits, 1)
 		c.logf("media: refresh tag=%s key=%s ch=%d size=%d", tag, cacheKey, existing.channel, existing.size)
-		if c.gh != nil {
-			c.gh.Touch(existing.size, existing.crc32)
-		}
+		existing.relayed = existing.relayed || !opts.SkipGitHub
+		c.relayAgainLocked(content, hash, opts)
 		return c.metaForLocked(existing), nil
 	}
 
@@ -245,9 +258,8 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 		c.byKey[cacheKey] = existing
 		atomic.AddUint64(&c.storeHits, 1)
 		c.logf("media: dedup tag=%s key=%s ch=%d size=%d (hash match)", tag, cacheKey, existing.channel, existing.size)
-		if c.gh != nil {
-			c.gh.Touch(existing.size, existing.crc32)
-		}
+		existing.relayed = existing.relayed || !opts.SkipGitHub
+		c.relayAgainLocked(content, hash, opts)
 		return c.metaForLocked(existing), nil
 	}
 
@@ -313,6 +325,7 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 		blocks:    blocks,
 		ramBytes:  ramBytes,
 		expiresAt: c.expiry(now),
+		relayed:   !opts.SkipGitHub,
 	}
 	c.byKey[cacheKey] = entry
 	if dnsFits {
@@ -325,18 +338,8 @@ func (c *MediaCache) StoreWithOptions(cacheKey, tag string, content []byte, mime
 	atomic.AddInt64(&c.currentRAMBytes, ramBytes)
 	c.logf("media: store tag=%s key=%s ch=%d size=%d blocks=%d", tag, cacheKey, channel, size, len(blocks))
 
-	// Best-effort relay upload. Copy because the caller may reuse the
-	// slice. Failures don't block the DNS path.
 	if c.gh != nil && !opts.SkipGitHub {
-		gh := c.gh
-		body := append([]byte(nil), content...)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancel()
-			if err := gh.Upload(ctx, body); err != nil {
-				c.logf("media: gh-relay upload failed: %v", err)
-			}
-		}()
+		c.uploadLocked(content)
 	}
 
 	meta := c.metaForLocked(entry)
@@ -371,6 +374,96 @@ func (c *MediaCache) Lookup(cacheKey string) (protocol.MediaMeta, bool) {
 	}
 	entry.expiresAt = c.expiry(time.Now())
 	return c.metaForLocked(entry), true
+}
+
+// Refetch reports whether a cached file should be downloaded again: it is
+// meant for the relay, which never got it (the upload failed). Storing it
+// again is what uploads it; the downloaders keep the cached copy if that fails.
+func (c *MediaCache) Refetch(cacheKey string) bool {
+	c.mu.RLock()
+	e, ok := c.byKey[cacheKey]
+	gh := c.gh
+	var size int64
+	var crc uint32
+	relayed := false
+	if ok {
+		size, crc, relayed = e.size, e.crc32, e.relayed
+	}
+	c.mu.RUnlock()
+	return relayed && gh != nil && c.uploadRoom(size) && gh.Wants(size, crc)
+}
+
+// uploadRoom reports whether an upload of n bytes fits under maxUploadBytes.
+// One file always fits an empty queue, however big.
+func (c *MediaCache) uploadRoom(n int64) bool {
+	q := c.uploadBytes.Load()
+	return q == 0 || q+n <= maxUploadBytes
+}
+
+// uploadLocked sends a file to the relay in the background: best effort, and
+// a failure never blocks the DNS path. Copied because the caller may reuse
+// the slice.
+func (c *MediaCache) uploadLocked(content []byte) {
+	n := int64(len(content))
+	if !c.uploadRoom(n) {
+		return
+	}
+	gh := c.gh
+	body := append([]byte(nil), content...)
+	c.uploading.Add(1)
+	c.uploadBytes.Add(n)
+	go func() {
+		defer c.uploading.Add(-1)
+		defer c.uploadBytes.Add(-n)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if err := gh.Upload(ctx, body); err != nil {
+			c.logf("media: gh-relay upload failed: %v", err)
+		}
+	}()
+}
+
+// relayAgainLocked handles a file stored again: it keeps the relay's copy
+// alive, and uploads it if an earlier upload never made it.
+func (c *MediaCache) relayAgainLocked(content []byte, crc uint32, opts MediaCacheStoreOptions) {
+	if c.gh == nil {
+		return
+	}
+	size := int64(len(content))
+	c.gh.Touch(size, crc)
+	if !opts.SkipGitHub && c.gh.Wants(size, crc) {
+		c.uploadLocked(content)
+	}
+}
+
+// WaitUploads waits, at most d, for relay uploads still being prepared, so a
+// flush right after a store commits them instead of leaving them for the next.
+func (c *MediaCache) WaitUploads(d time.Duration) {
+	deadline := time.Now().Add(d)
+	for c.uploading.Load() > 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Keep extends the life of the files stored under keys, as storing the same
+// bytes again would, without the copy. Reports whether every key was there.
+func (c *MediaCache) Keep(keys []string) bool {
+	now := time.Now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	all := true
+	for _, k := range keys {
+		e, ok := c.byKey[k]
+		if !ok {
+			all = false
+			continue
+		}
+		e.expiresAt = c.expiry(now)
+		if c.gh != nil {
+			c.gh.Touch(e.size, e.crc32)
+		}
+	}
+	return all
 }
 
 // GetBlock returns one block of cached media for serving over DNS. Returns an

@@ -2,6 +2,8 @@
 
 **基于 DNS 的消息流阅读器 + 轻量私信**，专为只有 DNS 能通过的网络设计。阅读 Telegram 频道和公开 X 账号，并与其他用户交换端到端加密消息 —— 全部走普通 DNS。
 
+诞生于伊朗断网期间——[阅读项目背后的故事 →](https://sartoopjj.github.io/thefeed/project-brief-zh.html)
+
 [English](README.md) · [فارسی](README-FA.md) · 简体中文 · [Русский](README-RU.md)
 
 [![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
@@ -39,7 +41,7 @@
 
 ## 安装应用
 
-*只想阅读信息流和聊天的用户 —— 不需要自己搭服务器，导入一个配置即可。*
+*只想阅读信息流和聊天的用户 —— 不需要自己搭服务器：应用里自带公共配置，也可以导入自己的配置。*
 
 从最新版本下载对应平台的客户端 —— 选一个能访问的镜像：**[GitHub](https://github.com/sartoopjj/thefeed/releases/latest)** · **[GitLab](https://gitlab.com/sartoopjj/thefeed/-/releases)**。
 
@@ -51,7 +53,7 @@
 | **macOS** | 通用 `.dmg`（Intel + Apple Silicon），拖动安装 `Thefeed.app`。未签名，首次启动请右键 → **Open**，或运行 `xattr -dr com.apple.quarantine /Applications/Thefeed.app`。 |
 | **Linux / Termux** | `thefeed-client` 二进制 —— 运行后打开 `http://127.0.0.1:8080`。 |
 
-然后打开 **设置 → 配置**，导入一个配置（或填入域名 + 口令）。DNS 解析器在 **解析器** 标签页管理 —— 一个所有配置共享的解析器池，外加一个用于发现更多解析器的扫描器。
+然后打开 **设置 → 配置**。应用自带几个公共配置，在 **默认配置**（Default configs）里点一下即可添加；也可以导入自己的配置（或填入域名 + 口令）。DNS 解析器在 **解析器** 标签页管理 —— 一个所有配置共享的解析器池，外加一个用于发现更多解析器的扫描器。
 
 **项目动态：** [@networkti](https://t.me/networkti) —— 发布公告和新版本的主要频道。
 
@@ -72,8 +74,9 @@
 | 1 | A  | `ns.example.com` | `203.0.113.10`   | 让一个主机名指向你的服务器 |
 | 2 | NS | `t.example.com`  | `ns.example.com` | 将 **feed** 子域名委派给你的服务器 |
 | 3 *（可选）* | NS | `c.example.com` | `ns.example.com` | 委派 **私信** 子域名 —— 仅当你启用 [私信](#messenger) 时 |
+| 4 *（可选）* | NS | `m.example.com` | `ns.example.com` | 委派 **Telegram** 子域名 —— 仅当你启用 [DNS 上的 Telegram](#telegram-over-dns) 时 |
 
-**1–2** 是信息流必需的。**3** 仅在启用可选的 [私信](#messenger) 时需要，且它必须用与 feed **不同**的子域名（如 `c.example.com`）。
+**1–2** 是信息流必需的。**3** 仅在启用可选的 [私信](#messenger) 时需要，且它必须用与 feed **不同**的子域名（如 `c.example.com`）。**4** 仅在启用可选的 [DNS 上的 Telegram](#telegram-over-dns) 时需要，它同样要有**单独**的子域名，与 feed 和私信都分开（如 `m.example.com`）。安装脚本会询问这个域名；不用脚本时，传入 `--mtproto-domains m.example.com`。
 
 ### 2. 安装服务器
 
@@ -266,14 +269,15 @@ thefeed-server ... --mtproto-domains m.example.com   # 或 THEFEED_MTPROTO_DOMAI
 
 - **Telegram 自己的协议，未作改动** — MTProto 被封装进普通的 DNS 查询；服务器拆包后把字节转发到 Telegram 的数据中心。授权密钥在客户端生成且从不离开设备，所以中继只搬运密封的数据包，无法读取内容。
 - **需要实现了该功能的服务器** — 普通的 MTProto 代理无法在 DNS 上承载 MTProto。thefeed 的服务器可以；客户端只会在选择列表中提供那些服务器已声明隧道（订阅元数据中的签名位）的配置。
-- **支持的功能**：你的会话、群组、频道和机器人；收发文本；✓/✓✓ 已读标记；群内发送者名字；对已加载内容的搜索；用 @username 发起会话；退出频道或清空会话；未读计数。
+- **支持的功能**：你的会话、群组、频道和机器人；收发文本；通过消息旁的 ⋮ 回复、编辑、删除和转发消息，转发时可使用 Telegram 的转发选项；在频道允许时私信频道管理员；✓/✓✓ 已读标记；群内发送者名字；对已加载内容的搜索；在 Telegram 中被删除（或因自毁计时器到期）的消息，这里也会一并消失；和任何 Telegram 应用一样，对方能看到你「在线」和「正在输入…」；用 @username 发起会话；退出频道或清空会话；未读计数。
 - **不支持的功能**：下载图片、文件、贴纸和语音；通话；发送媒体；论坛话题（合并显示）；点击机器人的回调按钮（会列出来，链接按钮可用）。带附件的消息会显示**是什么**——图片、文件及其名称和大小、贴纸、语音——不会悄无声息地缺失。
 - **刻意只传文本。** 每个字节都是一次 DNS 查询，所以客户端只获取新增内容，并保留已经拿到的部分。
 - **速度由三项设置决定** —— 每秒查询数、超时时间，以及每个查询使用的解析器数量。第一项同时也是同时在途查询数的上限，因此发送窗口随设定速率变化，不会无限增长。消息自身的分帧会说明它需要多少次查询，于是这些查询一起发出，而不是每个往返只发一个；服务器则按任意到达顺序重新拼装。
 - **中继无法管控内容** —— 数据流在你与 Telegram 之间端到端加密，服务器只看到不透明的字节，分不清消息和文件。它能限制的是流量：`--mtproto-down-kb-per-min`（默认每条隧道 512 KB/分钟）会拖慢任何试图拉取文件的客户端，`--mtproto-max-tunnels` 则限制并发数量。
 - **通知**：应用打开时会响铃并提醒。应用退到后台时，可在 ⋮ 菜单中开启后台检查——它会持续消耗查询，因此默认关闭。
 - **需要好的解析器。** 订阅和私信在极慢的解析器上表现好得多；这是整个应用中最吃带宽的部分。
-- **应用凭据** — 官方发布版内置一对共享的默认凭据，没有自己的也能登录；Telegram 标签页会提示正在使用它。更好的做法是在 [my.telegram.org](https://my.telegram.org) 申请你自己的 `api_id` / `api_hash` 并在那里填入：如果 Telegram 限制了共享凭据，所有用它登录的人可能会被登出。自己构建的版本没有默认凭据，除非你传入一份（`TEL_LDFLAG`，见 `cmd/telseal`）。
+- **Telegram 的广告** —— Telegram 的 API 条款要求所有展示频道内容的客户端都显示 Telegram 的赞助消息，因此频道最后一条帖子下方可能出现一条赞助消息，明确标注为广告，并注明由 Telegram 投放、而非频道发布。在与机器人的对话中，对话上方也可能以横条形式出现一条赞助消息，同样明确标注为广告。它最后才获取、优先级最低，你的任何操作都会取消它，因此绝不会拖慢其他内容。
+- **应用凭据** — 官方发布版内置一对共享的默认凭据，没有自己的也能登录；Telegram 标签页会提示正在使用它。更好的做法是在 [my.telegram.org](https://my.telegram.org) 申请你自己的 `api_id` / `api_hash` 并在那里填入：如果 Telegram 限制了共享凭据，所有用它登录的人可能会被登出（账号本身不会被封，用自己的凭据即可重新登录）。自己构建的版本没有默认凭据，除非你传入一份（`TEL_LDFLAG`，见 `cmd/telseal`）。
 - **限制项**：`--mtproto-enabled`、`--mtproto-max-tunnels`、`--mtproto-idle-minutes`、`--mtproto-buffer-kb`、`--mtproto-dial-seconds`。
 
 在客户端中，从底部导航打开 **Telegram**。⋮ 菜单在每个界面都有（配置选择、凭据、日志、退出登录）；✓ / ✓✓ 表示已发送和已读；标题栏的圆环倒计时显示下一次自动检查的时间，每个操作都会显示自己的进度和已消耗的查询数。
@@ -285,14 +289,28 @@ thefeed-server ... --mtproto-domains m.example.com   # 或 THEFEED_MTPROTO_DOMAI
 ## 工作原理
 
 ```
-                                  Encrypted DNS TXT
-   ┌──────────────┐  feed meta + small media   ┌──────────────────┐    MTProto      ┌──────────┐
-   │              │ ─────────────────────────▸ │      Server      │ ─────────────▸  │ Telegram │
-   │    Client    │ ◂───────────────────────── │  (DNS auth +     │ ◂─────────────  │   API    │
-   │  (Web UI)    │                            │   media relays)  │    RSS / HTTP   ┌──────────┐
-   │              │  large media (fast relay)  │                  │ ─────────────▸  │  Nitter  │
-   │              │ ◂───── api.github.com ◂──  │                  │ ◂─────────────  │ (X feed) │
-   └──────────────┘     (uploaded by server)   └──────────────────┘                 └──────────┘
+                          Encrypted DNS TXT
+   ┌──────────────┐ FEED: posts + small media    ┌──────────────────┐ FEED: reads channels    ┌──────────┐
+   │              │ ───────────────────────────▸ │                  │ ──────────────────────▸ │          │
+   │    Client    │ ◂─────────────────────────── │      Server      │ ◂────────────────────── │ Telegram │
+   │   (Web UI)   │                              │                  │                         │   API    │
+   │              │ MESSENGER: end-to-end        │    (DNS auth,    │ TELEGRAM: your          │          │
+   │ · Feed       │ encrypted chat               │   feed cache,    │ account, MTProto        │          │
+   │ · Messenger  │ ◂──────────────────────────▸ │ messenger store, │ relayed, end-to-end     │          │
+   │ · Telegram   │                              │  MTProto relay,  │ encrypted               │          │
+   │              │ TELEGRAM: your account,      │  media relays)   │ ◂─────────────────────▸ │          │
+   │              │ MTProto inside DNS cells     │                  │                         └──────────┘
+   │              │ ◂──────────────────────────▸ │                  │ RSS / HTTP              ┌──────────┐
+   │              │                              │                  │ ──────────────────────▸ │  Nitter  │
+   │              │ large media (fast relay)     │                  │ ◂────────────────────── │ (X feed) │
+   │              │ ◂──── api.github.com ◂──     │                  │                         └──────────┘
+   └──────────────┘     (uploaded by server)     └──────────────────┘
+                                                          ▲ │
+                                                          │ ▼
+                                                 ┌──────────────────┐
+                                                 │   other users'   │ MESSENGER: each message
+                                                 │     clients      │ waits on the server
+                                                 └──────────────────┘ until it is fetched
 ```
 
 **服务器**（墙外）：连接 Telegram 读取配置的频道；通过兼容 RSS 的镜像抓取公开 X 帖子（无需登录）；把 feed 元数据和小文件作为**加密 DNS TXT** 响应提供，并加随机填充（抗 DPI）。登录一次、长期运行；`--no-telegram` 无凭据读取公开频道。可选的**多域名**与 **[私信](#messenger)** 模式。所有状态都在一个数据目录里。
@@ -474,6 +492,7 @@ X 帖子仅通过 RSS/XML 抓取。实例 URL 会被校验（`http`/`https`、�
 
 ## 链接与赞助
 
+- [项目简介](https://sartoopjj.github.io/thefeed/project-brief-zh.html)：TheFeed 的缘起、影响与大事记
 - Telegram 频道：[@networkti](https://t.me/networkti) · 公开配置：[@thefeedconfig](https://t.me/thefeedconfig)
 - 路线图 / 任务板：[GitHub project](https://github.com/users/sartoopjj/projects/1/views/1)
 

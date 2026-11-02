@@ -2,6 +2,8 @@
 
 DNS-based **feed reader and lite messenger** for networks where only DNS gets through. Read Telegram channels and public X accounts, and exchange end-to-end-encrypted messages with other users — all over plain DNS.
 
+Built during Iran's 2026 internet shutdown — [read the story behind the project →](https://sartoopjj.github.io/thefeed/project-brief.html)
+
 [English](README.md) · [فارسی](README-FA.md) · [简体中文](README-ZH.md) · [Русский](README-RU.md)
 
 [![Google Play](https://img.shields.io/badge/Google%20Play-Install-3DDC84?style=for-the-badge&logo=googleplay&logoColor=white)](https://play.google.com/store/apps/details?id=com.thefeed.android)
@@ -37,7 +39,7 @@ DNS-based **feed reader and lite messenger** for networks where only DNS gets th
 
 ## Install the app
 
-*For anyone who just wants to read feeds and chat — you don't need a server, just import a config into the client.*
+*For anyone who just wants to read feeds and chat — you don't need a server: the app comes with public configs built in, or you can import your own.*
 
 Download the client for your platform from the latest release — pick the mirror that's reachable for you: **[GitHub](https://github.com/sartoopjj/thefeed/releases/latest)** · **[GitLab](https://gitlab.com/sartoopjj/thefeed/-/releases)**.
 
@@ -49,7 +51,7 @@ Download the client for your platform from the latest release — pick the mirro
 | **macOS** | Universal `.dmg` (Intel + Apple Silicon), drag-installs `Thefeed.app`. Unsigned, so on first launch either right-click → **Open**, or run `xattr -dr com.apple.quarantine /Applications/Thefeed.app`. |
 | **Linux / Termux** | `thefeed-client` binary — run it and open `http://127.0.0.1:8080`. |
 
-Then open **Settings → Configs** and import a config (or paste your domain + passphrase). DNS resolvers are managed in the **Resolver** tab — a shared Bank used by all configs, plus a Scanner to find more.
+Then open **Settings → Configs**. A few public configs ship with the app under **Default configs** — add one in a tap. Or import your own config (or paste your domain + passphrase). DNS resolvers are managed in the **Resolver** tab — a shared Bank used by all configs, plus a Scanner to find more.
 
 **Project news:** [@networkti](https://t.me/networkti) — the main channel for announcements and releases.
 
@@ -68,8 +70,9 @@ You need one **A** record and one **NS** delegation. Example: your server IP is 
 | 1 | A  | `ns.example.com` | `203.0.113.10`   | Point a hostname at your server |
 | 2 | NS | `t.example.com`  | `ns.example.com` | Delegate the **feed** subdomain to your server |
 | 3 *(optional)* | NS | `c.example.com` | `ns.example.com` | Delegate a **messenger** subdomain — only if you enable [chat](#messenger) |
+| 4 *(optional)* | NS | `m.example.com` | `ns.example.com` | Delegate a **Telegram** subdomain — only if you enable [Telegram over DNS](#telegram-over-dns-beta) |
 
-Records **1–2** are required for the feed. Record **3** is only needed for the optional [messenger](#messenger), which must use a **separate** subdomain from the feed (e.g. `c.example.com`).
+Records **1–2** are required for the feed. Record **3** is only needed for the optional [messenger](#messenger), which must use a **separate** subdomain from the feed (e.g. `c.example.com`). Record **4** is only needed for the optional [Telegram over DNS](#telegram-over-dns-beta); it too needs its **own** subdomain, separate from the feed and the messenger (e.g. `m.example.com`). The install script asks for it; otherwise pass `--mtproto-domains m.example.com`.
 
 ### 2. Install the server
 
@@ -260,14 +263,15 @@ thefeed-server ... --mtproto-domains m.example.com   # or THEFEED_MTPROTO_DOMAIN
 
 - **Telegram's own protocol, unchanged** — MTProto is wrapped in ordinary DNS queries; the server unwraps them and relays the bytes to Telegram's data centres. The auth key is generated on the client and never leaves it, so the relay only moves sealed packets and cannot read them.
 - **It needs a server that implements this** — an ordinary MTProto proxy cannot carry MTProto over DNS. thefeed's server can, and a config whose server advertises the tunnel (a signed bit in the feed metadata) is the one the client offers in its picker.
-- **What works**: your conversations, groups, channels and bots; sending and reading text; ✓/✓✓ read marks; sender names in groups; search over what is loaded; starting a chat by @username; leaving or clearing one; unread counts.
+- **What works**: your conversations, groups, channels and bots; sending and reading text; replying to, editing, deleting and forwarding a message (the ⋮ beside it), with Telegram's forward options; messaging a channel's admins where the channel allows it; ✓/✓✓ read marks; sender names in groups; search over what is loaded; messages deleted in Telegram (or by a self-destruct timer) disappear here too; others see you online and "typing…", as with any Telegram app; starting a chat by @username; leaving or clearing one; unread counts.
 - **What does not**: downloading photos, files, stickers or voice; calls; sending media; forum topics (shown merged); pressing a bot's callback buttons (they are listed, and URL buttons work). A message with an attachment shows **what** it was — photo, file + name and size, sticker, voice — so nothing is silently missing.
 - **Text only, on purpose.** Every byte is a DNS query, so the client fetches only what is new and keeps what it already has.
 - **Speed comes from three settings** — queries per second, timeout, and resolvers per query. The first also caps how many queries are in flight at once, so the send window follows the configured rate and never grows without bound. A message's own framing says how many queries it needs, so they go out together instead of one per round trip, and the relay reassembles them in any order.
 - **The relay cannot police content** — the stream is encrypted end to end with Telegram, so the server sees opaque bytes and cannot tell a message from a file. What it *can* limit is volume: `--mtproto-down-kb-per-min` (512 KB/min per tunnel by default) throttles any client that tries to pull files through it, and `--mtproto-max-tunnels` bounds how many run at once.
 - **Notifications**: while the app is open it rings and notifies. For a backgrounded app, turn on background checking in the ⋮ menu — it costs queries around the clock, so it is off by default.
 - **It needs good resolvers.** The Feed and the Messenger hold up far better on very slow resolvers; this is the most bandwidth-hungry part of the app.
-- **App credentials** — official release builds carry a shared default pair, so you can sign in without one; the tab says when it is in use. It is better to register your own `api_id` / `api_hash` at [my.telegram.org](https://my.telegram.org) and enter it there: if Telegram restricts the shared pair, everyone signed in with it may be signed out. Builds you make yourself have no default unless you pass one in (`TEL_LDFLAG`, see `cmd/telseal`).
+- **Telegram's ads** — Telegram's API terms require every client that shows channels to show Telegram's sponsored messages, so a channel may show one under its last post, clearly marked as an ad and as placed by Telegram, not the channel. A chat with a bot may show one too, as a bar above the chat with the same label. It is fetched last, at the lowest priority, and anything you do cancels it, so it never delays anything else.
+- **App credentials** — official release builds carry a shared default pair, so you can sign in without one; the tab says when it is in use. It is better to register your own `api_id` / `api_hash` at [my.telegram.org](https://my.telegram.org) and enter it there: if Telegram restricts the shared pair, everyone signed in with it may be signed out (accounts are not blocked; signing in again with your own key works). Builds you make yourself have no default unless you pass one in (`TEL_LDFLAG`, see `cmd/telseal`).
 - **Limits**: `--mtproto-enabled`, `--mtproto-max-tunnels`, `--mtproto-idle-minutes`, `--mtproto-buffer-kb`, `--mtproto-dial-seconds`.
 
 In the client, open **Telegram** from the bottom nav. The ⋮ menu is on every screen (config picker, credentials, log, sign out); ✓ / ✓✓ mean sent and read; the ring in the title bar counts down to the next automatic check, and every operation reports its progress and the number of queries it has spent.
@@ -277,14 +281,28 @@ In the client, open **Telegram** from the bottom nav. The ⋮ menu is on every s
 ## How it works
 
 ```
-                                  Encrypted DNS TXT
-   ┌──────────────┐  feed meta + small media   ┌──────────────────┐    MTProto      ┌──────────┐
-   │              │ ─────────────────────────▸ │      Server      │ ─────────────▸  │ Telegram │
-   │    Client    │ ◂───────────────────────── │  (DNS auth +     │ ◂─────────────  │   API    │
-   │  (Web UI)    │                            │   media relays)  │    RSS / HTTP   ┌──────────┐
-   │              │  large media (fast relay)  │                  │ ─────────────▸  │  Nitter  │
-   │              │ ◂───── api.github.com ◂──  │                  │ ◂─────────────  │ (X feed) │
-   └──────────────┘     (uploaded by server)   └──────────────────┘                 └──────────┘
+                          Encrypted DNS TXT
+   ┌──────────────┐ FEED: posts + small media    ┌──────────────────┐ FEED: reads channels    ┌──────────┐
+   │              │ ───────────────────────────▸ │                  │ ──────────────────────▸ │          │
+   │    Client    │ ◂─────────────────────────── │      Server      │ ◂────────────────────── │ Telegram │
+   │   (Web UI)   │                              │                  │                         │   API    │
+   │              │ MESSENGER: end-to-end        │    (DNS auth,    │ TELEGRAM: your          │          │
+   │ · Feed       │ encrypted chat               │   feed cache,    │ account, MTProto        │          │
+   │ · Messenger  │ ◂──────────────────────────▸ │ messenger store, │ relayed, end-to-end     │          │
+   │ · Telegram   │                              │  MTProto relay,  │ encrypted               │          │
+   │              │ TELEGRAM: your account,      │  media relays)   │ ◂─────────────────────▸ │          │
+   │              │ MTProto inside DNS cells     │                  │                         └──────────┘
+   │              │ ◂──────────────────────────▸ │                  │ RSS / HTTP              ┌──────────┐
+   │              │                              │                  │ ──────────────────────▸ │  Nitter  │
+   │              │ large media (fast relay)     │                  │ ◂────────────────────── │ (X feed) │
+   │              │ ◂──── api.github.com ◂──     │                  │                         └──────────┘
+   └──────────────┘     (uploaded by server)     └──────────────────┘
+                                                          ▲ │
+                                                          │ ▼
+                                                 ┌──────────────────┐
+                                                 │   other users'   │ MESSENGER: each message
+                                                 │     clients      │ waits on the server
+                                                 └──────────────────┘ until it is fetched
 ```
 
 **Server** (outside the censored network): connects to Telegram and reads configured channels; fetches public X posts via RSS-compatible mirrors (no login); serves feed metadata and small media as **encrypted DNS TXT** responses with random padding (anti-DPI). Login once, run forever; `--no-telegram` reads public channels with no credentials. Optional **multi-domain** and **[messenger](#messenger)** modes. All state in one data directory.
@@ -462,6 +480,7 @@ X posts are fetched via RSS/XML only. Instance URLs are validated (`http`/`https
 
 ## Links & donate
 
+- [Project brief](https://sartoopjj.github.io/thefeed/project-brief.html) — the story behind TheFeed, its impact and timeline
 - Telegram channel: [@networkti](https://t.me/networkti) · Public configs: [@thefeedconfig](https://t.me/thefeedconfig)
 - Roadmap / task board: [GitHub project](https://github.com/users/sartoopjj/projects/1/views/1)
 
