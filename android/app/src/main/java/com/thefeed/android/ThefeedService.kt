@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -28,12 +29,14 @@ class ThefeedService : Service() {
     // before the server exists, and one server is all there may be.
     @Volatile
     private var starting = false
+    @Volatile
+    private var lastStatusMessage = "Starting local service..."
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
         createMessageNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("Starting local service..."))
+        postForegroundNotification(lastStatusMessage)
         // A process killed without onDestroy leaves the last launch's pair.
         clearEndpoint()
         startServerAsync()
@@ -43,6 +46,10 @@ class ThefeedService : Service() {
         if (intent?.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
+        }
+        if (intent?.action == ACTION_REFRESH_NOTIFICATION) {
+            postForegroundNotification(lastStatusMessage)
+            return START_STICKY
         }
         if (server == null) startServerAsync()
         return START_STICKY
@@ -157,9 +164,11 @@ class ThefeedService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "thefeed background service",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             ).apply {
                 description = "Keeps thefeed client running"
+                setSound(null, null)
+                enableVibration(false)
                 setShowBadge(false)
             }
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
@@ -184,23 +193,39 @@ class ThefeedService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("thefeed")
+            .setContentTitle("TheFeed")
             .setContentText(message)
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_stat_thefeed)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", stopPendingIntent)
-            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
     }
 
-    private fun updateForegroundNotification(message: String) {
+    private fun postForegroundNotification(message: String) {
+        lastStatusMessage = message
+        val notification = buildNotification(message)
         try {
-            getSystemService(NotificationManager::class.java)
-                .notify(NOTIFICATION_ID, buildNotification(message))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
         } catch (_: Exception) {
-            // Notification permission may not be granted; service still runs.
+            try {
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
+            } catch (_: Exception) {
+            }
         }
+    }
+
+    private fun updateForegroundNotification(message: String) {
+        postForegroundNotification(message)
     }
 
     // maybeNotifyNewMessages is the native side of the Go MessageNotifier. It is
@@ -262,7 +287,7 @@ class ThefeedService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID = "thefeed_service"
+        const val CHANNEL_ID = "thefeed_service_v2"
         const val MSG_CHANNEL_ID = "thefeed_messages"
         const val NOTIFICATION_ID = 1201
         const val MSG_NOTIFICATION_ID = 1202
@@ -275,6 +300,7 @@ class ThefeedService : Service() {
         const val PREF_PORT = "port"
         const val PREF_LOCAL_SECRET = "local_secret"
         const val ACTION_STOP = "com.thefeed.android.STOP"
+        const val ACTION_REFRESH_NOTIFICATION = "com.thefeed.android.REFRESH_NOTIFICATION"
         // Stable port window so the WebView origin survives restarts.
         const val PORT_RANGE_MIN = 38000
         const val PORT_RANGE_MAX = 38099

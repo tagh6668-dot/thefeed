@@ -66,7 +66,21 @@ class MainActivity : ComponentActivity() {
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { /* granted or not, service still works */ }
+    ) { granted ->
+        if (granted) {
+            val refreshIntent = Intent(this, ThefeedService::class.java).apply {
+                action = ThefeedService.ACTION_REFRESH_NOTIFICATION
+            }
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(refreshIntent)
+                } else {
+                    startService(refreshIntent)
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -219,6 +233,17 @@ class MainActivity : ComponentActivity() {
         ThefeedService.pendingNewCount = 0
         try {
             NotificationManagerCompat.from(this).cancel(ThefeedService.MSG_NOTIFICATION_ID)
+        } catch (_: Exception) {
+        }
+        val refreshIntent = Intent(this, ThefeedService::class.java).apply {
+            action = ThefeedService.ACTION_REFRESH_NOTIFICATION
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(refreshIntent)
+            } else {
+                startService(refreshIntent)
+            }
         } catch (_: Exception) {
         }
         if (batteryOptRequested) {
