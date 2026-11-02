@@ -1317,6 +1317,7 @@ a.tel-kbd-url:hover {
 /* Telegram's ad under a channel's last post: its own warm colour, dashed and
    labelled, so it can never be taken for a post. */
 .tel-msg.tel-ad {
+  display: none !important;
   --ad-tone: #f0a830;
   background: color-mix(in srgb, var(--ad-tone) 16%, var(--msg-in));
   border-style: dashed;
@@ -1363,6 +1364,7 @@ a.tel-kbd-url:hover {
    same colour, border and badge as the one under channel posts. It floats
    under the topbar, and the list makes room for it. */
 .tel-ad-bar {
+  display: none !important;
   --ad-tone: #f0a830;
   position: absolute;
   top: 68px;

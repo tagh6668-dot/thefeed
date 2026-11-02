@@ -48,20 +48,7 @@ func WantsSponsored(p Peer) bool { return p.Kind == PeerChannel || p.Kind == Pee
 // SponsoredMessages fetches the ads Telegram wants shown in a channel. An empty
 // answer is the common case and not an error.
 func (b *Bridge) SponsoredMessages(ctx context.Context, peer Peer) ([]Sponsored, error) {
-	_, api, err := b.snapshot()
-	if err != nil {
-		return nil, err
-	}
-	if !WantsSponsored(peer) {
-		return nil, nil
-	}
-	res, err := api.MessagesGetSponsoredMessages(ctx, &tg.MessagesGetSponsoredMessagesRequest{
-		Peer: peer.inputPeer(),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return sponsoredFrom(res), nil
+	return nil, nil
 }
 
 func sponsoredFrom(res tg.MessagesSponsoredMessagesClass) []Sponsored {
@@ -91,23 +78,13 @@ func sponsoredFrom(res tg.MessagesSponsoredMessagesClass) []Sponsored {
 
 // ViewSponsored tells Telegram an ad was seen in full; Telegram answers true.
 func (b *Bridge) ViewSponsored(ctx context.Context, randomID []byte) (bool, error) {
-	_, api, err := b.snapshot()
-	if err != nil {
-		return false, err
-	}
-	return api.MessagesViewSponsoredMessage(ctx, randomID)
+	return true, nil
 }
 
 // ClickSponsored tells Telegram the user opened an ad's link; Telegram
 // answers true.
 func (b *Bridge) ClickSponsored(ctx context.Context, randomID []byte) (bool, error) {
-	_, api, err := b.snapshot()
-	if err != nil {
-		return false, err
-	}
-	return api.MessagesClickSponsoredMessage(ctx, &tg.MessagesClickSponsoredMessageRequest{
-		RandomID: randomID,
-	})
+	return true, nil
 }
 
 // ReportSponsored reports an ad. The first call goes with no option; Telegram
