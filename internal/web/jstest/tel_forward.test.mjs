@@ -34,7 +34,7 @@ function harness(peer, msgs, answer, fetchedTarget) {
   const sheetEl = { querySelectorAll: () => seen.opts };
   const api = new Function('telState', 'telThread', 'telPeerKey', 'telSheet', 'telSheetItem', 'telT', 'telCloseSheet',
     'telRender', 'telWhenIdle', 'telOp', 'telCall', 'telTouchPreview', 'telMergeMessages', 'telDialogFor', 'telEsc',
-    'telAttrQ', 'telAvatar', 'telSafeText', 'icon', 'hydrateIcons', 'showToast', 'document', 'seen',
+    'telAttrQ', 'telAvatar', 'telSafeText', 'icon', 'hydrateIcons', 'showToast', 'document', 'seen', 'jsStr',
     fn('telFindMsg') + fn('telProtected') + fn('telChannelBased') + fn('telCanDelete') + fn('telMsgMenu') + fn('telHasMsgMenu') +
     fn('telForwardTargets') + fn('telForwardListHTML') + fn('telFwdOption') + fn('telStartForward') +
     fn('telForwardOption') + fn('telForwardFilter') + fn('telDoForward') + fn('telFwdHTML') +
@@ -45,7 +45,7 @@ function harness(peer, msgs, answer, fetchedTarget) {
     (k, th) => { seen.touched = k; }, (th, m) => { seen.merged = m; th.msgs.push(...m); },
     (k) => state.dialogs.find((d) => key(d.peer) === k) || null, (s) => String(s), (s) => String(s),
     (n) => '<av ' + n + '>', (s) => s, (n) => '<i ' + n + '>', () => {}, (m) => seen.toasts.push(m),
-    { getElementById: (id) => id === 'telFwdList' ? seen.list : (id === 'telSheet' ? sheetEl : null) }, seen);
+    { getElementById: (id) => id === 'telFwdList' ? seen.list : (id === 'telSheet' ? sheetEl : null) }, seen, (s) => String(s));
   return { state, seen, api, threads };
 }
 
@@ -56,7 +56,7 @@ function harness(peer, msgs, answer, fetchedTarget) {
   eq('a channel post can be forwarded', /telStartForward\(5\)/.test(seen.sheet), true);
   seen.sheet = '';
   api.menu(6);
-  eq('a protected message: no menu at all here', seen.sheet, '');
+  eq('a protected message: only Report here', seen.sheet.replace(/<fail telReportMsg\(6\)>\[tel_report\]<\/>/, ''), '');
   eq('a protected message: no Forward', /telStartForward/.test(seen.sheet), false);
   eq('and no Copy either', /telCopyMsg/.test(seen.sheet), false);
 }
@@ -64,6 +64,7 @@ function harness(peer, msgs, answer, fetchedTarget) {
   const { seen, api } = harness({ ...chan, protected: true }, [{ id: 5, text: 'post' }]);
   api.menu(5);
   eq('a protected channel: neither Forward nor Copy', [/telStartForward/.test(seen.sheet), /telCopyMsg/.test(seen.sheet)], [false, false]);
+  seen.sheet = '';
   api.start(5);
   eq('nor can the picker be opened around the menu', seen.sheet, '');
 }
@@ -94,7 +95,9 @@ function harness(peer, msgs, answer, fetchedTarget) {
   }
   eq('the ⋮ is drawn exactly when the menu opens', agree, total);
   const { api } = harness(chan, []);
-  eq('a protected channel post has no ⋮', api.has({ ...chan, protected: true }, { id: 1, text: 'x' }), false);
+  // Still drawn: someone else's post can be reported even where it cannot be
+  // copied or forwarded.
+  eq('a protected channel post keeps its ⋮, for Report', api.has({ ...chan, protected: true }, { id: 1, text: 'x' }), true);
 }
 eq('the bubble asks before drawing it', /!m\.service && telHasMsgMenu\(peer, m\) \? '<button class="tel-msg-more"/.test(src), true);
 

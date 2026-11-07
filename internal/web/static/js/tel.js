@@ -14,6 +14,9 @@ var telState = {
 
   // Memory only: Telegram content must not reach the browser's disk.
   dialogs: [],
+  // The account's blocklist as the backend last learnt it, by user id:
+  // {peer, date, deleted} rows.
+  blocked: {},
   cursor: null,          // {date,id,peer} — where the next page continues
   more: false,           // another page exists
   total: 0,              // rows Telegram says exist, when it says
@@ -260,6 +263,8 @@ async function telCall(url, body, fallbackKey, signal) {
     var r = await telFetch(url, opts);
     if (r && r.ok) return r;
     telState.error = telReason(r, fallbackKey);
+    // The reason as a key, for code that acts on it (the text is for people).
+    telState.errorKey = (r && r.reason) || '';
     // NOT a sign-out. authorized means "this account is signed in to
     // Telegram", which a dropped tunnel says nothing about: clearing it here
     // dropped the whole section back to the login screen on any transient
@@ -585,7 +590,17 @@ async function telRefreshInfo() {
       telState.info = Object.assign({}, telState.info, { connected: false, connecting: false });
     }
   }
-  if (telState.info && telState.info.connected) await telAuthStatus();
+  // A fresh page paints from the stored answer straight away. Waiting for
+  // the auth check first kept a second tab on "fetching…" for a whole round
+  // trip, with the conversations already on disk; the check still runs, and
+  // repaints if Telegram says otherwise.
+  if (telState.info && telState.info.connected) {
+    if (telState.info.hasSession && !telState.authorized) {
+      telState.authorized = true;
+      telRender();
+    }
+    await telAuthStatus();
+  }
   // hasSession is the backend's PERSISTED answer to "has Telegram confirmed
   // this session?", so it is what a freshly loaded page has to go on: nothing
   // is remembered in telState yet. Only clearing it here, never setting it,
@@ -753,6 +768,7 @@ window.telRecheck = telRecheck;
 // telResetData clears everything derived from one account.
 function telResetData() {
   telState.dialogs = [];
+  telState.blocked = {};
   telState.threads = {};
   telState.cursor = null;
   telState.more = false;
@@ -819,34 +835,56 @@ function telCancelCreds() { telState.editCreds = false; telRender(); }
 window.telEditCredentials = telEditCredentials;
 window.telCancelCreds = telCancelCreds;
 
-// TEL_DIAL_CODES: local list, likeliest first; 'code' prefixes the number.
-var TEL_DIAL_CODES = [
-  { id: 'ir', code: '+98' },
-  { id: 'tr', code: '+90' },
-  { id: 'ae', code: '+971' },
-  { id: 'de', code: '+49' },
-  { id: 'gb', code: '+44' },
-  { id: 'us', code: '+1' },
-  { id: 'ca', code: '+1' },
-  { id: 'fr', code: '+33' },
-  { id: 'nl', code: '+31' },
-  { id: 'se', code: '+46' },
-  { id: 'it', code: '+39' },
-  { id: 'es', code: '+34' },
-  { id: 'ru', code: '+7' },
-  { id: 'iq', code: '+964' },
-  { id: 'af', code: '+93' },
-  { id: 'az', code: '+994' },
-  { id: 'am', code: '+374' },
-  { id: 'ge', code: '+995' },
-  { id: 'qa', code: '+974' },
-  { id: 'om', code: '+968' },
-  { id: 'au', code: '+61' },
-  { id: 'my', code: '+60' },
-  { id: 'in', code: '+91' }
-];
+// TEL_DIAL_TOP opens the sign-in picker, likeliest first; every other region
+// follows in alphabetical order.
+var TEL_DIAL_TOP = ['ir', 'tr', 'ae', 'de', 'gb', 'us', 'ca', 'fr', 'nl', 'se', 'it', 'es',
+  'ru', 'iq', 'af', 'az', 'am', 'ge', 'qa', 'om', 'au', 'my', 'in'];
+var telCountryList = null;
 
-function telDialCode() { return telState.dial || TEL_DIAL_CODES[0].code; }
+// telCountries decodes TEL_COUNTRIES_B64 (telcountries.js) once: {id, code, en, fa}.
+function telCountries() {
+  if (telCountryList) return telCountryList;
+  var bin = atob(typeof TEL_COUNTRIES_B64 === 'string' ? TEL_COUNTRIES_B64 : '');
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  telCountryList = new TextDecoder().decode(bytes).split('\n').map(function (line) {
+    var f = line.split('\t');
+    return { id: f[0], code: '+' + f[1], en: f[2], fa: f[3] };
+  }).filter(function (c) { return c.id && c.fa; });
+  return telCountryList;
+}
+
+function telCountryName(c) { return (typeof lang !== 'undefined' && lang === 'fa') ? c.fa : c.en; }
+
+// telDialCountry is the picked region; telState.dial holds its id, since one
+// code can belong to several (+1, +7).
+function telDialCountry() {
+  var all = telCountries();
+  var find = function (id) {
+    for (var i = 0; i < all.length; i++) if (all[i].id === id) return all[i];
+    return null;
+  };
+  return find(telState.dial) || find(TEL_DIAL_TOP[0]) || { id: '', code: '+' };
+}
+
+// telDialSelectHTML is the picker: the likeliest regions, then the rest by name.
+function telDialSelectHTML() {
+  var picked = telDialCountry().id, byId = {}, rest = [];
+  telCountries().forEach(function (c) { byId[c.id] = c; if (TEL_DIAL_TOP.indexOf(c.id) < 0) rest.push(c); });
+  var col = typeof lang !== 'undefined' && lang === 'fa' ? 'fa' : 'en';
+  rest.sort(function (a, b) { return telCountryName(a).localeCompare(telCountryName(b), col); });
+  var opt = function (c) {
+    return '<option value="' + telAttrQ(c.id) + '"' + (c.id === picked ? ' selected' : '') +
+      '>' + telEsc(telCountryName(c)) + ' (' + telEsc(c.code) + ')</option>';
+  };
+  var html = '<select id="telDial" class="tel-input tel-dial" dir="ltr" onchange="telOnDialChange(this.value)">';
+  TEL_DIAL_TOP.forEach(function (id) { if (byId[id]) html += opt(byId[id]); });
+  html += '<option disabled>──────────</option>';
+  rest.forEach(function (c) { html += opt(c); });
+  return html + '</select>';
+}
+
+function telDialCode() { return telDialCountry().code; }
 
 function telOnDialChange(v) {
   telState.dial = v;
@@ -886,6 +924,17 @@ async function telResendCode() {
 }
 window.telResendCode = telResendCode;
 
+// telEditPhone goes back to the number field, keeping what was typed. Local
+// only: the code already sent simply expires, which costs no query.
+function telEditPhone() {
+  if (telState.busy) return;
+  telState.codeHash = '';
+  telState.codeVia = '';
+  telState.error = '';
+  telRender();
+}
+window.telEditPhone = telEditPhone;
+
 async function telSignIn() {
   var code = ((document.getElementById('telCode') || {}).value || '').trim();
   if (!code) return;
@@ -906,6 +955,9 @@ async function telSignIn() {
       telState.error = telT('tel_err_signin');
       return;
     }
+    // A new account starts clean, whatever a late answer for the previous
+    // one left behind.
+    telResetData();
     await telRefreshInfo();
     if (telReady()) telLoadDialogs();
   });
@@ -919,6 +971,7 @@ async function telSignInPassword() {
     var r = await telCall('/api/tel/auth', { action: 'password', password: pw }, 'tel_err_signin');
     if (!r) return;
     telState.needPassword = false;
+    telResetData();
     await telRefreshInfo();
     if (telReady()) telLoadDialogs();
   });
@@ -957,6 +1010,7 @@ window.telLogout = telLogout;
 // progress swallowed the load and the user stared at an empty list until the
 // link came up -- the thing that looked like the cache had been wiped.
 async function telPrimeFromCache() {
+  telLoadBlocked();
   if (telState.loadedOnce || telState.dialogs.length) return;
   var r = null;
   try {
@@ -1259,6 +1313,7 @@ async function telRefreshDialogs(background) {
       (background ? '' : '&refresh=1'));
     if (!r) return;
     telApplyPage(r.page, false);
+    telLoadBlocked();
     var grew = telUnreadTotal() - before;
     if (background && grew > 0) telNotifyNew(grew);
   };
@@ -1592,8 +1647,10 @@ async function telThreadFetchNew(background) {
     // Walk down to the cursor; bounded, as each page is a round trip.
     var msgs = [], offset = 0;
     for (var page = 0; page < TEL_NEW_MAX_PAGES; page++) {
-      var r = await telCall(telHistoryQuery(peer, { limit: TEL_HISTORY_PAGE, minId: was, offsetId: offset }),
-        undefined, undefined, telHistCtl.signal);
+      var hq = telHistoryQuery(peer, { limit: TEL_HISTORY_PAGE, minId: was, offsetId: offset });
+      // A manual refresh also re-reads the blocklist now, not on its interval.
+      if (!background && page === 0) hq += '&fresh=1';
+      var r = await telCall(hq, undefined, undefined, telHistCtl.signal);
       if (!r) { if (!msgs.length) return; break; }
       var got = r.messages || [];
       msgs = got.concat(msgs);
@@ -1798,6 +1855,8 @@ async function telSend() {
       // Kept on screen, marked, so the text is not lost.
       pending.pending = false;
       pending.failed = true;
+      // Refused because of a block made elsewhere: the backend recorded it.
+      if (telState.errorKey === 'tel_err_you_blocked') telLoadBlocked();
       return;
     }
     telThread(telPeerKey(peer)).fetched = true;
@@ -1935,7 +1994,7 @@ function telDeleteChat(key) {
   var d = telDialogFor(key);
   if (!d) return;
   var p = d.peer;
-  var q = '\'' + telAttrQ(key) + '\'';
+  var q = '\'' + jsStr(key) + '\'';
   var items = '';
   if (p.direct) {
     // Nothing joined, and Telegram lets no one delete these: only our list.
@@ -1978,6 +2037,8 @@ async function telStartNewChat() {
   var name = (el ? el.value : '').trim();
   if (!name) return;
   telCloseSheet();
+  // A private group or channel's invite link: preview it, join on a tap.
+  if (telIsInvite(name)) { telOpenInvite(name); return; }
   await telOp('tel_working', async function () {
     var r = await telCall('/api/tel/resolve', { username: name }, 'tel_err_username');
     if (!r || !r.peer) return;
@@ -2730,7 +2791,7 @@ function telRenderPickServer(info) {
   servers.forEach(function (s) {
     // Only the config being connected to is worth showing mid-attempt.
     if (connecting && s.key !== telState.server) return;
-    html += '<button type="button" class="tel-srv" onclick="telConnect(\'' + telAttrQ(s.key) + '\')"' +
+    html += '<button type="button" class="tel-srv" onclick="telConnect(\'' + jsStr(s.key) + '\')"' +
       (connecting ? ' disabled' : '') + '>' +
       '<span class="tel-srv-shield">' + icon('shield') + '</span>' +
       '<span class="tel-srv-main"><span class="tel-srv-name" dir="auto">' +
@@ -2776,12 +2837,7 @@ function telRenderLogin() {
   if (!telState.codeHash) {
     var typed = telState.phone || '';
     if (typed.indexOf(telDialCode()) === 0) typed = typed.slice(telDialCode().length);
-    var sel = '<select id="telDial" class="tel-input tel-dial" dir="ltr" onchange="telOnDialChange(this.value)">';
-    TEL_DIAL_CODES.forEach(function (c) {
-      sel += '<option value="' + telAttrQ(c.code) + '"' + (c.code === telDialCode() ? ' selected' : '') +
-        '>' + telEsc(telT('tel_country_' + c.id)) + ' (' + telEsc(c.code) + ')</option>';
-    });
-    sel += '</select>';
+    var sel = telDialSelectHTML();
     html += '<div class="tel-step-head" dir="auto">' + telEsc(telT('tel_login_intro')) + '</div>' +
       '<label class="tel-label" for="telPhone" dir="auto">' + telEsc(telT('tel_phone')) + '</label>' +
       '<div class="tel-phone-row" dir="ltr">' + sel +
@@ -2801,6 +2857,8 @@ function telRenderLogin() {
     (telState.busy ? ' disabled' : '') + '>' + telEsc(telT('tel_continue')) + '</button>' +
     '<button class="tel-btn" onclick="telResendCode()"' + (telState.busy ? ' disabled' : '') + '>' +
     telEsc(telT('tel_resend')) + '</button>' +
+    '<button class="tel-btn" onclick="telEditPhone()"' + (telState.busy ? ' disabled' : '') + '>' +
+    telEsc(telT('tel_edit_phone')) + '</button>' +
     '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_code_hint')) + '</div></div>';
   return html;
 }
@@ -2830,7 +2888,7 @@ function telRenderDialogs() {
     var key = telPeerKey(d.peer);
     var active = telPeerKey(telState.peer) === key;
     html += '<div class="tel-row' + (active ? ' active' : '') +
-      '" onclick="telOpenPeer(\'' + telAttrQ(key) + '\')">' +
+      '" onclick="telOpenPeer(\'' + jsStr(key) + '\')">' +
       telAvatar(d.peer.title, 44, d.peer.thumb) +
       '<span class="tel-row-main">' +
       '<span class="tel-row-top">' +
@@ -2851,7 +2909,7 @@ function telRenderDialogs() {
         telEsc(d.unread > 99 ? '99+' : d.unread) + '</span>' : '') +
       '</span>' +
       '<button class="tel-icon-btn tel-row-menu" aria-label="' + telAttrQ(telT('tel_menu')) +
-      '" onclick="event.stopPropagation();telRowMenu(\'' + telAttrQ(key) + '\')">' + icon('more') + '</button>' +
+      '" onclick="event.stopPropagation();telRowMenu(\'' + jsStr(key) + '\')">' + icon('more') + '</button>' +
       '</div>';
   });
   html += '</div>';
@@ -2929,7 +2987,8 @@ function telVisibleMessages(th) {
   });
 }
 
-// telLinkClick intercepts a tap on a link inside a message.
+// telLinkClick intercepts a tap on a link inside a message, its buttons
+// included.
 //
 // Going straight out to the browser is wrong twice over: it leaves the app on
 // a link the user may only have wanted to read, and a Telegram link is
@@ -2937,7 +2996,7 @@ function telVisibleMessages(th) {
 // outside, or open the channel here -- which is what the feed and the Mirror
 // already do, through the same shared sheet.
 function telLinkClick(e) {
-  var a = e.target && e.target.closest ? e.target.closest('.tel-msg-text a, .tel-reply a') : null;
+  var a = e.target && e.target.closest ? e.target.closest('.tel-msg-text a, .tel-reply a, .tel-btns a') : null;
   if (!a) return;
   var url = a.getAttribute('href') || '';
   if (!url) return;
@@ -2946,7 +3005,10 @@ function telLinkClick(e) {
 
   var extra = null;
   var tg = (typeof parseTgLink === 'function') ? parseTgLink(url) : null;
-  if (tg && tg.user) {
+  if (telIsInvite(url)) {
+    // Shows what the link leads to. Joining is a separate tap on that page.
+    extra = { label: telT('tel_invite_show'), action: function () { telOpenInvite(url); } };
+  } else if (tg && tg.user) {
     // A link to a post in the conversation already open is just a jump. Going
     // through resolve would spend a round trip to arrive where we are.
     var here = telState.peer && telState.peer.username &&
@@ -2967,6 +3029,90 @@ function telLinkClick(e) {
   else if (typeof openExternal === 'function') openExternal(url);
 }
 window.telLinkClick = telLinkClick;
+
+// ----------------------------------------------------- private invites -------
+
+// telIsInvite mirrors the backend's reading of an invite link (t.me/+HASH,
+// t.me/joinchat/HASH, tg://join?invite=HASH); the backend checks again.
+function telIsInvite(s) {
+  s = String(s || '').trim();
+  // t.me/+NUMBER is a phone-number contact link, not an invite.
+  var h = (/(?:\+|joinchat\/|invite=)([A-Za-z0-9_-]+)\/?$/.exec(s) || [])[1] || '';
+  if (/^[0-9]+$/.test(h)) return false;
+  return /^\+[A-Za-z0-9_-]{8,64}$/.test(s) ||
+    /^(https?:\/\/)?(www\.)?(t\.me|telegram\.me|telegram\.dog)\/(\+|joinchat\/)[A-Za-z0-9_-]{8,64}\/?$/i.test(s) ||
+    /^tg:\/\/join\?invite=[A-Za-z0-9_-]{8,64}$/i.test(s);
+}
+
+var telInvite = null; // {link, inv} of the preview on screen
+
+// telOpenInvite reads where an invite link leads (one query) and shows it.
+// Nothing is joined here.
+async function telOpenInvite(link) {
+  telCloseSheet();
+  await telWhenIdle();
+  var r = null;
+  await telOp('tel_working', async function () {
+    r = await telCall('/api/tel/invite', { link: link, action: 'check' }, 'tel_err_invite_invalid');
+  });
+  if (!r || !r.invite) { telRender(); return; }
+  telInvite = { link: link, inv: r.invite };
+  var inv = r.invite;
+  var kind = telT(inv.channel ? 'tel_invite_channel' : 'tel_invite_group');
+  var sub = [kind];
+  if (inv.members) sub.push(telT('tel_invite_members').replace('{n}', inv.members));
+  var h = '<div class="tel-invite">' + telAvatar(inv.title, 64, inv.thumb) +
+    '<div class="tel-invite-title" dir="auto">' + telEsc(telSafeText(inv.title || '')) + '</div>' +
+    '<div class="tel-invite-sub" dir="auto">' + sub.map(function (x) { return '<bdi>' + telEsc(x) + '</bdi>'; }).join(' · ') + '</div>' +
+    (inv.about ? '<div class="tel-invite-about" dir="auto">' + telEsc(telSafeText(inv.about)) + '</div>' : '');
+  if (inv.member && !inv.peek) {
+    h += '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_invite_already')) + '</div>' +
+      '<button class="tel-btn tel-btn-primary" onclick="telInviteOpenMember()">' + telEsc(telT('tel_open')) + '</button>';
+  } else if (inv.peek) {
+    // Telegram lets it be read for a while before deciding: both, Join first.
+    h += '<button class="tel-btn tel-btn-primary" onclick="telJoinInvite()">' + telEsc(telT('tel_invite_join')) + '</button>' +
+      '<button class="tel-btn" onclick="telInviteOpenMember()">' + telEsc(telT('tel_invite_peek')) + '</button>';
+  } else {
+    h += '<button class="tel-btn tel-btn-primary" onclick="telJoinInvite()">' +
+      telEsc(telT(inv.needsRequest ? 'tel_invite_request' : 'tel_invite_join')) + '</button>';
+  }
+  telSheet(h + '</div>');
+}
+window.telOpenInvite = telOpenInvite;
+
+function telInviteShow(peer) {
+  var key = telPeerKey(peer);
+  telThread(key).peer = peer;
+  if (!telDialogFor(key)) telState.dialogs.unshift({ peer: peer, unread: 0, topMsg: 0, preview: '' });
+  telOpenPeer(key);
+}
+
+function telInviteOpenMember() {
+  telCloseSheet();
+  if (telInvite && telInvite.inv && telInvite.inv.member) telInviteShow(telInvite.inv.member);
+}
+window.telInviteOpenMember = telInviteOpenMember;
+
+// telJoinInvite joins through the previewed link (one query), on the user's
+// tap only. A link that needs approval sends the request instead.
+async function telJoinInvite() {
+  if (!telInvite) return;
+  var link = telInvite.link;
+  telCloseSheet();
+  await telWhenIdle();
+  var r = null;
+  await telOp('tel_working', async function () {
+    r = await telCall('/api/tel/invite', { link: link, action: 'join' }, 'tel_err_generic');
+  });
+  telInvite = null;
+  if (!r) { telRender(); return; }
+  if (r.requested) {
+    if (typeof showToast === 'function') showToast(telT('tel_invite_requested'));
+    return;
+  }
+  if (r.peer) telInviteShow(r.peer);
+}
+window.telJoinInvite = telJoinInvite;
 
 // telOpenByUsername resolves @name and opens that conversation here.
 async function telOpenByUsername(user, msgId) {
@@ -3003,7 +3149,7 @@ function telReadOnlyBarHTML(peer) {
   var d = telDialogFor(key);
   var html = '<div class="tel-ro-bar">';
   if (d) {
-    html += '<button class="tel-ro-btn" onclick="telToggleMute(\'' + telAttrQ(key) + '\')">' +
+    html += '<button class="tel-ro-btn" onclick="telToggleMute(\'' + jsStr(key) + '\')">' +
       icon(d.muted ? 'bell' : 'bellOff') + '<span>' + telEsc(telT(d.muted ? 'tel_unmute' : 'tel_mute')) + '</span></button>';
   }
   if (peer.directId) {
@@ -3130,7 +3276,7 @@ function telReactionsHTML(m) {
       // because it is Telegram's string, not ours.
       html += '<button type="button" class="tel-react' + (r.chosen ? ' chosen' : '') +
         '" onclick="event.stopPropagation();telReact(' + (m.id | 0) + ',\'' +
-        telAttrQ(r.emoji) + '\')">' + telEsc(telSafeText(r.emoji)) +
+        jsStr(r.emoji) + '\')">' + telEsc(telSafeText(r.emoji)) +
         '<span class="tel-react-n">' + telEsc(telFmtCount(r.count)) + '</span></button>';
     });
     html += '</div>';
@@ -3414,8 +3560,9 @@ function telButtonsHTML(m) {
   m.buttons.forEach(function (b) {
     var href = telSafeURL(b.url);
     if (href) {
-      // The real target is the title: a label reading "google.com" on a
-      // button that goes elsewhere is the oldest trick there is.
+      // The label is the bot's, the target is not: a label reading
+      // "google.com" on a button that goes elsewhere is the oldest trick there
+      // is. A tap goes through telLinkClick, whose sheet shows the real one.
       html += '<a class="tel-kbd tel-kbd-url" href="' + telAttrQ(href) +
         '" target="_blank" rel="noopener noreferrer" dir="auto" title="' +
         telAttrQ(href) + '">' + telEsc(telSafeText(b.text)) + '</a>';
@@ -3561,6 +3708,12 @@ function telRenderPane() {
   if (peer.readOnly) {
     return html + telReadOnlyBarHTML(peer);
   }
+  // Blocked, as in Telegram: no composer, just the way back.
+  if (telIsBlocked(peer)) {
+    return html + '<div class="tel-ro-bar tel-blocked-bar"><span class="tel-blocked-note" dir="auto">' +
+      telEsc(telT('tel_blocked_note')) + '</span><button class="tel-ro-btn" onclick="telToggleBlock()">' +
+      icon('success') + '<span>' + telEsc(telT('tel_unblock')) + '</span></button></div>';
+  }
   if (rp) html += telReplyBarHTML(rp);
   html += '<div class="tel-compose">' +
     '<textarea id="telInput" class="tel-compose-input" rows="1" dir="auto" placeholder="' +
@@ -3657,6 +3810,7 @@ function telMsgMenu(id) {
   if (open) items += telSheetItem('forward', telT('tel_forward'), 'telStartForward(' + (id | 0) + ')');
   if (m.out && m.text && !peer.readOnly) items += telSheetItem('pencil', telT('tel_edit'), 'telStartEdit(' + (id | 0) + ')');
   if (telCanDelete(peer, m)) items += telSheetItem('delete', telT('tel_delete_msg'), 'telAskDelete(' + (id | 0) + ')');
+  if (!m.out) items += telSheetItem('fail', telT('tel_report'), 'telReportMsg(' + (id | 0) + ')');
   if (items) telSheet(items);
 }
 window.telMsgMenu = telMsgMenu;
@@ -3665,7 +3819,7 @@ window.telMsgMenu = telMsgMenu;
 // would open nothing is not drawn: Reply needs a chat we write to, Copy and
 // Forward an unprotected message, and Edit implies Reply.
 function telHasMsgMenu(peer, m) {
-  return !peer.readOnly || !telProtected(peer, m) || telCanDelete(peer, m);
+  return !peer.readOnly || !telProtected(peer, m) || telCanDelete(peer, m) || !m.out;
 }
 
 // telChannelBased mirrors the bridge: a channel or supergroup numbers its own
@@ -3739,7 +3893,7 @@ function telForwardListHTML(q) {
   if (!rows.length) return '<div class="tel-sheet-note tel-fwd-none">' + telEsc(telT('tel_forward_none')) + '</div>';
   return rows.map(function (d) {
     var key = telPeerKey(d.peer);
-    return '<button class="tel-sheet-item tel-fwd-row" onclick="telDoForward(\'' + telAttrQ(key) + '\')">' +
+    return '<button class="tel-sheet-item tel-fwd-row" onclick="telDoForward(\'' + jsStr(key) + '\')">' +
       telAvatar(d.peer.title, 32, d.peer.thumb) + ' <span dir="auto">' + telEsc(d.peer.title || '') + '</span></button>';
   }).join('');
 }
@@ -4130,6 +4284,7 @@ function telMenu() {
     'telToggleSound();telMenu()');
   items += telSheetItem(info.watch ? 'success' : 'clock',
     telT(info.watch ? 'tel_watch_on' : 'tel_watch_off'), 'telToggleWatch()');
+  if (telState.authorized) items += telSheetItem('close', telT('tel_blocked_list'), 'telBlockedList()');
   if (telReady()) {
     items += telSheetItem('antenna', telT('tel_reload_chats'), 'telCloseSheet();telLoadDialogs(true)');
   }
@@ -4200,17 +4355,17 @@ function telRowMenu(key) {
   var d = telDialogFor(key);
   if (!d) return;
   var isChannel = d.peer.kind === 'channel' || d.peer.kind === 'forum';
-  var items = telSheetItem('messenger', telT('tel_open'), 'telCloseSheet();telOpenPeer(\'' + telAttrQ(key) + '\')');
+  var items = telSheetItem('messenger', telT('tel_open'), 'telCloseSheet();telOpenPeer(\'' + jsStr(key) + '\')');
   items += telSheetItem(d.muted ? 'bell' : 'bellOff',
     telT(d.muted ? 'tel_unmute' : 'tel_mute'),
-    'telCloseSheet();telToggleMute(\'' + telAttrQ(key) + '\')');
+    'telCloseSheet();telToggleMute(\'' + jsStr(key) + '\')');
   if (d.peer.username) {
     // Pass the key, not the value: an attribute decodes its escapes before
     // the JS is parsed.
     items += telSheetItem('copy', '@' + d.peer.username,
-      'telCloseSheet();telCopyUsername(\'' + telAttrQ(key) + '\')');
+      'telCloseSheet();telCopyUsername(\'' + jsStr(key) + '\')');
   }
-  items += '<button class="tel-sheet-item tel-sheet-danger" onclick="telDeleteChat(\'' + telAttrQ(key) + '\')">' +
+  items += '<button class="tel-sheet-item tel-sheet-danger" onclick="telDeleteChat(\'' + jsStr(key) + '\')">' +
     icon('delete') + ' <span dir="auto">' +
     telEsc(telT(isChannel ? 'tel_leave' : 'tel_delete')) + '</span></button>';
   telSheet(items);
@@ -4230,21 +4385,26 @@ function telThreadMenu() {
   if (md) {
     items += telSheetItem(md.muted ? 'bell' : 'bellOff',
       telT(md.muted ? 'tel_unmute' : 'tel_mute'),
-      'telCloseSheet();telToggleMute(\'' + telAttrQ(key) + '\')');
+      'telCloseSheet();telToggleMute(\'' + jsStr(key) + '\')');
   }
   if (peer.username) {
     items += telSheetItem('copy', '@' + peer.username,
-      'telCloseSheet();telCopyUsername(\'' + telAttrQ(key) + '\')');
+      'telCloseSheet();telCopyUsername(\'' + jsStr(key) + '\')');
+  }
+  if (peer.kind === 'user' || peer.kind === 'bot') {
+    var bl = telIsBlocked(peer);
+    items += telSheetItem(bl ? 'success' : 'close',
+      telT(bl ? 'tel_unblock' : 'tel_block'), 'telCloseSheet();telToggleBlock()');
   }
   items += telSheetItem('arrowLeft', telT('tel_back'), 'telCloseSheet();telBackToList()');
   var vd = telDialogFor(key);
   if (vd && vd.visiting && (peer.kind === 'channel' || peer.kind === 'forum')) {
     items += telSheetItem('success', telT('tel_join'),
-      'telCloseSheet();telJoinChannel(\'' + telAttrQ(key) + '\')');
+      'telCloseSheet();telJoinChannel(\'' + jsStr(key) + '\')');
   }
   if (telDialogFor(key)) {
     var isChannel = peer.kind === 'channel' || peer.kind === 'forum';
-    items += '<button class="tel-sheet-item tel-sheet-danger" onclick="telDeleteChat(\'' + telAttrQ(key) + '\')">' +
+    items += '<button class="tel-sheet-item tel-sheet-danger" onclick="telDeleteChat(\'' + jsStr(key) + '\')">' +
       icon('delete') + ' <span dir="auto">' +
       telEsc(telT(isChannel ? 'tel_leave' : 'tel_delete')) + '</span></button>';
   }
@@ -4252,10 +4412,159 @@ function telThreadMenu() {
 }
 window.telThreadMenu = telThreadMenu;
 
+// ----------------------------------------------------- report and block -----
+
+// telIsBlocked says whether a person or bot is on the account's blocklist.
+function telIsBlocked(peer) {
+  return !!peer && (peer.kind === 'user' || peer.kind === 'bot') && !!telState.blocked[String(peer.id)];
+}
+
+function telSetBlockedList(list) {
+  var m = {};
+  (list || []).forEach(function (b) { if (b && b.peer) m[String(b.peer.id)] = b; });
+  telState.blocked = m;
+}
+
+// telLoadBlocked reads the backend's copy of the blocklist. Loopback only: the
+// backend keeps it current from the update stream it already polls, which is
+// how a block lifted on another device shows up here.
+async function telLoadBlocked() {
+  try {
+    var r = await telFetch('/api/tel/block');
+    if (r && r.ok) {
+      var before = JSON.stringify(Object.keys(telState.blocked).sort());
+      telSetBlockedList(r.blocked);
+      if (JSON.stringify(Object.keys(telState.blocked).sort()) !== before) telRender();
+    }
+  } catch (e) { }
+}
+window.telLoadBlocked = telLoadBlocked;
+
+// telSetBlock blocks or unblocks one person or bot. Telegram keeps the list,
+// so it holds on every device of the account.
+async function telSetBlock(peer, want) {
+  if (!peer) return false;
+  if (want && !(await showConfirmDialog(telT('tel_block_confirm'), telT('tel_block'), telT('cancel')))) return false;
+  await telWhenIdle();
+  var ok = false;
+  await telOp('tel_working', async function () {
+    var r = await telCall('/api/tel/block', { peer: peer, blocked: want }, 'tel_err_generic');
+    ok = !!(r && r.ok);
+  });
+  if (!ok) return false;
+  if (want) telState.blocked[String(peer.id)] = { peer: peer, date: Math.floor(Date.now() / 1000) };
+  else delete telState.blocked[String(peer.id)];
+  telRender();
+  if (typeof showToast === 'function') showToast(telT(want ? 'tel_blocked_done' : 'tel_unblocked_done'));
+  return true;
+}
+
+async function telToggleBlock() {
+  var peer = telState.peer;
+  if (peer) await telSetBlock(peer, !telIsBlocked(peer));
+}
+window.telToggleBlock = telToggleBlock;
+
+// telBlockedList shows the blocklist with Unblock on each row. Opening it
+// reads Telegram's own list once (one query); the local copy shows meanwhile.
+// state: undefined on opening, then 'done', 'failed' or 'offline'.
+async function telBlockedList(state) {
+  var rows = Object.keys(telState.blocked).map(function (k) { return telState.blocked[k]; });
+  // Most recently blocked first, as Telegram lists them.
+  rows.sort(function (a, b) { return (b.date || 0) - (a.date || 0); });
+  var offline = !telReady();
+  var items = '<div class="tel-sheet-head" dir="auto">' + telEsc(telT('tel_blocked_list')) +
+    (rows.length ? ' <span class="tel-blocked-count">' + rows.length + '</span>' : '') + '</div>';
+  // Never a bare "loading" that cannot end, and never "nobody" for a list
+  // that was not read.
+  if (offline || state === 'failed') {
+    items += '<div class="tel-hint" dir="auto">' + telEsc(telT(offline ? 'tel_blocked_offline' : 'tel_blocked_failed')) + '</div>';
+  } else if (!rows.length) {
+    items += '<div class="tel-empty" dir="auto">' + telEsc(telT(state === 'done' ? 'tel_blocked_none' : 'tel_loading')) + '</div>';
+  }
+  rows.forEach(function (b) {
+    var p = b.peer;
+    var name = b.deleted ? telT('tel_deleted_account') : (p.title || (p.username ? '@' + p.username : String(p.id)));
+    var sub = [];
+    if (p.username && !b.deleted) sub.push('@' + p.username);
+    if (p.kind === 'bot') sub.push(telT('tel_kind_bot'));
+    if (b.date) sub.push(telT('tel_blocked_since').replace('{d}', telFmtDate(b.date)));
+    items += '<div class="tel-blocked-row">' + telAvatar(name, 40, b.deleted ? '' : p.thumb) +
+      '<span class="tel-blocked-text"><span class="tel-blocked-name" dir="auto">' + telEsc(telSafeText(name)) + '</span>' +
+      // Each part isolated: an LTR @username beside an RTL date otherwise
+      // reorders the whole line.
+      (sub.length ? '<span class="tel-blocked-sub" dir="auto">' + sub.map(function (x) { return '<bdi>' + telEsc(x) + '</bdi>'; }).join(' · ') + '</span>' : '') + '</span>' +
+      '<button class="tel-btn tel-blocked-unblock" onclick="telUnblockFromList(\'' + jsStr(String(p.id)) + '\')"' +
+      (offline ? ' disabled' : '') + '>' + telEsc(telT('tel_unblock')) + '</button></div>';
+  });
+  telSheet(items);
+  if (state || offline) return;
+  await telWhenIdle();
+  var r = null;
+  await telOp('tel_loading', async function () {
+    r = await telCall('/api/tel/block?refresh=1', undefined, 'tel_err_generic');
+  });
+  if (r && r.ok) telSetBlockedList(r.blocked);
+  // Only redrawn if the sheet is still the one the user opened.
+  if (document.querySelector('#telSheet .tel-blocked-row, #telSheet .tel-empty, #telSheet .tel-hint')) {
+    telBlockedList(r && r.ok ? 'done' : 'failed');
+  }
+}
+window.telBlockedList = telBlockedList;
+
+async function telUnblockFromList(id) {
+  var b = telState.blocked[String(id)];
+  if (!b) return;
+  if (await telSetBlock(b.peer, false)) telBlockedList('done');
+}
+window.telUnblockFromList = telUnblockFromList;
+
+// telReportMsg walks Telegram's report dialogue for one message: reasons to
+// pick, sometimes a comment, then done. opt is the step's option; none first.
+var telReportOpts = null;
+async function telReportMsg(id, k, opt, comment) {
+  telCloseSheet();
+  var peer = telState.peer;
+  if (!peer) return;
+  var option = opt || ((k !== undefined && telReportOpts && telReportOpts[k]) ? telReportOpts[k].option : '');
+  await telWhenIdle();
+  var rep = null;
+  await telOp('tel_working', async function () {
+    var r = await telCall('/api/tel/report',
+      { peer: peer, ids: [id | 0], option: option, comment: comment || '' }, 'tel_err_generic');
+    if (r) rep = r.report || {};
+  });
+  if (!rep) return;
+  if (rep.options && rep.options.length) {
+    telReportOpts = rep.options;
+    var items = rep.title ? '<div class="tel-sheet-head" dir="auto">' + telEsc(telSafeText(rep.title)) + '</div>' : '';
+    rep.options.forEach(function (o, n) {
+      items += telSheetItem('fail', telSafeText(o.text), 'telReportMsg(' + (id | 0) + ',' + n + ')');
+    });
+    telSheet(items);
+    return;
+  }
+  telReportOpts = null;
+  if (rep.askComment) {
+    var text = await showInputDialog({
+      title: telT('tel_report'),
+      placeholder: telT(rep.commentOptional ? 'tel_report_comment_opt' : 'tel_report_comment'),
+      maxLength: 512,
+      allowEmpty: !!rep.commentOptional
+    });
+    // Cancel always abandons the report. An optional comment may be left
+    // empty; a required one may not (showInputDialog answers null for it).
+    if (text === null) return;
+    return telReportMsg(id, undefined, rep.option, text);
+  }
+  if (typeof showToast === 'function') showToast(telT('tel_reported'));
+}
+window.telReportMsg = telReportMsg;
+
 function telNewChatSheet() {
   telSheet('<div class="tel-sheet-head" dir="auto">' + telEsc(telT('tel_new_chat')) + '</div>' +
     '<div class="tel-sheet-form">' +
-    '<input id="telNewName" class="tel-input" type="text" dir="ltr" placeholder="@username" autocomplete="off">' +
+    '<input id="telNewName" class="tel-input" type="text" dir="ltr" placeholder="@username / t.me/+…" autocomplete="off">' +
     '<button class="tel-btn tel-btn-primary" onclick="telStartNewChat()">' +
     telEsc(telT('tel_open')) + '</button></div>' +
     '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_new_chat_hint')) + '</div>');

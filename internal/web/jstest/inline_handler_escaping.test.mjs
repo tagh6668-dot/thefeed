@@ -26,13 +26,14 @@ const eq = (name, got, want) => {
 
 // The shape: a value dropped between \'  and  \'  -- a single-quoted JS
 // string inside a double-quoted HTML attribute.
-const sink = /\\''\s*\+\s*(escAttr|tmEscAttr|esc)\s*\(/g;
+const sink = /\\''\s*\+\s*(escAttr|tmEscAttr|esc|telAttrQ|telEsc)\s*\(/g;
 const offenders = [];
 for (const f of readdirSync(jsDir).filter(n => n.endsWith('.js'))) {
   const src = readFileSync(join(jsDir, f), 'utf8');
-  src.split('\n').forEach((line, i) => {
-    for (const m of line.matchAll(sink)) offenders.push(`${f}:${i + 1} uses ${m[1]}`);
-  });
+  // Whole file, so a call split over two lines is seen too.
+  for (const m of src.matchAll(sink)) {
+    offenders.push(`${f}:${src.slice(0, m.index).split('\n').length} uses ${m[1]}`);
+  }
 }
 eq('every inline-handler value uses the JS-string escaper', offenders, []);
 
@@ -65,6 +66,36 @@ eq('a trailing backslash cannot eat the closing quote',
 eq('a double quote cannot close the attribute', jsStr('"').includes('&quot;'), true);
 eq('and angle brackets cannot open a tag',
   jsStr('<script>').includes('<'), false);
+
+// --- a #thefeed:// link fills the import form, it never imports -----------
+
+const main = readFileSync(join(jsDir, 'main.js'), 'utf8');
+const profilesSrc = readFileSync(join(jsDir, 'profiles.js'), 'utf8');
+const pfn = (name) => {
+  const m = profilesSrc.match(new RegExp('function ' + name + '\\([^)]*\\) \\{[\\s\\S]*?\\n\\}\\n'));
+  if (!m) throw new Error('missing ' + name);
+  return m[0];
+};
+const linkLine = main.split('\n').find((l) => l.includes('linkedConfig()')) || '';
+eq('the link does not import by itself', /doImportUri\(/.test(linkLine), false);
+// The page opens the form for the link, and start-up opens it again for a
+// user with no config yet: the link must survive both.
+function form(hash) {
+  const els = {};
+  const el = (id) => els[id] || (els[id] = { value: 'x', style: {}, classList: { add() {} } });
+  const run = new Function('location', 'document', 'renderProfilesModal', 'profiles', 'toggleDefaultConfigs',
+    pfn('linkedConfig') + pfn('openProfiles') + 'return { open: openProfiles, linked: linkedConfig };');
+  const f = run({ hash }, { getElementById: el }, () => {}, null, () => {});
+  return { f, input: el('importUriInput') };
+}
+const link = '#thefeed://t.example.org?k=a%20b&r=192.0.2.1';
+const one = form(link);
+one.f.open(); one.f.open();
+eq('the link is still in the form after start-up opens it again', one.input.value, 'thefeed://t.example.org?k=a b&r=192.0.2.1');
+const none = form('');
+none.f.open();
+eq('no link, empty form', none.input.value, '');
+eq('a malformed link leaves the form empty instead of stopping the page', form('#thefeed://%zz').f.linked(), '');
 
 console.log(`${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

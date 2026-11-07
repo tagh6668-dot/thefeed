@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gotd/td/telegram"
 	"github.com/sartoopjj/thefeed/internal/client"
 	"github.com/sartoopjj/thefeed/internal/protocol"
 	"github.com/sartoopjj/thefeed/internal/telcreds"
@@ -84,6 +85,17 @@ func telDefaultAvailable() bool {
 type telHub struct {
 	s   *Server
 	dir string
+
+	// signOuts counts sign-outs; a connection's session handle writes only
+	// while it is unchanged (guarded by sessMu).
+	sessMu   sync.Mutex
+	signOuts uint64
+	// wipes counts cache wipes. A call that was on the tunnel across one
+	// carries the previous account's data and must not be written back.
+	wipes atomic.Uint64
+	// wantBlocked asks the refresh behind the current answer to re-read the
+	// blocklist: a person's chat was opened, or refreshed by hand.
+	wantBlocked atomic.Bool
 
 	mu sync.Mutex
 	// ctx is the hub's lifetime context, set by reset (mirrors chatHub): a
@@ -193,10 +205,44 @@ func (h *telHub) sessionFile() tgbridge.SessionFile {
 	tc, err := loadTelCrypto(h.dir)
 	if err != nil {
 		log.Printf("tel: at-rest key unavailable (%v) — session left as it is on disk", err)
+		refuse := func([]byte) ([]byte, error) { return nil, err }
+		f.Seal, f.Open = refuse, refuse
 		return f
 	}
 	f.Seal, f.Open = tc.seal, tc.open
 	return f
+}
+
+// bridgeSession is the session handle for a new connection. After the user
+// signs out it stops writing: the connection still holds the key in memory and
+// saves it again on every reconnect. It reports success, because a failed save
+// drops the connection, and that is what delivers the sign-out to Telegram.
+func (h *telHub) bridgeSession() telegram.SessionStorage {
+	h.sessMu.Lock()
+	defer h.sessMu.Unlock()
+	return &telSessionHandle{SessionFile: h.sessionFile(), h: h, gen: h.signOuts}
+}
+
+type telSessionHandle struct {
+	tgbridge.SessionFile
+	h   *telHub
+	gen uint64
+}
+
+func (t *telSessionHandle) StoreSession(ctx context.Context, data []byte) error {
+	t.h.sessMu.Lock()
+	defer t.h.sessMu.Unlock()
+	if t.h.signOuts != t.gen {
+		return nil
+	}
+	return t.SessionFile.StoreSession(ctx, data)
+}
+
+// endSessions stops every session handle handed out so far.
+func (h *telHub) endSessions() {
+	h.sessMu.Lock()
+	h.signOuts++
+	h.sessMu.Unlock()
 }
 
 // refreshDialogs brings the cached conversations up to date behind an answer
@@ -231,7 +277,21 @@ func (h *telHub) refreshDialogs() {
 		if err := h.Sync(ctx); err != nil {
 			return
 		}
+		// The blocklist is read rather than learnt from the update stream: a
+		// block made on another device does not arrive in a difference. Only
+		// when the user opens or refreshes a person's chat -- never on a timer.
+		if h.wantBlocked.Swap(false) {
+			_, _ = h.readBlocked(ctx)
+		}
 	})
+}
+
+// noteBlockedInterest asks for the blocklist behind the answer being given,
+// for a person's or bot's chat only.
+func (h *telHub) noteBlockedInterest(peer tgbridge.Peer) {
+	if peer.Kind == tgbridge.PeerUser || peer.Kind == tgbridge.PeerBot {
+		h.wantBlocked.Store(true)
+	}
 }
 
 // store returns the message cache, loading it the first time it is asked for.
@@ -414,7 +474,7 @@ func (h *telHub) connect(ctx context.Context, cfg Config, nickname string, gen u
 		APIID:     apiID,
 		APIHash:   apiHash,
 		Dial:      dial,
-		Session:   h.sessionFile(),
+		Session:   h.bridgeSession(),
 		NoUpdates: true, // the tunnel is scarce: fetch explicitly
 		// Must match the relay: a production client against a test DC dies
 		// deep in the handshake with "wrong DC".
@@ -637,7 +697,20 @@ func (h *telHub) withBridgeOnce(ctx context.Context, fn func(*tgbridge.Bridge) e
 	return h.callBridge(ctx, false, fn)
 }
 
+// errTelAccountGone is the answer of a call that outlived the account it was
+// made for.
+var errTelAccountGone = errors.New("tel: signed out during the call")
+
 func (h *telHub) callBridge(ctx context.Context, retry bool, fn func(*tgbridge.Bridge) error) error {
+	wipes := h.wipes.Load()
+	err := h.callBridgeOnce(ctx, retry, fn)
+	if err == nil && h.wipes.Load() != wipes {
+		return errTelAccountGone
+	}
+	return err
+}
+
+func (h *telHub) callBridgeOnce(ctx context.Context, retry bool, fn func(*tgbridge.Bridge) error) error {
 	b, err := h.current()
 	if err != nil {
 		return err
@@ -951,6 +1024,7 @@ func randomID() int64 { return rand.Int63() }
 func (h *telHub) wipeSession() error {
 	// The conversations belong to the account being signed out of. Leaving
 	// them would show one person's chats to whoever signs in next.
+	h.wipes.Add(1)
 	h.store().Forget()
 	h.adsMu.Lock()
 	h.ads = nil
@@ -964,8 +1038,12 @@ func (h *telHub) wipeSession() error {
 	return err
 }
 
+// telMaxBody bounds a request to the Telegram endpoints; the largest real one
+// is a message of 4096 characters.
+const telMaxBody = 1 << 20
+
 func (s *Server) telDecode(r *http.Request, dst any) error {
-	return json.NewDecoder(r.Body).Decode(dst)
+	return json.NewDecoder(io.LimitReader(r.Body, telMaxBody)).Decode(dst)
 }
 
 func telAtoi(s string, def int) int {
@@ -1198,6 +1276,11 @@ func (h *telHub) Sync(ctx context.Context) error {
 	// themselves, so a channel silenced elsewhere must already be silent here
 	// -- otherwise it rings once more on the very poll that learns it is muted.
 	h.store().ApplyMutes(ch.Mutes)
+	// Blocked or unblocked on another device: the page is told at once, so
+	// an open chat gains or loses its blocked bar without a reload.
+	if h.store().ApplyBlocks(ch.Blocks) {
+		h.s.broadcast("event: update\ndata: \"tel-blocks\"\n\n")
+	}
 	n := h.store().ApplyNew(ch.New)
 	h.store().ApplyDeletes(ch.Deleted)
 	h.store().ApplyReads(ch.Reads)
