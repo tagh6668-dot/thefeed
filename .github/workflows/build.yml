@@ -283,11 +283,14 @@ jobs:
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
+          mkdir -p ~/.android
           if [ -n "$KEYSTORE_BASE64" ]; then
             echo "$KEYSTORE_BASE64" | base64 -d > android/app/keystore.jks
             echo "Keystore decoded successfully"
           else
-            echo "No KEYSTORE_BASE64 secret set — will use debug signing"
+            echo "No custom KEYSTORE_BASE64 set — using fixed persistent keystore"
+            echo "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" | base64 -d > android/app/keystore.jks
+            cp android/app/keystore.jks ~/.android/debug.keystore
           fi
 
       - name: Set up Java
@@ -305,9 +308,9 @@ jobs:
       - name: Build Android APK
         working-directory: android
         env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD || 'android' }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'androiddebugkey' }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD || 'android' }}
         run: |
           VERSION="${{ github.ref_type == 'tag' && github.ref_name || '0.0.1' }}"
           if [ ! -x ./gradlew ]; then gradle wrapper --gradle-version 8.11.1; fi
