@@ -27,6 +27,9 @@ type Peer struct {
 	AccessHash int64  `json:"accessHash,string"`
 	Title      string `json:"title"`
 	Username   string `json:"username,omitempty"`
+	// Usernames are the other active usernames, when it holds several
+	// (collectible ones among them); Username is the main one.
+	Usernames []string `json:"usernames,omitempty"`
 	// ReadOnly means Telegram will not accept a message here: a broadcast
 	// channel without post rights, or a group that bans sending. Absent means
 	// writable, so a peer built without this stays as it was.
@@ -54,6 +57,9 @@ type Peer struct {
 	// Protected is Telegram's content protection: nothing here may be copied
 	// or forwarded.
 	Protected bool `json:"protected,omitempty"`
+	// Members is the group's or channel's member count when Telegram sent
+	// one with the entity; 0 means not known.
+	Members int `json:"members,omitempty"`
 }
 
 // Dialog is one row in the chat list.
@@ -70,9 +76,13 @@ type Dialog struct {
 	// -- the account's read mark, shared by every device on it. It is where
 	// the "new messages" line goes, and the only honest source for it: a
 	// local guess would draw the line in a different place on each device.
-	ReadInbox int    `json:"readInbox,omitempty"`
-	Pinned    bool   `json:"pinned,omitempty"`
-	Preview   string `json:"preview,omitempty"`
+	ReadInbox int  `json:"readInbox,omitempty"`
+	Pinned    bool `json:"pinned,omitempty"`
+	// PinOrder is a pinned conversation's place among the pins, from 1, as
+	// the list page gave them (Telegram lists pins first, in the user's
+	// order). 0 when not pinned or not read from a list page.
+	PinOrder int    `json:"pinOrder,omitempty"`
+	Preview  string `json:"preview,omitempty"`
 	// Muted mirrors Telegram's own notification setting for this
 	// conversation. A muted chat still counts unread -- it just must not
 	// interrupt, which is the entire reason someone mutes a busy channel.
@@ -400,13 +410,33 @@ func peerFromUser(u *tg.User) Peer {
 		}
 		title += u.LastName
 	}
+	main, more := usernames(u.Username, u.Usernames)
 	if title == "" {
-		title = u.Username
+		title = main
 	}
 	return Peer{
 		Kind: kind, ID: u.ID, AccessHash: u.AccessHash,
-		Title: title, Username: u.Username, Thumb: userThumb(u),
+		Title: title, Username: main, Usernames: more, Thumb: userThumb(u),
 	}
+}
+
+// usernames picks the main username and the other active ones. With several,
+// Telegram leaves the plain one empty and lists them all; the first active is
+// the main one. Inactive ones are not in use and are left out.
+func usernames(plain string, list []tg.Username) (string, []string) {
+	main := plain
+	var more []string
+	for _, u := range list {
+		if !u.Active || u.Username == "" || u.Username == main {
+			continue
+		}
+		if main == "" {
+			main = u.Username
+			continue
+		}
+		more = append(more, u.Username)
+	}
+	return main, more
 }
 
 // peerFromChat maps a legacy (basic) group.
@@ -415,7 +445,8 @@ func peerFromChat(c *tg.Chat) Peer {
 	if b, ok := c.GetDefaultBannedRights(); ok && b.SendMessages && !c.Creator {
 		readOnly = true
 	}
-	return Peer{Kind: PeerGroup, ID: c.ID, Title: c.Title, ReadOnly: readOnly, Thumb: chatThumb(c.Photo), Protected: c.Noforwards}
+	return Peer{Kind: PeerGroup, ID: c.ID, Title: c.Title, ReadOnly: readOnly, Thumb: chatThumb(c.Photo),
+		Protected: c.Noforwards, Members: c.ParticipantsCount}
 }
 
 // peerFromChannel maps a channel, supergroup or forum, which Telegram models
@@ -428,11 +459,13 @@ func peerFromChannel(c *tg.Channel) Peer {
 			kind = PeerForum
 		}
 	}
+	main, more := usernames(c.Username, c.Usernames)
 	p := Peer{
 		Kind: kind, ID: c.ID, AccessHash: c.AccessHash,
-		Title: c.Title, Username: c.Username, ReadOnly: channelReadOnly(c),
+		Title: c.Title, Username: main, Usernames: more, ReadOnly: channelReadOnly(c),
 		Thumb: chatThumb(c.Photo), Protected: c.Noforwards,
 	}
+	p.Members, _ = c.GetParticipantsCount()
 	if c.BroadcastMessagesAllowed {
 		p.DirectID, _ = c.GetLinkedMonoforumID()
 	}

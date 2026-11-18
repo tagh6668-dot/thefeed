@@ -149,6 +149,19 @@ func TestJSTelegramLogout(t *testing.T) {
 	t.Logf("%s", out)
 }
 
+// No native confirm/alert/prompt: the iOS WebView ignores them.
+func TestJSNoNativeDialogs(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	out, err := exec.Command(node, "jstest/native_dialogs.test.mjs").CombinedOutput()
+	if err != nil {
+		t.Fatalf("native dialog checks failed:\n%s", out)
+	}
+	t.Logf("%s", out)
+}
+
 // Every field the backend sends on a conversation row must be taken when the
 // row is refreshed. Run with the rest of the suite, not by hand.
 func TestJSTelegramDialogFieldsRefresh(t *testing.T) {
@@ -470,4 +483,21 @@ func TestJSTelButtons(t *testing.T) {
 		t.Fatalf("tel buttons failed:\n%s", out)
 	}
 	t.Logf("%s", out)
+}
+
+// "Reload chats" merges its page into the list instead of shrinking the list
+// to it, "load more chats" names the conversation it continues from, the
+// open chat shows its member count, and every round trip draws the strip.
+func TestJSTelegramDialogListKeepsRows(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	for _, f := range []string{"jstest/tel_reload_keeps_rows.test.mjs", "jstest/tel_more_cursor.test.mjs", "jstest/tel_members.test.mjs", "jstest/tel_quiet_progress.test.mjs", "jstest/tel_header_buttons.test.mjs", "jstest/tel_dialog_order.test.mjs", "jstest/tel_profile.test.mjs", "jstest/tel_about.test.mjs", "jstest/tel_login.test.mjs"} {
+		out, err := exec.Command(node, f).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s failed:\n%s", f, out)
+		}
+		t.Logf("%s: %s", f, out)
+	}
 }

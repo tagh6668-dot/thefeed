@@ -60,9 +60,14 @@ html.tel-section #telPane {
 }
 
 /* Desktop two-pane shows the list AND the conversation, each with a countdown.
-   Keep only the conversation's so it isn't on screen twice. */
-html.tel-thread #telSidebar .tel-timer-btn {
+   Keep only the conversation's so it isn't on screen twice: the list's button
+   stays (it refreshes the list), as a plain arrow. */
+html.tel-thread #telSidebar .tel-timer-btn .tel-timer-ring {
   display: none;
+}
+
+html.tel-thread #telSidebar .tel-timer-btn .icon {
+  display: inline-flex;
 }
 
 /* ---- topbar ----------------------------------------------------------- */
@@ -321,7 +326,16 @@ html.tel-thread #telSidebar .tel-timer-btn {
 }
 
 /* Next-automatic-check ring: a depleting dial with the seconds inside, so an
-   automatic fetch over a scarce link is never a surprise. */
+   automatic fetch over a scarce link is never a surprise. It is also the
+   refresh button: the ring while idle, the turning arrow while a fetch runs. */
+.tel-timer-btn .icon {
+  display: none;
+}
+
+.tel-timer-btn.spinning .tel-timer-ring {
+  display: none;
+}
+
 .tel-timer-ring {
   width: 26px;
   height: 26px;
@@ -1920,6 +1934,69 @@ input.tel-fwd-search:focus {
   overflow-y: auto;
   font-size: var(--text-sm);
   white-space: pre-line;
+}
+
+/* The open chat's info (tap its name): the invite preview's head, then the
+   usernames, then the actions. */
+.tel-topbar-tap {
+  cursor: pointer;
+  border-radius: 12px;
+}
+
+.tel-topbar-tap:focus-visible {
+  outline: 2px solid var(--accent);
+}
+
+.tel-profile-field {
+  padding: 6px 16px 10px;
+  min-width: 0;
+}
+
+.tel-profile-label {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
+.tel-profile-un {
+  /* A username has no spaces: without this a long one ran off the sheet. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: start;
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--text-md, 15px);
+  cursor: pointer;
+}
+
+.tel-profile-also {
+  font-size: var(--text-sm);
+  color: var(--text-dim);
+}
+
+.tel-profile-also .tel-profile-un {
+  font-size: var(--text-sm);
+}
+
+.tel-profile-about {
+  /* Telegram keeps the line breaks; a long link has no spaces to break at. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-align: start;
+  font-size: var(--text-sm);
+  max-height: 40vh;
+  overflow-y: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.tel-profile-note {
+  padding: 0 16px 10px;
+  font-size: var(--text-xs);
+  color: var(--text-dim);
 }
 
 .tel-invite .tel-btn {

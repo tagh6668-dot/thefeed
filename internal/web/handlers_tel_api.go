@@ -363,6 +363,52 @@ func (s *Server) handleTelDisconnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// telAuther is the part of the bridge the login steps use.
+type telAuther interface {
+	SendCode(ctx context.Context, phone string) (tgbridge.CodeSent, error)
+	ResendCode(ctx context.Context, phone, codeHash string) (tgbridge.CodeSent, error)
+	SignIn(ctx context.Context, phone, code, codeHash string, byEmail bool) error
+	SetupLoginEmail(ctx context.Context, phone, codeHash, email string) (string, error)
+	VerifyLoginEmail(ctx context.Context, phone, codeHash, code string) (tgbridge.CodeSent, error)
+	PasswordHint(ctx context.Context) string
+}
+
+// telAuthLinked reports whether there is a connection to log in over.
+var telAuthLinked = func(h *telHub) bool {
+	_, err := h.current()
+	return err == nil
+}
+
+// telAuthCall runs one login step. once: never repeat it on a rebuilt
+// connection (see withBridgeOnce).
+var telAuthCall = func(ctx context.Context, h *telHub, once bool, fn func(telAuther) error) error {
+	call := func(b *tgbridge.Bridge) error { return fn(b) }
+	if once {
+		return h.withBridgeOnce(ctx, call)
+	}
+	return h.withBridge(ctx, call)
+}
+
+// codeSentJSON is the answer to every step that leaves a code on its way.
+func codeSentJSON(c tgbridge.CodeSent) map[string]any {
+	if c.Done {
+		return map[string]any{"ok": true, "done": true}
+	}
+	return map[string]any{"ok": true, "codeHash": c.Hash, "via": c.Via, "emailPattern": c.EmailPattern}
+}
+
+// logCodeVia records where Telegram put the code, so "no code came" can be
+// told apart from "it went somewhere else". No number, no address.
+func (h *telHub) logCodeVia(step string, c tgbridge.CodeSent) {
+	via := c.Via
+	if c.Done {
+		via = "none needed"
+	} else if via == "" {
+		via = "unknown"
+	}
+	h.s.addLog("[tel] " + step + ": code via " + via)
+}
+
 // handleTelAuth drives the login steps. The code is sent by Telegram to the
 // user's own device and typed here; it never passes through the relay.
 func (s *Server) handleTelAuth(w http.ResponseWriter, r *http.Request) {
@@ -375,11 +421,16 @@ func (s *Server) handleTelAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Action   string `json:"action"` // status | code | signin | password | logout
+		// status | code | resend | signin | password | emailsetup | emailverify | logout
+		Action   string `json:"action"`
 		Phone    string `json:"phone"`
 		Code     string `json:"code"`
 		CodeHash string `json:"codeHash"`
 		Password string `json:"password"`
+		Email    string `json:"email"`
+		// Via is where the code being signed in with came from; "email"
+		// changes the field Telegram expects it in.
+		Via string `json:"via"`
 	}
 	if err := s.telDecode(r, &req); err != nil {
 		http.Error(w, "bad request", 400)
@@ -398,7 +449,7 @@ func (s *Server) handleTelAuth(w http.ResponseWriter, r *http.Request) {
 		s.telLogout(w, r, h)
 		return
 	}
-	if _, err := h.current(); err != nil {
+	if !telAuthLinked(h) {
 		writeJSON(w, map[string]any{"ok": false, "error": "not connected", "reason": "tel_err_not_connected"})
 		return
 	}
@@ -440,28 +491,29 @@ func (s *Server) handleTelAuth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 
 	case "code":
-		var hash, via string
-		err := h.withBridgeOnce(ctx, func(b *tgbridge.Bridge) error {
+		var sent tgbridge.CodeSent
+		err := telAuthCall(ctx, h, true, func(b telAuther) error {
 			var e error
-			hash, via, e = b.SendCode(ctx, strings.TrimSpace(req.Phone))
+			sent, e = b.SendCode(ctx, strings.TrimSpace(req.Phone))
 			return e
 		})
 		if err != nil {
 			telFailAs(w, h, err, "tel_err_lost_code_hash")
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "codeHash": hash, "via": via})
+		h.logCodeVia("code", sent)
+		writeJSON(w, codeSentJSON(sent))
 
 	case "resend":
 		phone := strings.TrimSpace(req.Phone)
-		var hash, via string
-		err := h.withBridgeOnce(ctx, func(b *tgbridge.Bridge) error {
+		var sent tgbridge.CodeSent
+		err := telAuthCall(ctx, h, true, func(b telAuther) error {
 			var e error
-			hash, via, e = b.ResendCode(ctx, phone, req.CodeHash)
+			sent, e = b.ResendCode(ctx, phone, req.CodeHash)
 			// resendCode needs a next delivery method; without one Telegram
 			// says SEND_CODE_UNAVAILABLE, so ask for a fresh code instead.
 			if e != nil && tgerr.Is(e, "SEND_CODE_UNAVAILABLE") {
-				hash, via, e = b.SendCode(ctx, phone)
+				sent, e = b.SendCode(ctx, phone)
 			}
 			return e
 		})
@@ -469,11 +521,42 @@ func (s *Server) handleTelAuth(w http.ResponseWriter, r *http.Request) {
 			telFailAs(w, h, err, "tel_err_lost_code_hash")
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true, "codeHash": hash, "via": via})
+		h.logCodeVia("resend", sent)
+		writeJSON(w, codeSentJSON(sent))
+
+	case "emailsetup":
+		// Telegram sent no code: it wants a login email first. This sends a
+		// code to that email, to prove the user can read it.
+		var pattern string
+		err := telAuthCall(ctx, h, true, func(b telAuther) error {
+			var e error
+			pattern, e = b.SetupLoginEmail(ctx, strings.TrimSpace(req.Phone), req.CodeHash, strings.TrimSpace(req.Email))
+			return e
+		})
+		if err != nil {
+			telFailAs(w, h, err, "tel_err_lost_code_hash")
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "emailPattern": pattern})
+
+	case "emailverify":
+		// The email is proven; Telegram now sends the login code itself.
+		var sent tgbridge.CodeSent
+		err := telAuthCall(ctx, h, true, func(b telAuther) error {
+			var e error
+			sent, e = b.VerifyLoginEmail(ctx, strings.TrimSpace(req.Phone), req.CodeHash, strings.TrimSpace(req.Code))
+			return e
+		})
+		if err != nil {
+			telFailAs(w, h, err, "tel_err_lost_code_hash")
+			return
+		}
+		h.logCodeVia("email verified", sent)
+		writeJSON(w, codeSentJSON(sent))
 
 	case "signin":
-		if err := h.withBridgeOnce(ctx, func(b *tgbridge.Bridge) error {
-			return b.SignIn(ctx, strings.TrimSpace(req.Phone), strings.TrimSpace(req.Code), req.CodeHash)
+		if err := telAuthCall(ctx, h, true, func(b telAuther) error {
+			return b.SignIn(ctx, strings.TrimSpace(req.Phone), strings.TrimSpace(req.Code), req.CodeHash, req.Via == "email")
 		}); err != nil {
 			// A 2FA account needs the password step next; say so explicitly
 			// rather than looking like a wrong code.
@@ -481,7 +564,7 @@ func (s *Server) handleTelAuth(w http.ResponseWriter, r *http.Request) {
 				// The hint comes from the same connection, so fetch it while
 				// we are still on it.
 				var hint string
-				_ = h.withBridge(ctx, func(b *tgbridge.Bridge) error {
+				_ = telAuthCall(ctx, h, false, func(b telAuther) error {
 					hint = b.PasswordHint(ctx)
 					return nil
 				})
@@ -575,14 +658,7 @@ func (s *Server) handleTelDialogs(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	q := r.URL.Query()
-	filter := tgbridge.DialogFilter{
-		Limit:      telAtoi(q.Get("limit"), 40),
-		OffsetDate: telAtoi(q.Get("offsetDate"), 0),
-		OffsetID:   telAtoi(q.Get("offsetId"), 0),
-	}
-	if p, ok := telPeerFromQuery(q, "offset"); ok {
-		filter.OffsetPeer = p
-	}
+	filter := telDialogFilter(q)
 	// A warm cache answers at once, and the refresh runs behind the answer.
 	// Fetching the list costs about a minute on a degraded link, and almost
 	// all of that is spent re-reading conversations that have not changed.
@@ -671,6 +747,7 @@ func (s *Server) handleTelDialogs(w http.ResponseWriter, r *http.Request) {
 		// user had asked for, gone. Conversations that really are over are
 		// removed by the Gone path instead, which Telegram reports outright.
 		h.store().MergeDialogs(page.Dialogs)
+		h.store().SettlePins(page.Dialogs)
 		// Telegram's count of the whole list, kept so the cached answer can
 		// still tell a partial list from a complete one on the next start.
 		h.store().SetDialogTotal(page.TotalKnown)
@@ -828,10 +905,10 @@ func (s *Server) handleTelSend(w http.ResponseWriter, r *http.Request) {
 	defer h.endOp()
 	ctx, cancel := context.WithTimeout(r.Context(), telCallTimeout)
 	defer cancel()
-	var sentID int
+	var sent tgbridge.Sent
 	if err := h.withBridge(ctx, func(b *tgbridge.Bridge) error {
 		var e error
-		sentID, e = b.SendText(ctx, req.Peer, text, randomID(), req.ReplyTo)
+		sent, e = b.SendText(ctx, req.Peer, text, randomID(), req.ReplyTo)
 		return e
 	}); err != nil {
 		h.noteYouBlocked(req.Peer, err)
@@ -841,14 +918,18 @@ func (s *Server) handleTelSend(w http.ResponseWriter, r *http.Request) {
 	h.setErr(nil)
 	h.noteDelivered(req.Peer)
 	// The id Telegram assigned, so the UI can settle the message it already
-	// drew instead of spending a second round trip reading it back.
-	if sentID > 0 {
+	// drew instead of spending a second round trip reading it back -- and its
+	// time, Telegram's, since this device's clock may be far off.
+	if sent.ID > 0 {
+		date := sent.Date
+		if date == 0 {
+			date = int(time.Now().Unix())
+		}
 		h.store().MergeThread(telCacheKey(req.Peer), []tgbridge.Message{{
-			ID: sentID, Text: text, Out: true, Date: int(time.Now().Unix()),
-			ReplyTo: req.ReplyTo,
+			ID: sent.ID, Text: text, Out: true, Date: date, ReplyTo: req.ReplyTo,
 		}})
 	}
-	writeJSON(w, map[string]any{"ok": true, "msgId": sentID})
+	writeJSON(w, map[string]any{"ok": true, "msgId": sent.ID, "date": sent.Date})
 }
 
 // handleTelDelete removes a conversation: leaving a channel, or clearing a
@@ -1006,6 +1087,145 @@ func (s *Server) handleTelPeer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "dialog": d})
 }
 
+// handleTelMembers answers what a conversation's full info says: a
+// channel's member count, and the description (a channel's or group's, or a
+// person's or bot's bio). GET reads the cache only. POST is the page's own step: opening
+// a channel asks Telegram (one call) when its count is not known from the
+// list or a read within the day; opening a chat's info (about:true) asks when
+// its description was not read within the day -- for a channel the same call
+// brings both. A failed read leaves what was there: an old description is
+// still shown.
+func (s *Server) handleTelMembers(w http.ResponseWriter, r *http.Request) {
+	h := s.telHubOrFail(w)
+	if h == nil {
+		return
+	}
+	var peer tgbridge.Peer
+	wantAbout := false
+	if r.Method == http.MethodPost {
+		var req struct {
+			Peer  tgbridge.Peer `json:"peer"`
+			About bool          `json:"about"`
+		}
+		if err := s.telDecode(r, &req); err != nil || req.Peer.ID == 0 {
+			http.Error(w, "bad peer", 400)
+			return
+		}
+		peer, wantAbout = req.Peer, req.About
+	} else {
+		p, ok := telPeerFromQuery(r.URL.Query(), "")
+		if !ok {
+			http.Error(w, "bad peer", 400)
+			return
+		}
+		peer = p
+	}
+	key := telCacheKey(peer)
+	answer := func() {
+		now := time.Now()
+		n, known := h.store().Members(key, now)
+		about, read, fresh := h.store().About(key, now)
+		writeJSON(w, map[string]any{"ok": true, "members": n, "known": known,
+			"about": about, "aboutRead": read, "aboutFresh": fresh})
+	}
+	if r.Method != http.MethodPost {
+		answer()
+		return
+	}
+	// The request names the peer by kind, id and hash; the cached row also
+	// says whether it is a channel's direct messages, which have neither.
+	if cached, ok := h.store().PeerFor(key); ok {
+		peer = cached
+	}
+	channel := peer.ChannelBased() && !peer.Direct
+	needed := func() bool {
+		if !peer.HasAbout() {
+			return false
+		}
+		now := time.Now()
+		_, _, fresh := h.store().About(key, now)
+		if wantAbout && !fresh {
+			return true
+		}
+		_, known := h.store().Members(key, now)
+		return channel && !known
+	}
+	if !needed() {
+		answer()
+		return
+	}
+	// One read at a time: the chat's step and its info opened together, or
+	// two tabs, would otherwise ask Telegram the same thing twice. Whoever
+	// waited finds the answer already cached.
+	telInfoMu.Lock()
+	defer telInfoMu.Unlock()
+	if !needed() {
+		answer()
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), telCallTimeout)
+	defer cancel()
+	info, err := telReadPeerInfo(ctx, h, peer)
+	if errors.Is(err, errTelNoLink) {
+		writeJSON(w, map[string]any{"ok": false, "reason": "tel_err_not_connected"})
+		return
+	}
+	if err != nil && r.Context().Err() != nil {
+		// The page gave it up for something the user did: nothing failed.
+		return
+	}
+	if err != nil {
+		if !telMembersRefused(err) {
+			telFail(w, h, err)
+			return
+		}
+		// Telegram will not say (a private or banned channel, a group we
+		// left, a deleted account): held for the day, or every open would
+		// ask again.
+		h.setErr(nil)
+		h.store().SetInfoRefused(key, channel, time.Now())
+		answer()
+		return
+	}
+	h.setErr(nil)
+	if channel {
+		h.store().SetChannelInfo(key, info, time.Now())
+	} else {
+		h.store().SetAbout(key, info.About, time.Now())
+	}
+	answer()
+}
+
+// telInfoMu serializes full-info reads (see handleTelMembers).
+var telInfoMu sync.Mutex
+
+// errTelNoLink is a call that could not be made: no Telegram link.
+var errTelNoLink = errors.New("tel: not connected")
+
+// telReadPeerInfo asks Telegram for a conversation's full info: one call. A
+// variable so tests can stand in for Telegram.
+var telReadPeerInfo = func(ctx context.Context, h *telHub, peer tgbridge.Peer) (tgbridge.PeerInfo, error) {
+	if _, err := h.current(); err != nil {
+		return tgbridge.PeerInfo{}, errTelNoLink
+	}
+	h.beginOp()
+	defer h.endOp()
+	var info tgbridge.PeerInfo
+	err := h.withBridge(ctx, func(b *tgbridge.Bridge) error {
+		var e error
+		info, e = b.PeerInfo(ctx, peer)
+		return e
+	})
+	return info, err
+}
+
+// telMembersRefused tells Telegram declining to describe a channel (private,
+// banned, gone: a 400/403/406 answer) from a failure to ask it at all. Only
+// the first is an answer worth keeping; a flood wait is about us, not it.
+func telMembersRefused(err error) bool {
+	return tgerr.IsCode(err, 400, 403, 406)
+}
+
 // handleTelRead clears a conversation's unread count. Separate from history so
 // reading older messages never marks anything read by accident.
 func (s *Server) handleTelRead(w http.ResponseWriter, r *http.Request) {
@@ -1083,10 +1303,14 @@ func telStatusKey(err error) string {
 		return "tel_err_bad_credentials"
 	// Telegram names the exact login failure; a generic error hides whether
 	// the code or the connection is at fault.
-	case tgerr.Is(err, "PHONE_CODE_INVALID"):
+	case tgerr.Is(err, "PHONE_CODE_INVALID", "CODE_INVALID", "EMAIL_CODE_INVALID"):
 		return "tel_err_code_invalid"
-	case tgerr.Is(err, "PHONE_CODE_EXPIRED"):
+	case tgerr.Is(err, "PHONE_CODE_EXPIRED", "EMAIL_VERIFY_EXPIRED", "EMAIL_HASH_EXPIRED"):
 		return "tel_err_code_expired"
+	case tgerr.Is(err, "EMAIL_INVALID", "EMAIL_NOT_ALLOWED", "EMAIL_NOT_SETUP"):
+		return "tel_err_email_invalid"
+	case isSignUpRequired(err):
+		return "tel_err_no_account"
 	case tgerr.Is(err, "PHONE_CODE_EMPTY"):
 		return "tel_err_code_empty"
 	case tgerr.Is(err, "PHONE_NUMBER_INVALID"):
@@ -1163,8 +1387,23 @@ func telStatusKey(err error) string {
 	return "tel_err_generic"
 }
 
+// telDialogFilter reads a list page request. The cursor is a message
+// (offsetId, offsetDate) and the conversation it belongs to (offsetPeer*):
+// offsetId is the message, never the peer.
+func telDialogFilter(q url.Values) tgbridge.DialogFilter {
+	f := tgbridge.DialogFilter{
+		Limit:      telAtoi(q.Get("limit"), 40),
+		OffsetDate: telAtoi(q.Get("offsetDate"), 0),
+		OffsetID:   telAtoi(q.Get("offsetId"), 0),
+	}
+	if p, ok := telPeerFromQuery(q, "offsetPeer"); ok {
+		f.OffsetPeer = p
+	}
+	return f
+}
+
 // telPeerFromQuery rebuilds a peer from query parameters; prefix selects a
-// second one ("offset" → offsetKind, offsetId, offsetAccessHash).
+// second one ("offsetPeer" → offsetPeerKind, offsetPeerId, offsetPeerAccessHash).
 func telPeerFromQuery(q url.Values, prefix string) (tgbridge.Peer, bool) {
 	field := func(name string) string {
 		if prefix == "" {
@@ -1200,6 +1439,13 @@ func isBadAPICredentials(err error) bool {
 // isPasswordNeeded reports whether sign-in stopped on two-step verification.
 // gotd replaces SESSION_PASSWORD_NEEDED with a typed error reading "2FA
 // required", so the typed check is the one that fires.
+// isSignUpRequired: the number has no Telegram account, whichever way the
+// code was entered.
+func isSignUpRequired(err error) bool {
+	var su *auth.SignUpRequired
+	return errors.Is(err, tgbridge.ErrSignUpRequired) || errors.As(err, &su)
+}
+
 func isPasswordNeeded(err error) bool {
 	if err == nil {
 		return false

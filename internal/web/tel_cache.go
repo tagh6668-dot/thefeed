@@ -80,7 +80,33 @@ type telCacheData struct {
 	// Directs maps a channel to its direct-messages conversation, so finding
 	// it costs one call per channel, ever.
 	Directs map[string]tgbridge.Peer `json:"directs,omitempty"`
+	// Members are what a conversation's full info was last read to say -- a
+	// channel's member count (the entity often comes without one) and the
+	// description or bio (the entity never has one) -- by conversation key.
+	// A read holds for a day; an older description is still shown when it
+	// cannot be read again.
+	Members map[string]telMemberCount `json:"members,omitempty"`
 }
+
+// telMemberCount is one read of a conversation's full info. N 0 is a channel
+// that hides its count, which is an answer too; a person's entry has only
+// the About half.
+type telMemberCount struct {
+	N  int   `json:"n"`
+	At int64 `json:"at"`
+	// About is the description as of AboutAt. AboutAt 0: never read (a count
+	// kept before descriptions were); a refusal keeps the last About it had.
+	About   string `json:"about,omitempty"`
+	AboutAt int64  `json:"aboutAt,omitempty"`
+}
+
+// telMembersFor is how long a read is served before it is read again: one
+// call per channel per day, and only when the chat or its info is opened.
+const telMembersFor = 24 * time.Hour
+
+// telInfoMax bounds the reads kept. Past a day they only serve as the
+// description to show when a new read fails, so the oldest go first.
+const telInfoMax = 500
 
 type telCache struct {
 	mu   sync.Mutex
@@ -235,7 +261,14 @@ func (c *telCache) MergeDialogs(ds []tgbridge.Dialog) int {
 	for _, d := range ds {
 		if i, ok := have[telCacheKey(d.Peer)]; ok {
 			// Already listed: take the fresher row, since this page read it
-			// from Telegram just now.
+			// from Telegram just now. Its member count included: one this
+			// entity lacks is unknown, not the old one -- kept, an old count
+			// was served for ever and never read again.
+			// A pin order only comes with a list page; a row re-read on its
+			// own keeps the one it had while it stays pinned.
+			if d.Pinned && d.PinOrder == 0 && c.data.Dialogs[i].Pinned {
+				d.PinOrder = c.data.Dialogs[i].PinOrder
+			}
 			c.data.Dialogs[i] = d
 			continue
 		}
@@ -246,6 +279,36 @@ func (c *telCache) MergeDialogs(ds []tgbridge.Dialog) int {
 	c.mu.Unlock()
 	c.save()
 	return added
+}
+
+// SettlePins takes a FIRST page's word on what is pinned. Telegram lists every
+// pin at the top of the first page, so a cached row pinned but not pinned on
+// it was unpinned elsewhere -- and, aged off the page, merging never touched
+// it, so it stayed pinned at the top for ever. A later page says nothing
+// about pins and must not be passed here.
+func (c *telCache) SettlePins(first []tgbridge.Dialog) {
+	if c == nil || len(first) == 0 {
+		return
+	}
+	pinned := make(map[string]bool, len(first))
+	for _, d := range first {
+		if d.Pinned {
+			pinned[telCacheKey(d.Peer)] = true
+		}
+	}
+	c.mu.Lock()
+	changed := false
+	for i := range c.data.Dialogs {
+		d := &c.data.Dialogs[i]
+		if d.Pinned && !pinned[telCacheKey(d.Peer)] {
+			d.Pinned, d.PinOrder = false, 0
+			changed = true
+		}
+	}
+	c.mu.Unlock()
+	if changed {
+		c.save()
+	}
 }
 
 // SetDialogsComplete records whether Telegram said the list ends here.
@@ -704,6 +767,8 @@ func (c *telCache) bumpRow(p tgbridge.Peer, last tgbridge.Message, unread int) {
 	// channel, new rights), so it replaces it. Muted is NOT in the peer and
 	// is carried over: a difference says nothing about notification settings,
 	// and losing the flag here would make a muted channel start ringing.
+	// The member count is taken with the peer, absent or not: an old one
+	// kept here would be served for ever (see Members).
 	row.Peer = p
 	if last.ID > 0 {
 		row.TopMsg, row.When = last.ID, last.Date
@@ -899,8 +964,116 @@ func (c *telCache) ReplaceBlocked(rows []tgbridge.BlockedPeer, complete bool, ed
 	return true
 }
 
-// Forget drops everything. Used when the account signs out: the next account
-// must not inherit the previous one's conversations.
+// Members is a conversation's member count, and whether it is known: one
+// Telegram sent with the row's current entity, else one read within the last
+// day. A row's count is never carried past an entity without one, so it is
+// as fresh as the row.
+func (c *telCache) Members(key string, now time.Time) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, d := range c.data.Dialogs {
+		if telCacheKey(d.Peer) == key && d.Peer.Members > 0 {
+			return d.Peer.Members, true
+		}
+	}
+	m, ok := c.data.Members[key]
+	if !ok || now.Sub(time.Unix(m.At, 0)) >= telMembersFor {
+		return 0, false
+	}
+	return m.N, true
+}
+
+// About is a channel's description or a person's or bot's bio as last read, whether it was ever read,
+// and whether that read is within the day. Kept past the day: a stale
+// description beats none when Telegram cannot be reached.
+func (c *telCache) About(key string, now time.Time) (text string, read, fresh bool) {
+	if c == nil {
+		return "", false, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	m, ok := c.data.Members[key]
+	if !ok || m.AboutAt == 0 {
+		return "", false, false
+	}
+	return m.About, true, now.Sub(time.Unix(m.AboutAt, 0)) < telMembersFor
+}
+
+// SetChannelInfo records a channel's full-info read from Telegram at now:
+// its member count and its description.
+func (c *telCache) SetChannelInfo(key string, info tgbridge.PeerInfo, now time.Time) {
+	c.putInfo(key, now, func(m *telMemberCount) {
+		*m = telMemberCount{N: info.Members, At: now.Unix(), About: info.About, AboutAt: now.Unix()}
+	})
+}
+
+// SetAbout records a person's or bot's bio read from Telegram at now. No
+// member count: they have none.
+func (c *telCache) SetAbout(key, about string, now time.Time) {
+	c.putInfo(key, now, func(m *telMemberCount) {
+		m.About, m.AboutAt = about, now.Unix()
+	})
+}
+
+// SetInfoRefused records Telegram declining to describe a conversation
+// (a private or banned channel, a deleted account): held for the day so
+// every open does not ask again -- for a channel as a hidden count too --
+// and the description it last had stays.
+func (c *telCache) SetInfoRefused(key string, channel bool, now time.Time) {
+	c.putInfo(key, now, func(m *telMemberCount) {
+		if channel {
+			m.N, m.At = 0, now.Unix()
+		}
+		m.AboutAt = now.Unix()
+	})
+}
+
+// readAt is when an entry was last written, for eviction.
+func (m telMemberCount) readAt() int64 {
+	if m.AboutAt > m.At {
+		return m.AboutAt
+	}
+	return m.At
+}
+
+func (c *telCache) putInfo(key string, now time.Time, set func(*telMemberCount)) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.data.Members == nil {
+		c.data.Members = map[string]telMemberCount{}
+	}
+	m := c.data.Members[key]
+	set(&m)
+	c.data.Members[key] = m
+	// Expired counts with no description go: they are read again on the
+	// next open anyway. Past the bound, the oldest reads go too.
+	for k, m := range c.data.Members {
+		if m.AboutAt == 0 && now.Sub(time.Unix(m.At, 0)) >= telMembersFor {
+			delete(c.data.Members, k)
+		}
+	}
+	if over := len(c.data.Members) - telInfoMax; over > 0 {
+		keys := make([]string, 0, len(c.data.Members))
+		for k := range c.data.Members {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool { return c.data.Members[keys[i]].readAt() < c.data.Members[keys[j]].readAt() })
+		for _, k := range keys[:over] {
+			delete(c.data.Members, k)
+		}
+	}
+	c.mu.Unlock()
+	c.save()
+}
+
+// Forget drops everything: conversations, member counts, descriptions. Used
+// when the account signs out (the next account must not inherit the previous
+// one's conversations) and when the user clears the Telegram cache.
 func (c *telCache) Forget() {
 	if c == nil {
 		return

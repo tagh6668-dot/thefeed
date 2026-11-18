@@ -17,6 +17,17 @@ var telState = {
   // The account's blocklist as the backend last learnt it, by user id:
   // {peer, date, deleted} rows.
   blocked: {},
+  // Member counts read on demand, by conversation key (0: hidden by the
+  // channel). A count that came with the list row is on the peer itself.
+  members: {},
+  // Whether each of those is still current in the backend (a read holds a
+  // day). A stale one stays on screen until the step reads it again.
+  membersFresh: {},
+  // Channel descriptions as last read, by conversation key: {text, fresh}.
+  // An old one is still shown when a new read fails.
+  about: {},
+  aboutBusy: {},         // being read for the open info sheet
+  aboutFailed: {},       // the last read failed with nothing to show
   cursor: null,          // {date,id,peer} — where the next page continues
   more: false,           // another page exists
   total: 0,              // rows Telegram says exist, when it says
@@ -56,6 +67,8 @@ var telState = {
   // login
   codeHash: '',
   codeVia: '',   // where Telegram says it put the code
+  codeEmail: '', // masked address an email code went to
+  emailSent: '', // setupemail: masked address the setup code went to
   phone: '',
   needPassword: false,
   passwordHint: '',
@@ -248,9 +261,9 @@ function telHistAbort() {
 // is reading or typing: the shield already says it, the reconnect is already
 // running, and the message they were sending goes through anyway. Raising it
 // here showed "not connected" over a connection that was about to work.
-async function telCallQuiet(url, body) {
+async function telCallQuiet(url, body, signal) {
   var had = telState.error;
-  var r = await telCall(url, body);
+  var r = await telCall(url, body, undefined, signal);
   if (!r) telState.error = had;
   return r;
 }
@@ -355,6 +368,10 @@ async function telBgOp(label, fn) {
 var telIdleWaiters = [];
 
 function telWhenIdle() {
+  // A description being read for an info sheet is the one background read a
+  // user action does not wait behind: it gives way, and is read on the next
+  // open (the old text stays meanwhile).
+  telAboutAbort();
   if (!telState.busy && !telState.bg) return Promise.resolve();
   return new Promise(function (resolve) { telIdleWaiters.push(resolve); });
 }
@@ -652,6 +669,8 @@ function telAutoResume() {
 function telClearLoginStep() {
   telState.codeHash = '';
   telState.codeVia = '';
+  telState.codeEmail = '';
+  telState.emailSent = '';
   telState.needPassword = false;
   telState.passwordHint = '';
 }
@@ -745,6 +764,8 @@ async function telChangeServer() {
   // the moment the new config connects.
   telState.codeHash = '';
   telState.codeVia = '';
+  telState.codeEmail = '';
+  telState.emailSent = '';
   telState.needPassword = false;
   await telDisconnect();
 }
@@ -769,6 +790,11 @@ window.telRecheck = telRecheck;
 function telResetData() {
   telState.dialogs = [];
   telState.blocked = {};
+  telState.members = {};
+  telState.membersFresh = {};
+  telState.about = {};
+  telState.aboutBusy = {};
+  telState.aboutFailed = {};
   telState.threads = {};
   telState.cursor = null;
   telState.more = false;
@@ -796,7 +822,7 @@ async function telSaveCredentials() {
   }
   // The stored session belongs to the app that created it, so changing these
   // signs the account out. Said before the fact, not discovered afterwards.
-  if (info.hasSession && !confirm(telT('tel_creds_signout_confirm'))) return;
+  if (info.hasSession && !(await showConfirmDialog(telT('tel_creds_signout_confirm')))) return;
   await telOp('tel_working', async function () {
     var r = await telCall('/api/tel/credentials', { apiId: id, apiHash: hash });
     if (!r) return;
@@ -815,7 +841,7 @@ window.telSaveCredentials = telSaveCredentials;
 // any change of key, it signs the account out.
 async function telUseDefaultCredentials() {
   var info = telState.info || {};
-  if (info.hasSession && !confirm(telT('tel_creds_signout_confirm'))) return;
+  if (info.hasSession && !(await showConfirmDialog(telT('tel_creds_signout_confirm')))) return;
   await telOp('tel_working', async function () {
     var r = await telCall('/api/tel/credentials', { useDefault: true });
     if (!r) return;
@@ -908,8 +934,32 @@ async function telSendCode() {
   telState.phone = phone;   // remembered, so a failure never clears the field
   await telOp('tel_sending_code', async function () {
     var r = await telCall('/api/tel/auth', { action: 'code', phone: phone }, 'tel_err_code');
-    if (r) { telState.codeHash = r.codeHash; telState.codeVia = r.via || ''; }
+    if (r) await telTakeCode(r);
   });
+}
+
+// telTakeCode records where Telegram sent the code. done: Telegram signed the
+// session in without one.
+async function telTakeCode(r) {
+  if (r.done) { await telSignedIn(); return; }
+  if (!r.codeHash) return;
+  telState.codeHash = r.codeHash;
+  telState.codeVia = r.via || '';
+  telState.codeEmail = r.emailPattern || '';
+  telState.emailSent = '';
+}
+
+// telSignedIn starts the new account clean, whatever a late answer for the
+// previous one left behind.
+async function telSignedIn() {
+  telState.codeHash = '';
+  telState.codeVia = '';
+  telState.codeEmail = '';
+  telState.emailSent = '';
+  telState.needPassword = false;
+  telResetData();
+  await telRefreshInfo();
+  if (telReady()) telLoadDialogs();
 }
 window.telSendCode = telSendCode;
 
@@ -919,7 +969,7 @@ async function telResendCode() {
   await telOp('tel_sending_code', async function () {
     var r = await telCall('/api/tel/auth',
       { action: 'resend', phone: telState.phone, codeHash: telState.codeHash }, 'tel_err_code');
-    if (r && r.codeHash) { telState.codeHash = r.codeHash; telState.codeVia = r.via || ''; }
+    if (r) await telTakeCode(r);
   });
 }
 window.telResendCode = telResendCode;
@@ -930,6 +980,8 @@ function telEditPhone() {
   if (telState.busy) return;
   telState.codeHash = '';
   telState.codeVia = '';
+  telState.codeEmail = '';
+  telState.emailSent = '';
   telState.error = '';
   telRender();
 }
@@ -940,7 +992,8 @@ async function telSignIn() {
   if (!code) return;
   await telOp('tel_signing_in', async function () {
     var payload = {
-      action: 'signin', phone: telState.phone, code: code, codeHash: telState.codeHash
+      action: 'signin', phone: telState.phone, code: code, codeHash: telState.codeHash,
+      via: telState.codeVia
     };
     try {
       var r = await telFetch('/api/tel/auth', telPost(payload));
@@ -955,14 +1008,47 @@ async function telSignIn() {
       telState.error = telT('tel_err_signin');
       return;
     }
-    // A new account starts clean, whatever a late answer for the previous
-    // one left behind.
-    telResetData();
-    await telRefreshInfo();
-    if (telReady()) telLoadDialogs();
+    await telSignedIn();
   });
 }
 window.telSignIn = telSignIn;
+
+// telSetupEmail answers "setupemail": Telegram sent no code and wants a login
+// email first. It sends a code to the address given, to prove it is theirs.
+async function telSetupEmail() {
+  var email = ((document.getElementById('telEmail') || {}).value || '').trim();
+  if (!email || email.indexOf('@') < 1) { telState.error = telT('tel_err_email_invalid'); telRender(); return; }
+  await telOp('tel_sending_code', async function () {
+    var r = await telCall('/api/tel/auth', {
+      action: 'emailsetup', phone: telState.phone, codeHash: telState.codeHash, email: email
+    }, 'tel_err_code');
+    if (r) telState.emailSent = r.emailPattern || email;
+  });
+}
+window.telSetupEmail = telSetupEmail;
+
+// telVerifyEmail checks the setup code; Telegram then sends the login code
+// itself, usually to that same email.
+async function telVerifyEmail() {
+  var code = ((document.getElementById('telEmailCode') || {}).value || '').trim();
+  if (!code) return;
+  await telOp('tel_signing_in', async function () {
+    var r = await telCall('/api/tel/auth', {
+      action: 'emailverify', phone: telState.phone, codeHash: telState.codeHash, code: code
+    }, 'tel_err_signin');
+    if (r) await telTakeCode(r);
+  });
+}
+window.telVerifyEmail = telVerifyEmail;
+
+// telChangeEmail goes back to the address field. Local only.
+function telChangeEmail() {
+  if (telState.busy) return;
+  telState.emailSent = '';
+  telState.error = '';
+  telRender();
+}
+window.telChangeEmail = telChangeEmail;
 
 async function telSignInPassword() {
   var pw = (document.getElementById('telPassword') || {}).value || '';
@@ -970,17 +1056,16 @@ async function telSignInPassword() {
   await telOp('tel_signing_in', async function () {
     var r = await telCall('/api/tel/auth', { action: 'password', password: pw }, 'tel_err_signin');
     if (!r) return;
-    telState.needPassword = false;
-    telResetData();
-    await telRefreshInfo();
-    if (telReady()) telLoadDialogs();
+    await telSignedIn();
   });
 }
 window.telSignInPassword = telSignInPassword;
 
 async function telLogout() {
   telCloseSheet();
-  if (!confirm(telT('tel_logout_confirm'))) return;
+  // Not confirm(): iOS WKWebView has no UI delegate, so it returns false
+  // without showing anything and the button would do nothing.
+  if (!(await showConfirmDialog(telT('tel_logout_confirm')))) return;
   // Deliberately NOT inside telOp: telOp does nothing while another operation
   // holds the link, which would make "log out" during a fetch a no-op with
   // nothing on screen to say so. Signing out must always be possible, so it
@@ -993,6 +1078,8 @@ async function telLogout() {
   telState.user = null;
   telState.codeHash = '';
   telState.codeVia = '';
+  telState.codeEmail = '';
+  telState.emailSent = '';
   telState.needPassword = false;
   telResetData();
   telRender();
@@ -1023,7 +1110,7 @@ async function telPrimeFromCache() {
   // knows whether there is more and where it continues -- which is what puts
   // the "load more chats" button on screen. Nothing is fetched here: the rest
   // of the list costs a page of DNS queries each and is the user's to ask for.
-  telApplyPage(r.page, true);
+  telApplyPage(r.page, true, true);
 }
 window.telPrimeFromCache = telPrimeFromCache;
 
@@ -1144,6 +1231,9 @@ window.telJumpToMsg = telJumpToMsg;
 async function telJoinChannel(key) {
   var d = telDialogFor(key);
   if (!d) return;
+  // Taken behind whatever runs (a refresh, the info sheet's read), not
+  // dropped: telOp alone refuses while anything is in flight.
+  await telWhenIdle();
   await telOp('tel_working', async function () {
     var r = await telCall('/api/tel/join', { peer: d.peer }, 'tel_err_generic');
     if (!r) return;
@@ -1285,17 +1375,22 @@ async function telPrimeThreadFromCache(key, peer) {
 }
 window.telPrimeThreadFromCache = telPrimeThreadFromCache;
 
-// telLoadDialogs fetches the first page and replaces the list.
+// telLoadDialogs fetches the first page and merges it into the list.
 //
 // force=true means the user asked Telegram, so the backend must not answer
 // from its cache: that is the only way a conversation started on another
 // device shows up here.
+//
+// Merged, never replaced: a live answer is the newest page only, and
+// replacing with it dropped every older row from the screen -- the quiet
+// private chats first, since active channels and bots fill that page. A new
+// account starts from an empty list anyway (telResetData).
 async function telLoadDialogs(force) {
   await telOp('tel_loading_chats', async function () {
     var r = await telCall('/api/tel/dialogs?limit=' + TEL_DIALOG_PAGE +
       (force ? '&refresh=1' : ''));
     if (!r) return;
-    telApplyPage(r.page, true);
+    telApplyPage(r.page, false, true);
     telState.loadedOnce = true;
     // ONE page, and that is all: the rest is the user's to ask for, one page
     // per press of "load more chats".
@@ -1312,7 +1407,7 @@ async function telRefreshDialogs(background) {
     var r = await telCall('/api/tel/dialogs?limit=' + TEL_DIALOG_PAGE +
       (background ? '' : '&refresh=1'));
     if (!r) return;
-    telApplyPage(r.page, false);
+    telApplyPage(r.page, false, true);
     telLoadBlocked();
     var grew = telUnreadTotal() - before;
     if (background && grew > 0) telNotifyNew(grew);
@@ -1330,9 +1425,11 @@ async function telLoadMoreDialogs(background) {
     '&offsetDate=' + encodeURIComponent(c.date || 0) +
     '&offsetId=' + encodeURIComponent(c.id || 0);
   // Telegram pages from this peer, and cannot address it without its hash.
+  // Its own fields: offsetId is the message, not the peer.
   if (c.peer && c.peer.id) {
-    q += '&offsetKind=' + encodeURIComponent(c.peer.kind) +
-      '&offsetAccessHash=' + encodeURIComponent(c.peer.accessHash || 0);
+    q += '&offsetPeerKind=' + encodeURIComponent(c.peer.kind) +
+      '&offsetPeerId=' + encodeURIComponent(c.peer.id) +
+      '&offsetPeerAccessHash=' + encodeURIComponent(c.peer.accessHash || 0);
   }
   var ran = false;
   var added = 0;
@@ -1376,8 +1473,10 @@ async function telLoadMoreNow() {
 window.telLoadMoreNow = telLoadMoreNow;
 
 // telApplyPage merges a page in; replace only on an explicit reload, or the
-// list shrinks back to one page on every refresh.
-function telApplyPage(page, replace) {
+// list shrinks back to one page on every refresh. first says it is the list's
+// FIRST page, which settles the pins (see below); a later page says nothing
+// about them.
+function telApplyPage(page, replace, first) {
   if (!page) return 0;
   var rows = page.dialogs || [];
   if (replace) telState.dialogs = [];
@@ -1393,6 +1492,8 @@ function telApplyPage(page, replace) {
     } else {
       // Keep the cached row's object identity but take the fresh values.
       var cur = telState.dialogs[byKey[k]];
+      // The account lists it, so it was joined (here or elsewhere).
+      if (cur.visiting) { cur.visiting = false; cur.visitedAt = 0; }
       cur.peer = d.peer;             // a renamed chat / rotated access hash
       cur.unread = d.unread;
       cur.topMsg = d.topMsg;
@@ -1400,6 +1501,7 @@ function telApplyPage(page, replace) {
       cur.readOutbox = d.readOutbox; // how far the other side has read
       cur.readInbox = d.readInbox;   // how far WE have, on any device
       cur.pinned = d.pinned;
+      cur.pinOrder = d.pinOrder;     // the user's order among the pins
       // Muted was missing from this list, and a row that already existed
       // therefore kept whatever it was first fetched with FOR EVER. Telegram
       // sent the right value, the backend stored the right value, and the row
@@ -1413,11 +1515,17 @@ function telApplyPage(page, replace) {
       if (d.preview) cur.preview = d.preview;
     }
   });
-  // Pinned first, then by the newest message we know of — Telegram's own order.
-  telState.dialogs.sort(function (a, b) {
-    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
-    return (b.topMsg || 0) - (a.topMsg || 0);
-  });
+  // Every pin is on the first page, so a row pinned here but not pinned on it
+  // was unpinned elsewhere. Merging never touched it once it aged off the
+  // page, and it stayed pinned at the top for ever.
+  if (first) {
+    var pins = {};
+    rows.forEach(function (d) { if (d.pinned) pins[telPeerKey(d.peer)] = true; });
+    telState.dialogs.forEach(function (d) {
+      if (d.pinned && !pins[telPeerKey(d.peer)]) { d.pinned = false; d.pinOrder = 0; }
+    });
+  }
+  telSortDialogs();
   telState.more = !!page.more && telState.dialogs.length < TEL_DIALOG_MAX;
   telState.total = page.totalKnown || telState.total;
   telState.cursor = page.more
@@ -1425,6 +1533,28 @@ function telApplyPage(page, replace) {
     : null;
   telRender();
   return added;
+}
+
+// telSortDialogs puts the list in Telegram's order: pinned first, in the
+// user's pin order, then by the time of the newest message. Not by its id:
+// private chats, bots and basic groups share one id counter and each channel
+// has its own, so a busy channel's ids buried a private chat written to a
+// minute ago.
+function telSortDialogs() {
+  telState.dialogs.sort(function (a, b) {
+    if (!!a.pinned !== !!b.pinned) return a.pinned ? -1 : 1;
+    if (a.pinned) {
+      // A pin with no known order goes after those with one.
+      var pa = a.pinOrder || 1e9, pb = b.pinOrder || 1e9;
+      if (pa !== pb) return pa - pb;
+    }
+    // Opened by name or link, not joined: the row is there to come back to,
+    // so it stays under the pins, newest visit first -- by time, one with no
+    // messages went to the very bottom.
+    if (!!a.visiting !== !!b.visiting) return a.visiting ? -1 : 1;
+    if (a.visiting) return (b.visitedAt || 0) - (a.visitedAt || 0);
+    return ((b.when || 0) - (a.when || 0)) || ((b.topMsg || 0) - (a.topMsg || 0));
+  });
 }
 
 // telDialogPagesExpected is how many fetches the whole list will take, from
@@ -1573,6 +1703,7 @@ async function telOpenPeer(key) {
   var unreadAt = d ? (d.unread || 0) : 0;
   if (unreadAt > 0) telSepPin(key, d.readInbox || 0);
   var th = telEnterThread(key, peer);
+  telLoadMembers();
   telScheduleNext();
   // Show what we already have before asking for more. A page of history costs
   // about half a minute over DNS, and spending it in front of a blank pane is
@@ -1598,6 +1729,8 @@ async function telOpenPeer(key) {
   // Counters last, and only for a conversation still open: the messages
   // matter more than the numbers on them, so they get the link first.
   if (telPeerKey(telState.peer) === key) await telRefreshStats(key, peer);
+  // The member count, where it is missing: one more step, once a day.
+  if (telPeerKey(telState.peer) === key) await telFetchMembers(key, peer);
   telStepsDone();
   // Last chance: on a cold open the history fetch above is what brought the
   // messages, so neither attempt earlier had anything to count back through.
@@ -1796,12 +1929,22 @@ function telMergeMessages(th, msgs, live) {
 function telTouchPreview(key, th) {
   var d = telDialogFor(key);
   if (!d || !th.msgs.length) return;
-  // topMsg orders the list, so a placeholder's id must never reach it.
+  // A placeholder's id must never reach topMsg: it pages the history.
   var newest = telNewestRealID(th);
   if (newest) d.topMsg = Math.max(d.topMsg || 0, newest);
   var last = th.msgs[th.msgs.length - 1];
   if (last.text) d.preview = last.text;
-  if (last.date) d.when = Math.max(d.when || 0, last.date);
+  // The row's time is the newest REAL message's, which is Telegram's clock.
+  // A placeholder or a failed send carries this device's, often far off.
+  var when = 0;
+  for (var i = th.msgs.length - 1; i >= 0; i--) {
+    if (th.msgs[i].id < TEL_PENDING_BASE) { when = th.msgs[i].date || 0; break; }
+  }
+  if (when > (d.when || 0)) {
+    d.when = when;
+    // As in Telegram: the conversation moves up at once.
+    telSortDialogs();
+  }
 }
 
 async function telMarkRead(peer, maxID) {
@@ -1865,6 +2008,9 @@ async function telSend() {
       // simply becomes the real message. Reading it back cost a second round
       // trip -- about half the wait -- to learn something already known.
       pending.id = r.msgId;
+      // Telegram's time for it, not this device's: the list is ordered by
+      // it, and a phone's clock is often far off.
+      if (r.date) pending.date = r.date;
       pending.pending = false;
       // Known from our own answer, not fetched: see telFetchCursor.
       pending.sent = true;
@@ -2039,19 +2185,26 @@ async function telStartNewChat() {
   telCloseSheet();
   // A private group or channel's invite link: preview it, join on a tap.
   if (telIsInvite(name)) { telOpenInvite(name); return; }
+  var opened = null;
   await telOp('tel_working', async function () {
     var r = await telCall('/api/tel/resolve', { username: name }, 'tel_err_username');
     if (!r || !r.peer) return;
     var key = telPeerKey(r.peer);
+    opened = { key: key, peer: r.peer };
     var th = telThread(key);
     th.peer = r.peer;
-    // Put it at the top of the list so it has a row to come back to.
+    // A row to come back to. It takes its place by its newest message's
+    // time once the history lands, like every other row.
     if (!telDialogFor(key)) {
       // visiting: opened by name or through a link, not subscribed to. The
       // join offer hangs off this, so it only appears where joining means
       // something.
-      telState.dialogs.unshift({ peer: r.peer, unread: 0, topMsg: 0, preview: '', visiting: true });
+      telState.dialogs.unshift({ peer: r.peer, unread: 0, topMsg: 0, preview: '', visiting: true, visitedAt: Date.now() });
+    } else {
+      var seen = telDialogFor(key);
+      if (seen.visiting) seen.visitedAt = Date.now();
     }
+    telSortDialogs();
     // Opened inline: telOpenPeer would wait for the tunnel this call holds.
     var th = telEnterThread(key, r.peer);
     var h = await telCall(telHistoryQuery(r.peer, { limit: TEL_HISTORY_PAGE }));
@@ -2063,6 +2216,8 @@ async function telStartNewChat() {
     telState.jumpToBottom = true;
     telRender();
   });
+  // As in telOpenByUsername: the member-count step, once the link is free.
+  if (opened && telPeerKey(telState.peer) === opened.key) await telFetchMembers(opened.key, opened.peer);
 }
 window.telStartNewChat = telStartNewChat;
 
@@ -2104,7 +2259,10 @@ function telTick() {
   telAutoResume();
   telState.ticks = (telState.ticks || 0) + 1;
   // In flight: only the query counter is worth refreshing, every other tick.
-  if (telState.busy || telState.bg || (telState.info && telState.info.connecting)) {
+  // An ad fetch moves the counter too, but does NOT hold the check back: ads
+  // are the lowest priority, and the check's own operation cancels the ad.
+  var inFlight = telState.busy || telState.bg || (telState.info && telState.info.connecting);
+  if (inFlight || telState.adBusy) {
     if (telState.ticks % 2 === 0) {
       telFetch('/api/tel/info').then(function (info) {
         var before = telScreenKey(telState.info);
@@ -2119,7 +2277,7 @@ function telTick() {
         if (telScreenKey(info) !== before) telRender();
       }).catch(function () { });
     }
-    return;
+    if (inFlight) return;
   }
   if (!telReady() || document.hidden) return;
   if (Date.now() < telState.nextAt) return;
@@ -2388,11 +2546,8 @@ function telRenderTopbar() {
   html += '<div class="tel-topbar-title"><span class="tel-title" dir="auto">' +
     telEsc(telT('tel_title')) + '</span>' +
     '<span class="tel-badge">' + telEsc(telT('tel_badge')) + '</span></div>';
-  if (telReady()) html += telSearchBtnHTML('list') + telCountdownHTML();
-  html += '<button class="tel-icon-btn tel-refresh-btn' + ((telState.busy || telState.bg) ? ' spinning' : '') + '"' +
-    (telState.busy ? ' disabled' : '') + ' title="' + telAttrQ(telT('tel_refresh')) +
-    '" aria-label="' + telAttrQ(telT('tel_refresh')) + '"' + TEL_KEEP_FOCUS + ' onclick="telRefreshNow(\'list\')">' +
-    icon('refresh') + '</button>';
+  if (telReady()) html += telSearchBtnHTML('list');
+  html += telRefreshBtnHTML('list');
   // ALWAYS present, never conditional. The re-check lives inside the sheet it
   // opens, so hiding the shield when nothing looks usable removes the one
   // control that could make something usable again. Red says "nothing is
@@ -2464,6 +2619,8 @@ async function telPickServer(key) {
   if (key !== current) {
     telState.codeHash = '';
     telState.codeVia = '';
+    telState.codeEmail = '';
+    telState.emailSent = '';
     telState.needPassword = false;
   }
   // A switch away from a live link: the backend drops that link itself, so
@@ -2491,24 +2648,25 @@ async function telSwitchServer(key) {
   telRender();
 }
 
-// telCountdownHTML is the ring counting down to the next automatic check.
-function telCountdownHTML() {
-  return '<button class="tel-icon-btn tel-timer-btn" onclick="telToastNextPoll()" aria-label="' +
-    telAttrQ(telT('tel_next_check').replace('{n}', '')) + '">' +
+// telRefreshBtnHTML is the countdown to the next automatic check, and the
+// button that does it now: one control, not two. While a fetch runs, the ring
+// gives way to the turning arrow (CSS). what is 'list' or 'thread'.
+function telRefreshBtnHTML(what) {
+  var spin = telState.busy || telState.bg;
+  return '<button class="tel-icon-btn tel-refresh-btn tel-timer-btn' + (spin ? ' spinning' : '') + '"' +
+    (telState.busy ? ' disabled' : '') + ' title="' + telAttrQ(telT('tel_refresh')) +
+    '" aria-label="' + telAttrQ(telT('tel_refresh')) + '"' + TEL_KEEP_FOCUS +
+    ' onclick="telRefreshNow(\'' + what + '\')">' + icon('refresh') +
     '<span class="tel-timer-ring"><span class="tel-timer-num"></span></span></button>';
 }
-
-function telToastNextPoll() { showToast(telState._nextText || ''); }
-window.telToastNextPoll = telToastNextPoll;
 
 function telPaintCountdown() {
   var secs = Math.max(0, Math.ceil((telState.nextAt - Date.now()) / 1000));
   var text = telT('tel_next_check').replace('{n}', secs);
-  telState._nextText = text;
   var total = telPollInterval() / 1000;
   var deg = Math.round(Math.max(0, Math.min(1, secs / total)) * 360);
   document.querySelectorAll('.tel-timer-btn').forEach(function (btn) {
-    btn.title = text;
+    btn.title = telT('tel_refresh') + ' — ' + text;
     var ring = btn.querySelector('.tel-timer-ring');
     if (ring) ring.style.background = 'conic-gradient(var(--accent) ' + deg + 'deg, var(--border) ' + deg + 'deg)';
     var num = btn.querySelector('.tel-timer-num');
@@ -2522,9 +2680,11 @@ function telPaintCountdown() {
 function telRenderCodeVia() {
   if (!telState.codeVia) return '';
   var k = 'tel_code_via_' + telState.codeVia;
+  if (telState.codeVia === 'email' && telState.codeEmail) k = 'tel_code_via_email_to';
   var txt = telT(k);
   if (txt === k) return '';
-  return '<div class="tel-hint" dir="auto">' + telEsc(txt) + '</div>';
+  return '<div class="tel-hint" dir="auto">' +
+    telEsc(txt).replace('{email}', function () { return telLTR(telEsc(telState.codeEmail)); }) + '</div>';
 }
 
 // telResume rebuilds the connection on the config we already had. Reading the
@@ -2591,11 +2751,14 @@ function telPaintProgress() {
   var info = telState.info || {};
   // Connecting counts: it runs on the backend, with no call in flight here.
   var connecting = !!info.connecting;
-  var running = telState.busy || telState.bg || connecting;
+  // An ad fetch too: it is outside telOp so it never holds anyone up, but it
+  // spends queries like any other round trip and must say so.
+  var running = telState.busy || telState.bg || connecting || !!telState.adBusy;
   var label = '';
   if (telState.busy) label = telT(telState.busyLabel || 'tel_working');
   else if (telState.bg) label = telT(telState.bgLabel || 'tel_checking_new');
   else if (connecting) label = telPhaseLabel(info.phase);
+  else if (telState.adBusy) label = telT('tel_loading_ad');
   // Which conversation this is for. Switching channels mid-fetch is otherwise
   // invisible: every step reads the same, so there is no way to tell that the
   // tap landed and the old fetch was dropped.
@@ -2848,6 +3011,7 @@ function telRenderLogin() {
       '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_login_hint')) + '</div></div>';
     return html;
   }
+  if (telState.codeVia === 'setupemail') return html + telRenderEmailSetup() + '</div>';
   html += '<div class="tel-step-head" dir="auto">' +
     telEsc(telT('tel_code_sent').replace('{phone}', telLTR(telState.phone))) + '</div>' +
     telRenderCodeVia() +
@@ -2859,9 +3023,242 @@ function telRenderLogin() {
     telEsc(telT('tel_resend')) + '</button>' +
     '<button class="tel-btn" onclick="telEditPhone()"' + (telState.busy ? ' disabled' : '') + '>' +
     telEsc(telT('tel_edit_phone')) + '</button>' +
-    '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_code_hint')) + '</div></div>';
+    // "It came in your own Telegram" is only true of an in-app code.
+    (telState.codeVia === '' || telState.codeVia === 'app'
+      ? '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_code_hint')) + '</div>' : '') + '</div>';
   return html;
 }
+
+// telRenderEmailSetup is the step Telegram asks for instead of sending a code:
+// add a login email, then type the code sent to it.
+function telRenderEmailSetup() {
+  var dis = telState.busy ? ' disabled' : '';
+  var back = '<button class="tel-btn" onclick="telEditPhone()"' + dis + '>' +
+    telEsc(telT('tel_edit_phone')) + '</button>';
+  if (!telState.emailSent) {
+    return '<div class="tel-step-head" dir="auto">' + telEsc(telT('tel_email_setup_intro')) + '</div>' +
+      '<label class="tel-label" for="telEmail" dir="auto">' + telEsc(telT('tel_email')) + '</label>' +
+      '<input id="telEmail" class="tel-input" type="email" inputmode="email" autocomplete="email" dir="ltr">' +
+      '<button class="tel-btn tel-btn-primary" onclick="telSetupEmail()"' + dis + '>' +
+      telEsc(telT('tel_send_code')) + '</button>' + back +
+      '<div class="tel-hint" dir="auto">' + telEsc(telT('tel_email_setup_hint')) + '</div>';
+  }
+  return '<div class="tel-step-head" dir="auto">' +
+    telEsc(telT('tel_email_code_sent')).replace('{email}', function () { return telLTR(telEsc(telState.emailSent)); }) + '</div>' +
+    '<label class="tel-label" for="telEmailCode" dir="auto">' + telEsc(telT('tel_code')) + '</label>' +
+    '<input id="telEmailCode" class="tel-input" type="text" inputmode="numeric" autocomplete="one-time-code" dir="ltr">' +
+    '<button class="tel-btn tel-btn-primary" onclick="telVerifyEmail()"' + dis + '>' +
+    telEsc(telT('tel_continue')) + '</button>' +
+    '<button class="tel-btn" onclick="telChangeEmail()"' + dis + '>' + telEsc(telT('tel_change_email')) + '</button>' +
+    back;
+}
+
+// telThreadSub is the line under the open chat's name, as HTML: how many are
+// in it -- or, with no count, what it is -- then the @username. One line cut
+// with an ellipsis, so the end is what a phone loses: the count goes first.
+// Each part is isolated so a Latin @id cannot reorder a Persian line.
+function telThreadSub(peer) {
+  if (peer.direct) return '<bdi>' + telEsc(telT('tel_direct_sub')) + '</bdi>';
+  var n = telMembersLine(peer);
+  var parts = ['<bdi>' + telEsc(n || telT('tel_kind_' + peer.kind)) + '</bdi>'];
+  if (peer.username) parts.push('<bdi dir="ltr">@' + telEsc(peer.username) + '</bdi>');
+  return parts.join(' · ');
+}
+
+// telUIDir is the interface's direction. The header line is in the UI's
+// language; dir="auto" would take it from the @id's first letter instead.
+function telUIDir() {
+  return document.documentElement.dir === 'rtl' ? 'rtl' : 'ltr';
+}
+
+// telMembersLine is "12.3K subscribers" / "42 members", or '' when not known
+// (or hidden). People and bots have none.
+function telMembersLine(peer) {
+  if (!peer || peer.direct || (peer.kind !== 'channel' && peer.kind !== 'group' && peer.kind !== 'forum')) return '';
+  var n = peer.members || telState.members[telPeerKey(peer)] || 0;
+  if (!n) return '';
+  var sub = peer.kind === 'channel';
+  if (n === 1) return telT(sub ? 'tel_subscribers_one' : 'tel_members_one');
+  return telT(sub ? 'tel_subscribers_n' : 'tel_members_n').replace('{n}', telFmtCount(n));
+}
+
+// telHasFullInfo says whether a conversation has a full info to read -- a
+// member count it may come without, and a description: channels and
+// supergroups. Basic groups always come with their count; people, bots and
+// direct messages have neither.
+function telHasFullInfo(peer) {
+  if (!peer || peer.direct) return false;
+  if (peer.kind === 'channel' || peer.kind === 'forum') return true;
+  return peer.kind === 'group' && !!peer.accessHash && String(peer.accessHash) !== '0';
+}
+
+// telNoteInfo keeps what an answer from /api/tel/members says: the count and
+// the description. Whether anything on screen changed.
+function telNoteInfo(key, r) {
+  if (!r || !r.ok) return false;
+  var was = JSON.stringify([telState.members[key], telState.about[key] || null]);
+  // Not known any more: the count shown stays until the step replaces it,
+  // but it is read again rather than trusted for the life of the page.
+  telState.membersFresh[key] = !!r.known;
+  if (r.known) telState.members[key] = r.members;
+  // Never read (or the cache was cleared): nothing to show.
+  if (r.aboutRead) telState.about[key] = { text: String(r.about || ''), fresh: !!r.aboutFresh };
+  else delete telState.about[key];
+  return JSON.stringify([telState.members[key], telState.about[key] || null]) !== was;
+}
+
+// telHasAbout says whether a conversation has a description to read: a
+// channel's or group's (basic or super), or a person's or bot's bio. A
+// channel's direct messages have none.
+function telHasAbout(peer) {
+  if (!peer || peer.direct) return false;
+  return ['channel', 'forum', 'group', 'user', 'bot'].indexOf(peer.kind) >= 0;
+}
+
+// telAboutWord is the key of a description's words ('info', 'loading' or
+// 'failed'): a person's is a bio.
+function telAboutWord(key, what) {
+  var kind = String(key).indexOf('user:') === 0 ? 'bio' : 'about';
+  return what === 'failed' ? 'tel_' + kind + '_failed' : 'tel_' + what + '_' + kind;
+}
+
+function telInfoURL(peer) {
+  return '/api/tel/members?kind=' + encodeURIComponent(peer.kind) +
+    '&id=' + encodeURIComponent(peer.id) + '&accessHash=' + encodeURIComponent(peer.accessHash || 0);
+}
+
+// telLoadMembers reads the open chat's member count and description from the
+// backend's cache. Never the link: telFetchMembers is the step that asks
+// Telegram.
+async function telLoadMembers() {
+  var peer = telState.peer;
+  if (!peer || peer.direct || (peer.kind !== 'channel' && peer.kind !== 'group' && peer.kind !== 'forum')) return;
+  var key = telPeerKey(peer);
+  try {
+    var r = await telFetch(telInfoURL(peer));
+    if (telNoteInfo(key, r) && telPeerKey(telState.peer) === key) telRender();
+  } catch (e) { }
+}
+window.telLoadMembers = telLoadMembers;
+
+// telInfoFlight is the full-info read in flight per conversation, so the
+// chat's step and its info sheet share one call.
+var telInfoFlight = {};
+
+function telAskInfo(key, peer, about, signal) {
+  if (telInfoFlight[key]) return telInfoFlight[key];
+  var p = telCallQuiet('/api/tel/members', about ? { peer: peer, about: true } : { peer: peer }, signal);
+  telInfoFlight[key] = p;
+  var done = function () { if (telInfoFlight[key] === p) delete telInfoFlight[key]; };
+  p.then(done, done);
+  return p;
+}
+
+// telFetchMembers asks Telegram for a channel's member count when neither the
+// list row nor the day's cache has one: one round trip, drawn as a step of
+// opening the chat. The description comes in the same answer.
+async function telFetchMembers(key, peer) {
+  if (!telHasFullInfo(peer)) return;
+  await telLoadMembers();
+  // Moved on to another chat meanwhile: nobody is looking at this count.
+  if (telPeerKey(telState.peer) !== key) return;
+  if (peer.members || telState.membersFresh[key]) return;
+  telStepsMore(telState.stepNo + 1);
+  var r = await telBgOp('tel_loading_members', function () { return telAskInfo(key, peer, false); });
+  if (telNoteInfo(key, r)) {
+    if (telPeerKey(telState.peer) === key) telRender();
+    telPaintAbout(key);
+  }
+}
+
+// telAboutHTML is the description (or bio) part of the info sheet: the text
+// as last read -- an old one too, when a new read fails -- and whether it is
+// being read.
+function telAboutHTML(key) {
+  var a = telState.about[key], h = '';
+  if (a && a.text) {
+    h += '<div class="tel-profile-field"><div class="tel-profile-label" dir="auto">' + telEsc(telT(telAboutWord(key, 'info'))) + '</div>' +
+      '<div class="tel-profile-about" dir="auto">' + telEsc(telSafeText(a.text)) + '</div></div>';
+  }
+  if (telState.aboutBusy[key]) {
+    h += '<div class="tel-profile-note" dir="auto">' + telEsc(telT(telAboutWord(key, 'loading'))) + '</div>';
+  } else if (telState.aboutFailed[key] && !a) {
+    h += '<div class="tel-profile-note" dir="auto">' + telEsc(telT(telAboutWord(key, 'failed'))) + '</div>';
+  }
+  return h;
+}
+
+// telAboutShown says whether the info sheet open now is this conversation's.
+function telAboutShown(key) {
+  var el = document.getElementById('telProfileAbout');
+  return !!el && el.getAttribute('data-key') === key;
+}
+
+function telPaintAbout(key) {
+  if (!telAboutShown(key)) return;
+  var el = document.getElementById('telProfileAbout');
+  el.innerHTML = telAboutHTML(key);
+}
+
+// telAboutCtl cancels the description read in flight for an info sheet.
+var telAboutCtl = null;
+
+function telAboutAbort() {
+  if (telAboutCtl) {
+    try { telAboutCtl.abort(); } catch (e) { }
+    telAboutCtl = null;
+  }
+}
+
+// telProfileAbout brings the open info sheet's description or bio up to
+// date: from the backend's cache, or -- when today's read has none -- one
+// call to Telegram, which for a channel brings the member count with it. A failed read leaves the
+// old text on screen. Closing the sheet before the call starts cancels it.
+async function telProfileAbout(key, peer) {
+  if (!telHasAbout(peer) || telState.aboutBusy[key]) return;
+  try {
+    if (telNoteInfo(key, await telFetch(telInfoURL(peer)))) {
+      if (telPeerKey(telState.peer) === key) telRender();
+      telPaintAbout(key);
+    }
+  } catch (e) { }
+  var a = telState.about[key];
+  if (a && a.fresh) return;
+  if (!telAboutShown(key)) return;
+  telState.aboutBusy[key] = true;
+  delete telState.aboutFailed[key];
+  telPaintAbout(key);
+  var r = null, skipped = false;
+  try {
+    // One tunnel: wait out whatever runs now. The chat's own step may be the
+    // one running, and bring the description itself.
+    for (var i = 0; i < 4; i++) {
+      await telWhenIdle();
+      if (!telAboutShown(key)) { skipped = true; break; }
+      a = telState.about[key];
+      if (a && a.fresh) { skipped = true; break; }
+      if (telState.busy || telState.bg) continue;
+      var ctl = new AbortController();
+      r = await telBgOp(telAboutWord(key, 'loading'), function () {
+        telAboutCtl = ctl;
+        return telAskInfo(key, peer, true, ctl.signal);
+      });
+      if (telAboutCtl === ctl) telAboutCtl = null;
+      // Gave way to something the user did: not a failure.
+      if (ctl.signal.aborted) skipped = true;
+      break;
+    }
+  } finally {
+    telState.aboutBusy[key] = false;
+  }
+  if (r) {
+    if (telNoteInfo(key, r) && telPeerKey(telState.peer) === key) telRender();
+  } else if (!skipped) {
+    telState.aboutFailed[key] = true;
+  }
+  telPaintAbout(key);
+}
+window.telProfileAbout = telProfileAbout;
 
 // ----- the conversation list -----
 
@@ -3116,18 +3513,26 @@ window.telJoinInvite = telJoinInvite;
 
 // telOpenByUsername resolves @name and opens that conversation here.
 async function telOpenByUsername(user, msgId) {
+  var opened = null;
+  await telWhenIdle();
   await telOp('tel_working', async function () {
     var r = await telCall('/api/tel/resolve', { username: user }, 'tel_err_username');
     if (!r || !r.peer) return;
     var key = telPeerKey(r.peer);
+    opened = { key: key, peer: r.peer };
     if (!telDialogFor(key)) {
-      // A row to come back to. Not a subscription: the list is ours, and
+      // A row to come back to, placed by its newest message's time once the
+      // history lands. Not a subscription: the list is ours, and
       // Telegram is not told anything by this.
       // visiting: opened by name or through a link, not subscribed to. The
       // join offer hangs off this, so it only appears where joining means
       // something.
-      telState.dialogs.unshift({ peer: r.peer, unread: 0, topMsg: 0, preview: '', visiting: true });
+      telState.dialogs.unshift({ peer: r.peer, unread: 0, topMsg: 0, preview: '', visiting: true, visitedAt: Date.now() });
+    } else {
+      var seen = telDialogFor(key);
+      if (seen.visiting) seen.visitedAt = Date.now();
     }
+    telSortDialogs();
     var th = telEnterThread(key, r.peer);
     var h = await telCall(telHistoryQuery(r.peer, { limit: TEL_HISTORY_PAGE }));
     th.fetched = true;
@@ -3138,6 +3543,9 @@ async function telOpenByUsername(user, msgId) {
     if (msgId) telState.jumpTo = msgId;
   });
   telRender();
+  // Opened inline, so the member-count step of telOpenPeer runs here: after
+  // the operation, which holds the link it needs.
+  if (opened && telPeerKey(telState.peer) === opened.key) await telFetchMembers(opened.key, opened.peer);
 }
 window.telOpenByUsername = telOpenByUsername;
 
@@ -3596,16 +4004,15 @@ function telRenderPane() {
   var html = '<div class="tel-topbar tel-thread-bar">' +
     '<button class="tel-back" onclick="telBackToList()" aria-label="' +
     telAttrQ(telT('tel_back')) + '">' + icon('arrowLeft') + '</button>' +
-    '<div class="tel-topbar-title">' + telAvatar(peer.title, 34, peer.thumb) +
+    // Tap the name for its info, as in the messenger and in Telegram.
+    '<div class="tel-topbar-title tel-topbar-tap" role="button" tabindex="0" aria-label="' +
+    telAttrQ(telT('tel_info')) + '" onclick="telPeerProfile()">' + telAvatar(peer.title, 34, peer.thumb) +
     '<span class="tel-thread-meta"><span class="tel-title" dir="auto">' +
     telFlag(telEsc(peer.title || peer.username || '')) + '</span>' +
-    '<span class="tel-thread-sub" dir="auto">' + telEsc(telT(peer.direct ? 'tel_direct_sub' : 'tel_kind_' + peer.kind)) +
-    (peer.username ? ' · @' + telEsc(peer.username) : '') + '</span></span></div>' +
-    telSearchBtnHTML('thread') + telCountdownHTML() +
-    '<button class="tel-icon-btn' + ((telState.busy || telState.bg) ? ' spinning' : '') + '"' +
-    (telState.busy ? ' disabled' : '') + ' title="' + telAttrQ(telT('tel_refresh')) +
-    '" aria-label="' + telAttrQ(telT('tel_refresh')) + '"' + TEL_KEEP_FOCUS + ' onclick="telRefreshNow(\'thread\')">' +
-    icon('refresh') + '</button>' +
+    '<span class="tel-thread-sub" dir="' + telUIDir() + '">' + telThreadSub(peer) + '</span></span></div>' +
+    // Search is in ⋮, and the countdown is the refresh button: on a phone
+    // the line under the name needs the room.
+    telRefreshBtnHTML('thread') +
     '<button class="tel-icon-btn" title="' + telAttrQ(telT('tel_menu')) +
     '" aria-label="' + telAttrQ(telT('tel_menu')) + '" onclick="telThreadMenu()">' +
     icon('more') + '</button></div>';
@@ -4079,6 +4486,8 @@ function telAdAbort() {
   if (telAdCtl) {
     try { telAdCtl.abort(); } catch (e) { }
     telAdCtl = null;
+    telState.adBusy = false;
+    telPaintProgress();
   }
 }
 
@@ -4087,11 +4496,18 @@ async function telLoadAds(key, peer) {
   telAdAbort();
   var ctl = new AbortController();
   telAdCtl = ctl;
+  // Drawn on the strip like any round trip; telAdAbort takes it down.
+  telState.adBusy = true;
+  telPaintProgress();
   var r = null;
   try {
     r = await telFetch('/api/tel/sponsored', Object.assign(telPost({ peer: peer }), { signal: ctl.signal }));
   } catch (e) { r = null; }
-  if (telAdCtl === ctl) telAdCtl = null;
+  if (telAdCtl === ctl) {
+    telAdCtl = null;
+    telState.adBusy = false;
+    telPaintProgress();
+  }
   if (!r || !r.ok || telPeerKey(telState.peer) !== key) return;
   telThread(key).ads = r.ads || [];
   telRender();
@@ -4377,6 +4793,9 @@ function telThreadMenu() {
   if (!peer) return;
   var key = telPeerKey(peer);
   var items = telSheetItem('refresh', telT('tel_refresh'), 'telCloseSheet();telThreadFetchNew()');
+  // Search lives here rather than in the header, which a phone needs for the
+  // name and the line under it.
+  items += telSheetItem('magnifier', telT('tel_search'), 'telCloseSheet();telToggleSearch(\'thread\')');
   items += telSheetItem('clock', telT('tel_load_older'), 'telCloseSheet();telThreadFetchOlder()');
   // Mute belongs here as much as in the list: Telegram puts it in the open
   // conversation's own menu, which is where someone reading a noisy channel
@@ -4411,6 +4830,58 @@ function telThreadMenu() {
   telSheet(items);
 }
 window.telThreadMenu = telThreadMenu;
+
+// telPeerProfile is the open chat's info: picture, name, what it is and how
+// many are in it, every username it holds, a channel's description or a
+// person's bio, and what can be done with it. Only the description may cost a
+// call (telProfileAbout, at most once a day per chat); the rest came with the conversation. The ⋮
+// menu keeps its items too.
+function telPeerProfile() {
+  var peer = telState.peer;
+  if (!peer) return;
+  var key = telPeerKey(peer);
+  var d = telDialogFor(key);
+  var what = peer.direct ? telT('tel_direct_sub') : (telMembersLine(peer) || telT('tel_kind_' + peer.kind));
+  var h = '<div class="tel-invite tel-profile">' + telAvatar(peer.title, 64, peer.thumb) +
+    '<div class="tel-invite-title" dir="auto">' + telEsc(telSafeText(peer.title || peer.username || '')) + '</div>' +
+    '<div class="tel-invite-sub" dir="auto">' + telEsc(what) + '</div></div>';
+  if (peer.username) {
+    // Each one copies on a tap. Left-to-right whatever the UI language.
+    var un = function (u) {
+      return '<button class="tel-profile-un" dir="ltr" onclick="telCopy(\'' + jsStr('@' + u) + '\')">@' + telEsc(u) + '</button>';
+    };
+    h += '<div class="tel-profile-field"><div class="tel-profile-label" dir="auto">' + telEsc(telT('tel_info_username')) + '</div>' +
+      un(peer.username);
+    if (peer.usernames && peer.usernames.length) {
+      h += '<div class="tel-profile-also" dir="auto">' + telEsc(telT('tel_info_also')) + ' ' +
+        peer.usernames.map(un).join('<span class="tel-profile-sep">' + (telUIDir() === 'rtl' ? '، ' : ', ') + '</span>') + '</div>';
+    }
+    h += '</div>';
+  }
+  if (telHasAbout(peer)) {
+    h += '<div id="telProfileAbout" data-key="' + telAttrQ(key) + '">' + telAboutHTML(key) + '</div>';
+  }
+  if (d && d.visiting && (peer.kind === 'channel' || peer.kind === 'forum')) {
+    h += telSheetItem('success', telT('tel_join'), 'telCloseSheet();telJoinChannel(\'' + jsStr(key) + '\')');
+  }
+  // Not a member yet: Join is all there is, as in Telegram.
+  if (d && !d.visiting) {
+    h += telSheetItem(d.muted ? 'bell' : 'bellOff', telT(d.muted ? 'tel_unmute' : 'tel_mute'),
+      'telCloseSheet();telToggleMute(\'' + jsStr(key) + '\')');
+  }
+  if (peer.kind === 'user' || peer.kind === 'bot') {
+    var bl = telIsBlocked(peer);
+    h += telSheetItem(bl ? 'success' : 'close', telT(bl ? 'tel_unblock' : 'tel_block'), 'telCloseSheet();telToggleBlock()');
+  }
+  if (d && !d.visiting) {
+    var isChannel = peer.kind === 'channel' || peer.kind === 'forum';
+    h += '<button class="tel-sheet-item tel-sheet-danger" onclick="telDeleteChat(\'' + jsStr(key) + '\')">' +
+      icon('delete') + ' <span dir="auto">' + telEsc(telT(isChannel ? 'tel_leave' : 'tel_delete')) + '</span></button>';
+  }
+  telSheet(h);
+  if (telHasAbout(peer)) telProfileAbout(key, peer);
+}
+window.telPeerProfile = telPeerProfile;
 
 // ----------------------------------------------------- report and block -----
 
